@@ -218,6 +218,49 @@ describe('SqliteStore', () => {
       // document_created + 3 messages = 4 events, all past cursor 0
       expect(inbox[0]?.newCount).toBe(4);
     });
+
+    it("does not surface the requester's own sends in their own inbox", async () => {
+      await store.createDocument('a', 'host');
+      await store.appendMessage('a', 'host', 'hello from host');
+      // host's inbox should NOT see their own message
+      const hostInbox = await store.inboxSummary('host');
+      expect(hostInbox.find((e) => e.documentName === 'a')).toBeUndefined();
+      // peer's inbox should see it
+      const peerInbox = await store.inboxSummary('peer');
+      expect(peerInbox.find((e) => e.documentName === 'a')?.newCount).toBeGreaterThan(0);
+    });
+
+    it("preview reflects the peer's event, not the requester's own latest send", async () => {
+      await store.createDocument('a', 'host');
+      await store.appendMessage('a', 'peer', 'peer message');
+      await store.appendMessage('a', 'host', 'host self-send AFTER peer'); // lexically latest
+      const hostInbox = await store.inboxSummary('host');
+      const a = hostInbox.find((e) => e.documentName === 'a');
+      // Count is 1 (the peer event), not 2 — the self-send is filtered.
+      expect(a?.newCount).toBe(1);
+      // Preview is the peer's message, not the host's self-send (which is lexically later).
+      expect(a?.preview).toContain('peer message');
+      expect(a?.lastFrom).toBe('peer');
+    });
+
+    it("does not surface the requester's own proposed artifacts", async () => {
+      await store.createDocument('a', 'host');
+      await store.proposeSchema('a', 'User', { type: 'object' }, 'host');
+      const hostInbox = await store.inboxSummary('host');
+      expect(hostInbox.find((e) => e.documentName === 'a')).toBeUndefined();
+      const peerInbox = await store.inboxSummary('peer');
+      expect(peerInbox.find((e) => e.documentName === 'a')?.newCount).toBeGreaterThan(0);
+    });
+
+    it("does not surface the requester's own document_created event (by-field author)", async () => {
+      await store.createDocument('a', 'host');
+      // Immediately after host creates the doc, host's inbox shouldn't list it.
+      const hostInbox = await store.inboxSummary('host');
+      expect(hostInbox.find((e) => e.documentName === 'a')).toBeUndefined();
+      // But for any other identity, the document_created event is fresh peer activity.
+      const peerInbox = await store.inboxSummary('peer');
+      expect(peerInbox.find((e) => e.documentName === 'a')?.newCount).toBe(1);
+    });
   });
 
   describe('endpoint artifact lifecycle', () => {

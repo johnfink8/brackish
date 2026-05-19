@@ -181,12 +181,16 @@ async function main(): Promise<void> {
   console.error(`harness: server-side \`brackish install --local --yes --permission\``);
   installLocalSkill(brackishBin, serverDir, serverEnv);
 
-  console.error(`harness: round 1 — server Claude (/brackish invite ${PEER_NAME})`);
+  // Inline the scope-Q answers in the prompt — `claude -p` has no interactive AskUserQuestion
+  // surface, so the skill's Step 0 must skip cleanly when the human's invocation already
+  // supplies them. Mirrors real-world usage ("/brackish invite mac2 — we're negotiating X").
+  const serverPrompt = `/brackish invite ${PEER_NAME} — scope: a sample API; document name: validation; peer is on a different machine.`;
+  console.error(`harness: round 1 — server Claude (${serverPrompt})`);
   const t0 = Date.now();
   const serverTurn = await runClaude({
     cwd: serverDir,
     env: serverEnv,
-    prompt: `/brackish invite ${PEER_NAME}`,
+    prompt: serverPrompt,
     budgetUsd: SERVER_BUDGET_USD,
     transcriptPath: join(transcriptDir, 'server.json'),
   });

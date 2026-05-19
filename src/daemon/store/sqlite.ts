@@ -1130,6 +1130,10 @@ export class SqliteStore implements Store {
   // --- inbox ---
 
   async inboxSummary(identity: Identity): Promise<InboxEntry[]> {
+    // Excludes self-authored events: an event's author lives in JSON data — `from` for
+    // message/artifact_* events, `by` for document_created. SQLite `IS NOT` is null-safe, so an
+    // event with neither field (shouldn't happen given EventSchema) passes the filter and is
+    // counted as peer activity — the conservative default.
     const rows = this.db
       .prepare<
         { identity: string },
@@ -1143,6 +1147,10 @@ export class SqliteStore implements Store {
                         WHERE identity = @identity AND document_name = t.name),
                      0
                    )
+                   AND COALESCE(
+                     json_extract(e.data, '$.from'),
+                     json_extract(e.data, '$.by')
+                   ) IS NOT @identity
                 ) AS new_count,
                 COALESCE(
                   (SELECT last_seen FROM cursors
@@ -1156,10 +1164,14 @@ export class SqliteStore implements Store {
     for (const r of rows) {
       if (r.new_count <= 0) continue;
       const lastRow = this.db
-        .prepare<[string], EventRow>(
-          'SELECT * FROM events WHERE document_name = ? ORDER BY id DESC LIMIT 1',
+        .prepare<[string, number, string], EventRow>(
+          `SELECT * FROM events
+             WHERE document_name = ?
+               AND id > ?
+               AND COALESCE(json_extract(data, '$.from'), json_extract(data, '$.by')) IS NOT ?
+             ORDER BY id DESC LIMIT 1`,
         )
-        .get(r.document_name);
+        .get(r.document_name, r.last_seen, identity);
       if (!lastRow) continue;
       const lastEvent = this.rowToEvent(lastRow);
       entries.push({

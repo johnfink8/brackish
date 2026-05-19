@@ -2,6 +2,7 @@
 
 import type { Command } from 'commander';
 import { stringify as yamlStringify } from 'yaml';
+import { acceptEndpoints, type EndpointTarget } from '../client/batch.js';
 import { lintEndpointSpec } from '../lib/lint.js';
 import {
   type ConventionArtifact,
@@ -20,6 +21,7 @@ import {
   emitDiff,
   emitJson,
   emitRenderedDiff,
+  errExit,
   fetchOrFallback,
   finalizeLint,
   parseConcurrencyOpts,
@@ -156,24 +158,89 @@ export function register(program: Command): void {
     );
 
   endpoint
-    .command('accept <doc> <method> <path>')
-    .description('accept the latest proposed version (or --version N)')
-    .option('--version <n>')
+    .command('accept <doc> [method] [path]')
+    .description(
+      'accept one endpoint (positional <method> <path>) or many via repeated --target METHOD:PATH. Multi-target form stops on first failure with what-succeeded/remaining summary.',
+    )
+    .option('--version <n>', 'pin a specific version (only valid with a single target)')
+    .option(
+      '--target <method:path>',
+      'METHOD:PATH endpoint identifier (repeatable for batch accept)',
+      collect,
+      [],
+    )
     .option('--json')
     .action(
       async (
         doc: string,
-        methodRaw: string,
-        path: string,
-        opts: { version?: string; json?: boolean },
+        methodRaw: string | undefined,
+        path: string | undefined,
+        opts: { version?: string; target: string[]; json?: boolean },
       ) =>
         withClient(async (client) => {
-          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
-          const versionN =
-            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-          const v = await client.acceptEndpoint(doc, method, path, versionN);
-          if (opts.json) emitJson(v);
-          else emit(`accepted ${describeOperation(v)}`);
+          const usingTargets = opts.target.length > 0;
+          const usingPositional = methodRaw !== undefined || path !== undefined;
+          if (usingTargets && usingPositional) {
+            errExit(2, 'endpoint accept: pass either <method> <path> OR --target, not both');
+          }
+          if (!usingTargets && (methodRaw === undefined || path === undefined)) {
+            errExit(2, 'endpoint accept: provide <method> <path> or --target METHOD:PATH ...');
+          }
+
+          // Single-target form (positional) — preserves the existing text/JSON shape.
+          if (usingPositional && methodRaw !== undefined && path !== undefined) {
+            const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+            const versionN =
+              opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+            const v = await client.acceptEndpoint(doc, method, path, versionN);
+            if (opts.json) emitJson(v);
+            else emit(`accepted ${describeOperation(v)}`);
+            return;
+          }
+
+          // Batch form: parse each --target into {method, path}.
+          if (opts.version !== undefined) {
+            errExit(
+              2,
+              '--version requires a single positional target (different endpoints have different version chains)',
+            );
+          }
+          const targets: EndpointTarget[] = opts.target.map((raw) => {
+            const colon = raw.indexOf(':');
+            if (colon < 1) {
+              errExit(2, `--target "${raw}": expected METHOD:PATH (e.g. GET:/users/{id})`);
+            }
+            const method = HttpMethodSchema.parse(raw.slice(0, colon).toLowerCase());
+            return { method, path: raw.slice(colon + 1) };
+          });
+
+          // Single --target also preserves the old shape.
+          if (targets.length === 1) {
+            const t = targets[0];
+            if (!t) errExit(2, 'endpoint accept: empty --target');
+            const v = await client.acceptEndpoint(doc, t.method, t.path);
+            if (opts.json) emitJson(v);
+            else emit(`accepted ${describeOperation(v)}`);
+            return;
+          }
+
+          const result = await acceptEndpoints(client, doc, targets);
+          if (opts.json) {
+            emitJson(result);
+            if (result.failed) process.exit(1);
+            return;
+          }
+          for (const v of result.accepted) emit(`accepted ${describeOperation(v)}`);
+          if (result.failed) {
+            const fmt = (t: EndpointTarget): string => `${t.method.toUpperCase()} ${t.path}`;
+            process.stderr.write(
+              `error at "${fmt(result.failed.target)}": ${result.failed.code ?? 'error'} (${result.failed.message})\n` +
+                (result.remaining.length > 0
+                  ? `remaining (unaccepted): ${result.remaining.map(fmt).join(', ')}\n`
+                  : ''),
+            );
+            process.exit(1);
+          }
         }),
     );
 

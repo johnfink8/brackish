@@ -14,6 +14,7 @@ import {
   type DocumentName,
   type HttpMethod,
   JSONSchemaSchema,
+  type OperationArtifact,
   OperationSpecSchema,
   type SchemaArtifact,
   type SchemaName,
@@ -49,6 +50,42 @@ export async function acceptSchemas(
         accepted,
         failed: { name: n, code, message },
         remaining: names.slice(i + 1),
+      };
+    }
+  }
+  return { accepted, failed: null, remaining: [] };
+}
+
+export type EndpointTarget = { method: HttpMethod; path: string };
+
+export type EndpointBatchAcceptResult = {
+  accepted: OperationArtifact[];
+  failed: { target: EndpointTarget; code: string | null; message: string } | null;
+  /** Targets that were never attempted because an earlier accept failed. */
+  remaining: EndpointTarget[];
+};
+
+/** Sequentially accept endpoints in the given order. On the first failure, stop. Mirrors
+ *  `acceptSchemas`; the only structural difference is `(method, path)` per target. */
+export async function acceptEndpoints(
+  client: BrackishClient,
+  document: DocumentName,
+  targets: EndpointTarget[],
+): Promise<EndpointBatchAcceptResult> {
+  const accepted: OperationArtifact[] = [];
+  for (let i = 0; i < targets.length; i++) {
+    const t = targets[i];
+    if (t === undefined) continue;
+    try {
+      const v = await client.acceptEndpoint(document, t.method, t.path);
+      accepted.push(v);
+    } catch (e) {
+      const code = e instanceof ClientError ? e.code : null;
+      const message = e instanceof Error ? e.message : String(e);
+      return {
+        accepted,
+        failed: { target: t, code, message },
+        remaining: targets.slice(i + 1),
       };
     }
   }
