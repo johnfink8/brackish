@@ -1477,8 +1477,20 @@ export function buildProgram(): Command {
 
         process.stderr.write(`\nbrackish install — done:\n${summary.join('\n')}\n`);
         if (doSkill || doHook || doPermission) {
+          const yourHostname = sanitizeIdentity(hostname());
           process.stderr.write(
-            '\nNext: `brackish up` to start the daemon (writes a default client config if needed).\n',
+            [
+              '',
+              'Next steps:',
+              '  1. `brackish up`                              — start the daemon (writes a default client config if needed)',
+              '  2. In Claude Code, type a `/brackish` slash command:',
+              `       /brackish invite <peer-name>             — bootstrap a cross-machine pair (server side)`,
+              `       /brackish connect <line from peer>       — redeem an invite (client side)`,
+              `     Or just say "let's negotiate the X API" and Claude picks it up from the skill.`,
+              '',
+              `  Your identity will default to "${yourHostname}" — pass --identity to override.`,
+              '',
+            ].join('\n'),
           );
         }
       },
