@@ -64,6 +64,28 @@ brackish artifact get <doc> <name> --proposed # latest in-flight
 brackish artifact get <doc> <name> --version 3
 ```
 
+## Demo
+
+A pre-built sample document is built into the CLI. After `brackish serve` is up:
+
+```sh
+brackish demo                                # seeds a `chatter-api` document (use a different name if it exists)
+brackish visualize chatter-api --format markdown | less
+# or with a TCP bind: open http://127.0.0.1:<port>/ui/chatter-api in a browser
+```
+
+The demo is a "Hello-world realtime chat" API negotiated between two identities (`alice` proposes, `bob` accepts/rejects). It exercises everything brackish does:
+
+- **Convention re-negotiation** — v1 bearer-only; v2 adds a cookie-session scheme once an HTML page enters the picture.
+- **Schema rejection cycles** — `User` v1 (snake_case) gets rejected, v2 (camelCase) accepted; `Message` v1 (`from: string`) gets rejected, v2 (`from: $ref User`) accepted.
+- **Endpoint rejection cycles** — `POST /messages` v1 (`200 OK`) rejected, v2 (`201 Created`) accepted; `GET /messages/stream` v1 (weird `tail: boolean`) rejected, v2 (`since` cursor) accepted.
+- **Multiple content types** — `application/json`, `application/octet-stream` (file upload + download), `text/event-stream` (SSE), `text/html` (the chat page).
+- **WebSocket handshake** documented as `GET /ws` with `x-brackish-protocol: websocket` plus `x-brackish-frames` enumerating both directions.
+- **Brackish extensions** — `x-brackish-timing`, `x-brackish-side-effects` annotate the operations.
+- **Chat transcript** — `alice` and `bob` send rationale messages alongside the artifact moves.
+
+The seed is implemented in `src/demo.ts` and uses the socket transport's peer-trust to impersonate both identities from one process. Reading that file is a good way to see the typed client surface in action.
+
 ## The skill + hook
 
 `brackish install` puts a [Claude skill](https://docs.claude.com/en/docs/claude-code/skills) at `~/.claude/skills/brackish/` so your Claudes know when to reach for brackish. It also offers to wire a `UserPromptSubmit` hook into `~/.claude/settings.json` that calls `brackish inbox --quiet-if-empty` at the start of every turn — when there's pending traffic, it's auto-surfaced into Claude's context. Reversible with `brackish uninstall`.

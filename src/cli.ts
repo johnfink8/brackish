@@ -22,6 +22,7 @@ import {
   saveClientConfig,
   saveServerConfig,
 } from './config.js';
+import { seedChatterDemo } from './demo.js';
 import {
   defaultSkillDest,
   hookSnippet,
@@ -766,6 +767,50 @@ export function buildProgram(): Command {
         void assembleDocument;
       }),
     );
+
+  // --- demo (seed a sample negotiated document for the browser UI demo) ---
+
+  program
+    .command('demo [doc]')
+    .description(
+      'seed a sample chat-API negotiation (multi-content-type, with rejections + a WS endpoint) for the /ui browser demo. Uses the socket transport to impersonate two identities, so run after `brackish serve` is up.',
+    )
+    .option('--alice <name>', 'identity for the proposing side', 'alice')
+    .option('--bob <name>', 'identity for the accepting/rejecting side', 'bob')
+    .action(async (docArg: string | undefined, opts: { alice: string; bob: string }) => {
+      const cfg = loadClientConfig();
+      if (cfg.socketPath === undefined) {
+        errExit(
+          2,
+          'demo: the seed needs the socket transport (peer-trust) to impersonate two identities. Configure --socket-path via `brackish init` or set BRACKISH_SOCKET.',
+        );
+      }
+      const docName = docArg ?? 'chatter-api';
+      IdentitySchema.parse(opts.alice);
+      IdentitySchema.parse(opts.bob);
+      try {
+        await seedChatterDemo({
+          socketPath: cfg.socketPath,
+          documentName: docName,
+          alice: opts.alice,
+          bob: opts.bob,
+          onStep: (m) => process.stderr.write(`  ${m}\n`),
+        });
+      } catch (err) {
+        if (err instanceof ClientError && err.code === 'document_exists') {
+          errExit(
+            1,
+            `demo: document "${docName}" already exists. Pick a different name (e.g. \`brackish demo my-chatter\`) or delete the existing one first.`,
+          );
+        }
+        throw err;
+      }
+      process.stderr.write(
+        `\ndone. Look at the result:\n` +
+          `  brackish visualize ${docName} --format markdown | less\n` +
+          `  open http://127.0.0.1:<port>/ui/${docName}   (if brackish serve --bind is up)\n`,
+      );
+    });
 
   // --- install / uninstall / hook-snippet ---
 
