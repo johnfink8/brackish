@@ -19,7 +19,11 @@ function walk(path: string, before: unknown, after: unknown, out: JsonPatchOp[])
   if (deepEqual(before, after)) return;
 
   // Type mismatch or non-object on either side → replace whole subtree
-  if (!isObject(before) || !isObject(after) || Array.isArray(before) !== Array.isArray(after)) {
+  if (
+    !isArrayOrPlainObject(before) ||
+    !isArrayOrPlainObject(after) ||
+    Array.isArray(before) !== Array.isArray(after)
+  ) {
     if (before === undefined) {
       out.push({ op: 'add', path, value: after });
     } else if (after === undefined) {
@@ -41,24 +45,29 @@ function walk(path: string, before: unknown, after: unknown, out: JsonPatchOp[])
     return;
   }
 
-  // Both are non-array objects → diff by key
-  const bObj = before as Record<string, unknown>;
-  const aObj = after as Record<string, unknown>;
-  const keys = new Set<string>([...Object.keys(bObj), ...Object.keys(aObj)]);
+  // Both are non-array objects → diff by key. The guards above narrowed before+after to plain
+  // records; iterate by union of keys.
+  if (!isPlainObject(before) || !isPlainObject(after)) return;
+  const keys = new Set<string>([...Object.keys(before), ...Object.keys(after)]);
   for (const key of keys) {
     const sub = `${path}/${escapePointerSegment(key)}`;
-    walk(sub, bObj[key], aObj[key], out);
+    walk(sub, before[key], after[key], out);
   }
 }
 
-function isObject(v: unknown): v is object {
+/** Plain object guard: typeof 'object' is true for arrays + null, so we filter both. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function isArrayOrPlainObject(v: unknown): v is Record<string, unknown> | readonly unknown[] {
   return typeof v === 'object' && v !== null;
 }
 
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (typeof a !== typeof b) return false;
-  if (!isObject(a) || !isObject(b)) return a === b;
+  if (!isArrayOrPlainObject(a) || !isArrayOrPlainObject(b)) return a === b;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false;
@@ -67,13 +76,12 @@ function deepEqual(a: unknown, b: unknown): boolean {
     }
     return true;
   }
-  const aObj = a as Record<string, unknown>;
-  const bObj = b as Record<string, unknown>;
-  const aKeys = Object.keys(aObj);
-  const bKeys = Object.keys(bObj);
+  if (!isPlainObject(a) || !isPlainObject(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
   if (aKeys.length !== bKeys.length) return false;
   for (const k of aKeys) {
-    if (!deepEqual(aObj[k], bObj[k])) return false;
+    if (!deepEqual(a[k], b[k])) return false;
   }
   return true;
 }

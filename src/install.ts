@@ -21,6 +21,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 
 // --- paths ---
 
@@ -94,31 +95,49 @@ export const BRACKISH_PERMISSION_PATTERN = 'Bash(brackish *)';
 // settings.json shape per https://code.claude.com/docs/en/hooks. Each event maps to an array of
 // matcher groups, each group has an inner `hooks` array of actual handlers. The wrapper is
 // required even for events like UserPromptSubmit that ignore the matcher value.
-type HookHandler = { type?: string; command?: string; [k: string]: unknown };
-type HookMatcherGroup = { matcher?: string; hooks?: HookHandler[]; [k: string]: unknown };
+//
+// We do NOT own settings.json end-to-end — Claude Code writes parts of it. So the read path
+// is a genuine boundary: zod-validate at the parse, treat the result as a real type downstream.
+const HookHandlerSchema = z
+  .object({ type: z.string().optional(), command: z.string().optional() })
+  .passthrough();
+const HookMatcherGroupSchema = z
+  .object({ matcher: z.string().optional(), hooks: z.array(HookHandlerSchema).optional() })
+  .passthrough();
+type HookHandler = z.infer<typeof HookHandlerSchema>;
+type HookMatcherGroup = z.infer<typeof HookMatcherGroupSchema>;
 
-type ParsedSettings = {
-  hooks?: {
-    // Tolerate a bare-handler entry on read; only the wrapped form satisfies the schema on write.
-    UserPromptSubmit?: Array<HookMatcherGroup | HookHandler>;
-    [k: string]: unknown;
-  };
-  permissions?: {
-    allow?: string[];
-    deny?: string[];
-    ask?: string[];
-    [k: string]: unknown;
-  };
-  [k: string]: unknown;
-};
+// settings.json belongs to Claude Code, not brackish — we edit two narrow keys
+// (hooks.UserPromptSubmit and permissions.allow) and need to round-trip the rest unchanged.
+// The schema is loose at the keys we don't touch (`.passthrough()`); the structural checks in
+// installHook/installPermission validate the keys we do.
+const ParsedSettingsSchema = z
+  .object({
+    hooks: z
+      .object({
+        UserPromptSubmit: z.array(z.union([HookMatcherGroupSchema, HookHandlerSchema])).optional(),
+      })
+      .passthrough()
+      .optional(),
+    permissions: z
+      .object({
+        allow: z.array(z.string()).optional(),
+        deny: z.array(z.string()).optional(),
+        ask: z.array(z.string()).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+type ParsedSettings = z.infer<typeof ParsedSettingsSchema>;
 
 function parseSettings(raw: string): ParsedSettings {
-  return JSON.parse(raw) as ParsedSettings;
+  return ParsedSettingsSchema.parse(JSON.parse(raw));
 }
 
 /** True if `e` is a matcher-group wrapper (has a `hooks` array), false if it's a bare handler. */
 function isMatcherGroup(e: HookMatcherGroup | HookHandler): e is HookMatcherGroup {
-  return Array.isArray((e as HookMatcherGroup).hooks);
+  return 'hooks' in e && Array.isArray(e.hooks);
 }
 
 /** Flatten the (possibly mixed-shape) entry list into the handler commands. */

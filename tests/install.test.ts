@@ -208,7 +208,8 @@ describe('install: hook (settings.json merge)', () => {
     const settings = settingsJsonPath();
     mkdirSync(tmp, { recursive: true });
     writeFileSync(settings, JSON.stringify({ hooks: 'not-an-object' }));
-    expect(() => installHook(scriptPath)).toThrow(/refusing to edit/);
+    // Zod parse at the schema-validation step refuses; either message is acceptable as a refusal.
+    expect(() => installHook(scriptPath)).toThrow(/refusing to (edit|touch it)/);
   });
 });
 

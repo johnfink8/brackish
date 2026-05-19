@@ -7,34 +7,58 @@
 // odd things can slip through. Downstream consumers (Swagger UI, codegen tools) will catch
 // deeper errors. Our job is structural assembly.
 
-import type {
-  ConventionArtifact,
-  ConventionSpec,
-  HttpMethod,
-  JSONSchema,
-  OperationArtifact,
-  OperationSpec,
-  SchemaArtifact,
+import { z } from 'zod';
+import {
+  type ConventionArtifact,
+  type ConventionSpec,
+  type HttpMethod,
+  HttpMethodSchema,
+  type JSONSchema,
+  JSONSchemaSchema,
+  type OperationArtifact,
+  OperationSpecSchema,
+  type SchemaArtifact,
 } from './models.js';
 
-export type OpenAPIDocument = {
-  openapi: '3.1.0';
-  info: {
-    title: string;
-    version: string;
-    description?: string | undefined;
-    [extra: string]: unknown;
-  };
-  servers?: Array<{ url: string; description?: string | undefined; [extra: string]: unknown }>;
-  security?: Array<Record<string, string[]>>;
-  paths: Record<string, Record<string, OperationSpec>>;
-  components?: {
-    schemas?: Record<string, JSONSchema>;
-    securitySchemes?: Record<string, { type: string; [extra: string]: unknown }>;
-    [extra: string]: unknown;
-  };
-  [extra: string]: unknown;
-};
+// Loose zod schema matching the structural type below. `.passthrough()` everywhere so the
+// OpenAPI extension fields (x-brackish.*, vendor extensions on info/servers/etc.) round-trip
+// cleanly. Used at the client/server boundary on /documents/:name/openapi.json.
+export const OpenAPIDocumentSchema = z
+  .object({
+    openapi: z.literal('3.1.0'),
+    info: z
+      .object({
+        title: z.string(),
+        version: z.string(),
+        description: z.string().optional(),
+      })
+      .passthrough(),
+    servers: z
+      .array(
+        z
+          .object({
+            url: z.string(),
+            description: z.string().optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    security: z.array(z.record(z.string(), z.array(z.string()))).optional(),
+    // OpenAPI says a path item may contain any subset of HTTP methods. We keep the inner record
+    // string-keyed and validate method names via HttpMethodSchema in `listOperations`.
+    paths: z.record(z.string(), z.record(z.string(), OperationSpecSchema)),
+    components: z
+      .object({
+        schemas: z.record(z.string(), JSONSchemaSchema).optional(),
+        securitySchemes: z
+          .record(z.string(), z.object({ type: z.string() }).passthrough())
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type OpenAPIDocument = z.infer<typeof OpenAPIDocumentSchema>;
 
 export type AssembleInput = {
   /** Only accepted operations are included. */
@@ -68,13 +92,11 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
   // Hoist any extension fields the convention carries (`security`, `x-brackish`, etc.) to the
   // document root so codegen tools see them where OpenAPI specifies they live.
   if (conventionSpec) {
-    const passthrough = conventionSpec as Record<string, unknown>;
-    const security = passthrough.security;
-    if (Array.isArray(security) && security.length > 0) {
-      doc.security = security as Array<Record<string, string[]>>;
+    if (conventionSpec.security && conventionSpec.security.length > 0) {
+      doc.security = conventionSpec.security;
     }
-    for (const key of Object.keys(passthrough)) {
-      if (key.startsWith('x-')) doc[key] = passthrough[key];
+    for (const [key, value] of Object.entries(conventionSpec)) {
+      if (key.startsWith('x-')) doc[key] = value;
     }
   }
 
@@ -105,13 +127,12 @@ export function listOperations(
 ): Array<{ method: HttpMethod; path: string; summary?: string }> {
   const out: Array<{ method: HttpMethod; path: string; summary?: string }> = [];
   for (const [path, ops] of Object.entries(doc.paths)) {
-    for (const [method, spec] of Object.entries(ops)) {
+    for (const [methodKey, spec] of Object.entries(ops)) {
+      // doc.paths is built from the schema's z.record(HttpMethodSchema, …); the key narrows
+      // via the same schema so we don't reach for `as HttpMethod`.
+      const method = HttpMethodSchema.parse(methodKey);
       const sum: string | undefined = typeof spec.summary === 'string' ? spec.summary : undefined;
-      out.push(
-        sum !== undefined
-          ? { method: method as HttpMethod, path, summary: sum }
-          : { method: method as HttpMethod, path },
-      );
+      out.push(sum !== undefined ? { method, path, summary: sum } : { method, path });
     }
   }
   return out;

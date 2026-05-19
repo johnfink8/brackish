@@ -15,6 +15,7 @@
 
 import { randomBytes } from 'node:crypto';
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
+import { z } from 'zod';
 import { compactSummary, generatePatch } from '../diff.js';
 import {
   CONVENTION_KEY,
@@ -149,6 +150,17 @@ type InviteRow = {
 const now = (): string => new Date().toISOString();
 const newToken = (): string => randomBytes(32).toString('base64url');
 
+/** Typed JSON.parse — narrows `any` to `unknown` at the boundary so callers must zod-validate
+ *  before using the result. The data we read here was JSON.stringify'd by us on the way in,
+ *  but the column is still untrusted from the type system's perspective. */
+function parseJson(s: string): unknown {
+  return JSON.parse(s);
+}
+
+/** Schema for the JSON-stringified `events.data` column: always a plain object spread into the
+ *  outer Event envelope by rowToEvent. */
+const JsonObjectSchema = z.record(z.string(), z.unknown());
+
 export class SqliteStore implements Store {
   private readonly db: DatabaseType;
   private readonly notifier: EventNotifier;
@@ -169,12 +181,13 @@ export class SqliteStore implements Store {
   }
 
   private rowToEvent(row: EventRow): Event {
+    const dataObj = JsonObjectSchema.parse(parseJson(row.data));
     return EventSchema.parse({
       id: row.id,
       documentName: row.document_name,
       createdAt: row.created_at,
       kind: row.kind,
-      ...(JSON.parse(row.data) as Record<string, unknown>),
+      ...dataObj,
     });
   }
 
@@ -221,7 +234,7 @@ export class SqliteStore implements Store {
       documentName: row.document_name,
       method,
       path,
-      spec: JSON.parse(row.spec) as unknown,
+      spec: parseJson(row.spec),
       ...this.statusFieldsFromRow(row),
     });
   }
@@ -232,7 +245,7 @@ export class SqliteStore implements Store {
       kind: 'schema',
       documentName: row.document_name,
       name: row.identity_key,
-      spec: JSON.parse(row.spec) as unknown,
+      spec: parseJson(row.spec),
       ...this.statusFieldsFromRow(row),
     });
   }
@@ -242,7 +255,7 @@ export class SqliteStore implements Store {
     return ConventionArtifactSchema.parse({
       kind: 'convention',
       documentName: row.document_name,
-      spec: JSON.parse(row.spec) as unknown,
+      spec: parseJson(row.spec),
       ...this.statusFieldsFromRow(row),
     });
   }
@@ -330,7 +343,7 @@ export class SqliteStore implements Store {
       const version = prevVersion + 1;
       const delta =
         prev !== undefined
-          ? compactSummary(generatePatch(JSON.parse(prev.spec) as unknown, spec)) || '(no change)'
+          ? compactSummary(generatePatch(parseJson(prev.spec), spec)) || '(no change)'
           : null;
       const proposedAt = now();
       this.db
@@ -577,7 +590,7 @@ export class SqliteStore implements Store {
       .map((r) => {
         let spec: unknown = null;
         try {
-          spec = JSON.parse(r.spec);
+          spec = parseJson(r.spec);
         } catch {
           // Should never happen — spec was JSON.stringify'd on the way in.
         }
@@ -780,8 +793,15 @@ export class SqliteStore implements Store {
       let summary: string | null = null;
       if (accepted) {
         try {
-          const spec = JSON.parse(accepted.spec) as { summary?: unknown };
-          if (typeof spec.summary === 'string') summary = spec.summary;
+          const spec = parseJson(accepted.spec);
+          if (
+            typeof spec === 'object' &&
+            spec !== null &&
+            'summary' in spec &&
+            typeof spec.summary === 'string'
+          ) {
+            summary = spec.summary;
+          }
         } catch {
           /* ignore */
         }

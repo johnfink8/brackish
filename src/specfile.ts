@@ -3,20 +3,22 @@
 
 import { readFileSync } from 'node:fs';
 import { YAMLParseError, parse as yamlParse } from 'yaml';
+import type { z } from 'zod';
 
-/** Throws on parse failure. Existing `propose --file` path uses this; failures bubble through
- *  `withClient` as a generic 1-exit. Lint should prefer `parseSpecFile` for location-aware
- *  errors. */
-export function loadSpecFile(path: string): unknown {
+/** Read + parse a spec file (JSON or YAML) and validate it against a zod schema. Throws on
+ *  parse failure or schema mismatch — callers use this via `withClient` so the failure bubbles
+ *  through as a generic 1-exit. Lint should prefer `parseSpecFile` for location-aware errors. */
+export function loadSpecFile<T>(path: string, schema: z.ZodType<T>): T {
   const raw = readFileSync(path, 'utf8');
-  if (path.endsWith('.json')) return JSON.parse(raw);
-  return yamlParse(raw);
+  const data: unknown = path.endsWith('.json') ? JSON.parse(raw) : yamlParse(raw);
+  return schema.parse(data);
 }
 
-export type ParseResult = { ok: true; data: unknown } | { ok: false; message: string };
+export type ParseResult<T = unknown> = { ok: true; data: T } | { ok: false; message: string };
 
 /** Parse with location-aware errors. Returns an envelope so callers can present line/col instead
- *  of a generic stack trace. */
+ *  of a generic stack trace. Returns `unknown`; pair with a schema-aware caller (or the typed
+ *  `parseSpecFileAs` below) to narrow. */
 export function parseSpecFile(path: string): ParseResult {
   let raw: string;
   try {
@@ -26,7 +28,8 @@ export function parseSpecFile(path: string): ParseResult {
   }
   if (path.endsWith('.json')) {
     try {
-      return { ok: true, data: JSON.parse(raw) };
+      const data: unknown = JSON.parse(raw);
+      return { ok: true, data };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const posMatch = msg.match(/at position (\d+)/);
@@ -38,7 +41,8 @@ export function parseSpecFile(path: string): ParseResult {
     }
   }
   try {
-    return { ok: true, data: yamlParse(raw) };
+    const data: unknown = yamlParse(raw);
+    return { ok: true, data };
   } catch (e) {
     if (e instanceof YAMLParseError && e.linePos && e.linePos[0]) {
       const { line, col } = e.linePos[0];

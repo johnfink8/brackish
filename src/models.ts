@@ -170,6 +170,12 @@ export const ConventionSpecSchema = z
     info: InfoSchema,
     servers: z.array(ServerSchema).optional(),
     securitySchemes: z.record(z.string(), SecuritySchemeSchema).optional(),
+    // Document-level OpenAPI `security` requirement list. Lives in passthrough territory in the
+    // OpenAPI spec but we model it here so it round-trips through the type system.
+    security: z.array(z.record(z.string(), z.array(z.string()))).optional(),
+    // brackish-private extension namespace; not part of OpenAPI. `naming` ∈ {camelCase, snake_case}
+    // is the only field we read today; others round-trip through passthrough.
+    'x-brackish': z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 export type ConventionSpec = z.infer<typeof ConventionSpecSchema>;
@@ -486,6 +492,30 @@ export const DiffResponseSchema = z.object({
   patch: JsonPatchSchema,
 });
 export type DiffResponse = z.infer<typeof DiffResponseSchema>;
+
+// --- rationale (per-version history) ---
+
+export const RationaleEntrySchema = z.object({
+  version: z.number().int().positive(),
+  status: z.enum(['proposed', 'accepted', 'rejected']),
+  proposedBy: IdentitySchema,
+  proposedAt: z.string().datetime(),
+  acceptedBy: IdentitySchema.optional(),
+  acceptedAt: z.string().datetime().optional(),
+  rejectedBy: IdentitySchema.optional(),
+  rejectedAt: z.string().datetime().optional(),
+  rejectionReason: z.string().optional(),
+  delta: z.string().nullable(),
+  spec: z.unknown(),
+});
+export type RationaleEntryWire = z.infer<typeof RationaleEntrySchema>;
+
+export const RationaleResponseSchema = z.object({
+  endpoints: z.record(z.string(), z.array(RationaleEntrySchema)),
+  schemas: z.record(z.string(), z.array(RationaleEntrySchema)),
+  convention: z.array(RationaleEntrySchema),
+});
+export type RationaleResponse = z.infer<typeof RationaleResponseSchema>;
 
 // --- identity-key helpers ---
 

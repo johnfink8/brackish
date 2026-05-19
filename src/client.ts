@@ -5,7 +5,7 @@
 // TCP mode:    plain fetch; sends Authorization: Bearer <token>.
 
 import { Agent, type Response as UndiciResponse, fetch as undiciFetch } from 'undici';
-import type { z } from 'zod';
+import { z } from 'zod';
 import {
   type ConnectResponse,
   ConnectResponseSchema,
@@ -34,6 +34,8 @@ import {
   operationIdentityKey,
   type PartiesResponse,
   PartiesResponseSchema,
+  type RationaleResponse,
+  RationaleResponseSchema,
   type SchemaArtifact,
   SchemaArtifactSchema,
   type SchemaListResponse,
@@ -43,6 +45,7 @@ import {
   type WhoamiResponse,
   WhoamiResponseSchema,
 } from './models.js';
+import { type OpenAPIDocument, OpenAPIDocumentSchema } from './openapi.js';
 
 export class ClientError extends Error {
   constructor(
@@ -101,8 +104,7 @@ export class BrackishClient {
   // --- public + identity ---
 
   async healthz(): Promise<{ ok: boolean; version: string }> {
-    const res = await this.request('/healthz');
-    return unwrapJson(res) as Promise<{ ok: boolean; version: string }>;
+    return this.fetchAndParse('/healthz', HealthzResponseSchema);
   }
 
   whoami(): Promise<WhoamiResponse> {
@@ -427,20 +429,24 @@ export class BrackishClient {
   async getOpenApiYaml(document: DocumentName): Promise<string> {
     const res = await this.request(`/documents/${encodeURIComponent(document)}/openapi.yaml`);
     if (!res.ok) {
-      const body = (await res.json()) as { error?: string; code?: string };
+      const body = ErrorBodySchema.parse(await res.json());
       throw new ClientError(res.status, body.code ?? null, body.error ?? `HTTP ${res.status}`);
     }
     return res.text();
   }
 
-  async getOpenApiJson(document: DocumentName): Promise<unknown> {
-    const res = await this.request(`/documents/${encodeURIComponent(document)}/openapi.json`);
-    return okJson(res);
+  getOpenApiJson(document: DocumentName): Promise<OpenAPIDocument> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/openapi.json`,
+      OpenAPIDocumentSchema,
+    );
   }
 
-  async getRationaleJson(document: DocumentName): Promise<unknown> {
-    const res = await this.request(`/documents/${encodeURIComponent(document)}/rationale.json`);
-    return okJson(res);
+  getRationaleJson(document: DocumentName): Promise<RationaleResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/rationale.json`,
+      RationaleResponseSchema,
+    );
   }
 
   // --- parties, invites, connect ---
@@ -492,10 +498,12 @@ export class BrackishClient {
     init?: Parameters<RequestFn>[1],
   ): Promise<T> {
     const res = await this.request(path, init);
-    const body = (await okJson(res)) as Record<string, unknown>;
-    return schema.parse(body[field]);
+    const envelope = z.record(z.string(), z.unknown()).parse(await okJson(res));
+    return schema.parse(envelope[field]);
   }
 }
+
+const HealthzResponseSchema = z.object({ ok: z.boolean(), version: z.string() });
 
 // --- helpers ---
 
@@ -520,17 +528,20 @@ function jsonHeaders(extra: Record<string, string>, body: unknown): Record<strin
   return h;
 }
 
+const ErrorBodySchema = z
+  .object({
+    error: z.string().optional(),
+    code: z.string().optional(),
+  })
+  .passthrough();
+
 async function okJson(res: UndiciResponse): Promise<unknown> {
-  const body = await res.json();
+  const body: unknown = await res.json();
   if (!res.ok) {
-    const e = body as { error?: string; code?: string };
+    const e = ErrorBodySchema.parse(body);
     throw new ClientError(res.status, e.code ?? null, e.error ?? `HTTP ${res.status}`);
   }
   return body;
-}
-
-async function unwrapJson(res: UndiciResponse): Promise<unknown> {
-  return okJson(res);
 }
 
 /** Standalone bootstrap helper: trade an invite token for a persistent (identity, token) pair.

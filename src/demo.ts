@@ -12,12 +12,14 @@
 // Use the socket transport: peer-trust lets us impersonate both identities from one process.
 
 import { BrackishClient } from './client.js';
-import type {
-  ConventionSpec,
-  DocumentName,
-  Identity,
-  JSONSchema,
-  OperationSpec,
+import {
+  type ConventionSpec,
+  type DocumentName,
+  DocumentNameSchema,
+  type Identity,
+  IdentitySchema,
+  type JSONSchema,
+  type OperationSpec,
 } from './models.js';
 
 export type SeedOptions = {
@@ -29,9 +31,9 @@ export type SeedOptions = {
 };
 
 export async function seedChatterDemo(opts: SeedOptions): Promise<{ documentName: DocumentName }> {
-  const docName = (opts.documentName ?? 'chatter-api') as DocumentName;
-  const alice = (opts.alice ?? 'alice') as Identity;
-  const bob = (opts.bob ?? 'bob') as Identity;
+  const docName = DocumentNameSchema.parse(opts.documentName ?? 'chatter-api');
+  const alice = IdentitySchema.parse(opts.alice ?? 'alice');
+  const bob = IdentitySchema.parse(opts.bob ?? 'bob');
   const step = opts.onStep ?? ((_m: string) => {});
 
   const a = new BrackishClient({ socketPath: opts.socketPath, identity: alice });
