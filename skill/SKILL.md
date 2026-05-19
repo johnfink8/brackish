@@ -1,78 +1,153 @@
 ---
 name: brackish
-description: Use whenever you are about to commit to an API/type contract that another Claude Code instance is responsible for the other side of — typing a TS interface, pydantic model, OpenAPI fragment, JSON schema, or RPC signature at a boundary another component owns. Also triggers when the user mentions a paired Claude session ("the backend Claude", "frontend's in another window", "we're co-developing X"), or when you are about to assume the shape of an API response/request that you don't actually know. The point is to ask via `brackish` instead of guessing. NOT for internal types, single-developer projects, or boundaries where the other side has already shipped — only when there's a live other-Claude doing paired work.
+description: Use whenever you are about to commit to a REST API contract (endpoint method/path, request/response shape, JSON-typed schema, auth/timing/idempotency) at a boundary that another Claude Code instance is implementing the other side of. Trigger words include "the backend Claude", "frontend's in another window", "we're co-developing X", or moments where you'd otherwise type a TS interface, pydantic model, OpenAPI fragment, or assume a response shape you don't actually know. brackish negotiates a real OpenAPI 3.1 document via propose/accept/reject lifecycle, with diff-based churn so the negotiation doesn't burn either agent's context. NOT for internal types, single-developer projects, or where the API has already shipped — only when there's a live other-Claude implementing the other half.
 ---
 
-# brackish — negotiate contracts with the other Claude
+# brackish — negotiate an OpenAPI document with the other Claude
 
-You are running in a session where the user is also running **another Claude Code instance** on a paired component. brackish is a small message bus + propose/accept artifact lifecycle that lets you two agree on contracts (API shapes, TS types, OpenAPI fragments, schemas) instead of each guessing.
+You're paired with **another Claude Code instance** building the other half of a REST API (frontend ↔ backend, producer ↔ consumer). brackish is a small message bus + structured propose/accept lifecycle for OpenAPI 3.1 documents: endpoints, schemas, and the document-level convention (info/servers/security). Use it to *agree on the contract* rather than each guessing.
 
 ## When to reach for brackish
 
-Reach for brackish the moment you would otherwise:
+The moment you would otherwise:
 
-- Type out a TS `interface`/`type`, pydantic model, OpenAPI fragment, JSON Schema, or RPC signature at a boundary the *other* Claude owns.
-- Write "I'll assume the response shape is …", "the backend will probably return …", "the frontend will send …".
-- Hand-roll a fixture/mock for a payload another component produces.
-- Re-derive a shape from a sibling repo that's actively being changed by the other Claude.
+- Type a TS `interface`, pydantic model, JSON Schema, or OpenAPI fragment for a request/response shape the *other* Claude owns.
+- Decide an HTTP method/path/status code for an endpoint another component implements.
+- Write "I'll assume the response is `{ id, name, email }`...".
+- Hand-roll a fixture for a payload another component produces.
+- Re-derive a shape from a sibling repo that's being actively changed.
 
 Skip brackish if:
-- The contract is purely internal to your component (the type lives behind a private function).
-- You're maintaining a long-shipped API where the shape is locked.
-- There's no other Claude — i.e. nothing on the other side to negotiate with.
+- The contract is purely internal to your component.
+- The API is already shipped and the shape is locked.
+- There's no other Claude on the other side.
 
 ## Inbox first
 
-Before deciding what to do in a cross-component-contract session, run:
+At the start of any session that might involve cross-component contracts:
 
 ```
 brackish inbox
 ```
 
-If there are pending events on any document, **read those first**. Other-you may have already proposed something or asked a question that should change your next step.
+If there are pending events for your identity, deal with them before resuming. Other-you may have proposed/rejected something that should change your next move.
+
+## The model: it's literally OpenAPI 3.1
+
+Every brackish document assembles into a real OpenAPI 3.1 spec. There are exactly three kinds of negotiable artifact:
+
+| Kind | What it is | Identity key | When to use |
+|---|---|---|---|
+| `endpoint` | OpenAPI Operation Object (method + path + requestBody + responses + security + x-brackish-*) | `<METHOD> <path>` | One per `(method, path)` |
+| `schema` | JSON Schema (lives under `components.schemas[name]`) | `<Name>` | Reusable shapes (`User`, `OrderCreate`) |
+| `convention` | `{ info, servers, securitySchemes }` (document-level header) | singleton | One per document |
+
+Brackish-specific metadata uses OpenAPI's `x-` extension hatch:
+- `x-brackish-idempotent: true` — declares intent (orthogonal to HTTP method)
+- `x-brackish-side-effects: ["..."]`
+- `x-brackish-timing: { p50, p99, timeout }`
+
+These survive into rendered OpenAPI YAML; Swagger UI ignores them; brackish renders them.
 
 ## Workflow
 
-A negotiation always has a `<doc>` (name it after the contract surface: `users-api`, `orders-schema`, `auth-flow`). For a new contract:
+```
+brackish docs                    # list existing docs
+brackish doc new orders-api      # if you need a new one
+```
 
-1. `brackish docs` — see existing documents. Reuse one if it fits.
-2. `brackish doc new <name>` — create a document if needed.
-3. `brackish send <doc> "<text>"` — say what you need. Plain English is fine; this is the discussion channel.
-4. `brackish artifact propose <doc> <name> --kind <kind> --file path.yaml` — when you have a concrete spec to propose. Kind is a freeform label: `openapi`, `json-schema`, `ts-types`, `proto`, `text`.
-5. `brackish wait <doc> --timeout 60` — block until the other side responds (max 60s; tune to whatever feels reasonable). Re-call if you want to keep waiting.
+Then propose pieces:
 
-To respond to other-you:
+```
+brackish convention propose orders-api \
+  --title "Orders API" --api-version 1.0.0 \
+  --server "https://api.example.com:production" \
+  --security-scheme "bearer:http:bearerFormat=JWT"
 
-- `brackish read <doc>` — see the conversation so far.
-- `brackish artifact get <doc> <name>` — fetch the currently-accepted content (e.g. into a file: `brackish artifact get <doc> users-api > users.yaml`). Use `--proposed` for the latest still-pending version.
-- `brackish artifact accept <doc> <name>` — lock in the latest proposal (you can't accept your own).
-- `brackish artifact reject <doc> <name> "<reason>"` — push back with a reason.
-- `brackish send <doc> "<text>"` — chat.
+brackish schema propose orders-api UserCreate \
+  --field 'email:string' --field 'name:string'
 
-Once an artifact is `accepted`, that's the contract. Generate your code from it; check it in if it's a file. The next time the other side changes it, you'll get a new `artifact_proposed` event for the same name on the same document, with a bumped version.
+brackish schema propose orders-api User \
+  --field 'id:string' --field 'email:string' \
+  --field 'createdAt:string:ISO 8601'
+
+brackish endpoint propose orders-api POST /users \
+  --summary "Create a user" \
+  --request-content 'application/json=UserCreate' \
+  --response '201:application/json:User:created' \
+  --response '409:application/json:Error:email exists' \
+  --idempotent
+```
+
+`--field` syntax: `name:type[?][:description]`. Type can be `string`, `integer`, `number`, `boolean`, `null`, `string[]` (array), or a `PascalCase` name (becomes a `$ref` to another schema). The `?` after type marks the property optional.
+
+When the spec needs more than the sugar covers, pass `--file path/to/operation.yaml` (or `.json`) instead.
+
+## Responding to other-you
+
+```
+brackish read orders-api         # see the conversation + propose events with their delta summary
+brackish endpoint show orders-api POST /users          # compact: status, version chain, latest delta
+brackish endpoint show orders-api POST /users --full   # include the full Operation body
+brackish endpoint show orders-api POST /users --proposed   # the in-flight version
+brackish endpoint accept orders-api POST /users        # accept the latest proposed
+brackish endpoint reject orders-api POST /users "needs auth section"
+brackish endpoint diff orders-api POST /users --from 1 --to 2   # see only what changed
+```
+
+Same verbs for `schema` and `convention`.
+
+You **can't accept your own proposal** (the server enforces it). One side proposes; the other side accepts or rejects.
+
+## Token-efficient catch-up (do this)
+
+A high-churn negotiation can balloon an agent's context if you're not careful. brackish gives you compact paths — use them:
+
+1. `brackish read <doc>` — events come with compact `delta` summaries like `+responses.409` so you can see what each propose actually changed without fetching the full spec.
+2. `brackish endpoint show <doc> METHOD /path` — defaults to a status line + delta; only add `--full` when you actually need to read the spec body.
+3. `brackish <kind> diff <doc> <id> --from N --to M` — emits an RFC 6902 JSON Patch between two versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
+4. `brackish visualize <doc>` — defaults to a table-of-contents (no spec bodies). Add `--full` for everything. Use `--format openapi` to write a real OpenAPI YAML; `--format markdown` for a human-readable doc with rationale interleaved.
+
+Rough rule: **don't pull a full spec body until you've decided you need it.** The delta summary + diff command tell you what changed at a fraction of the bytes.
+
+## Once an artifact is accepted
+
+That's the contract. Render it and use it:
+
+- Frontend: `brackish visualize <doc> --format openapi --out openapi.yaml`, then run your favorite codegen (`openapi-typescript`, `orval`, etc.) against it.
+- Backend: same OpenAPI YAML feeds server-stub codegen (e.g. `oapi-codegen` for Go, `fastapi-codegen` for Python).
+- Human eyes: open `http://localhost:<port>/ui/<doc>` (if `brackish serve` is running) for Swagger UI + the brackish rationale sidebar — every endpoint and schema shows its negotiation history.
+
+If the other side later changes an accepted artifact, you'll get a new `artifact_proposed` event with a bumped version and a compact delta showing exactly what shifted. Accept or reject; regenerate.
 
 ## The hook
 
-If the user installed brackish's `UserPromptSubmit` hook (via `brackish install`), at the start of every turn you may see a block like:
+If `brackish install` wired the `UserPromptSubmit` hook into `~/.claude/settings.json`, you'll see a block at the start of relevant turns:
 
 ```
 <system-reminder>
-Pending brackish negotiations for your identity:
-contracts                 2 new     2026-05-19T03:00:00Z  peer        looks good but rename createdAt -> created_at?
+brackish: pending negotiations for your identity. Read and respond before continuing your current task.
+
+orders-api                3 new     2026-05-19T...  peer    artifact_proposed operation POST /users v3 +responses.409
 …
 </system-reminder>
 ```
 
-That's not magic — it's the hook calling `brackish inbox --quiet-if-empty` and surfacing the result. When you see it, treat it as a real interruption: don't continue your current task until you've looked at what the other side said. Use `brackish read <doc>` to get the full context, then respond before resuming.
+When you see this, treat it as a real interruption: handle the pending traffic before continuing your current task. The hook silently fires every turn — its absence means the inbox was empty.
 
-If you don't see this block, either the hook isn't installed (suggest `brackish install` to the user when relevant) or there are no pending events.
+If the user hasn't run `brackish install`, the hook isn't there. Suggest it when relevant.
 
-## Output shapes worth knowing
+## Output conventions (worth knowing)
 
-- Most commands default to compact text on stdout; pass `--json` if you need structured output.
-- `brackish artifact get` is special: artifact **content** goes to stdout, **metadata** goes to stderr. So `brackish artifact get t name > out.yaml` writes a clean file.
-- Exit codes: `0` = success (including a timed-out `wait` with zero events), `1` = operation error (404/403/409), `2` = config/auth/connection error.
+- Compact text by default; `--json` flag returns structured output for scripting.
+- `brackish endpoint show ... --full` writes the spec body to stdout; metadata to stderr (`brackish endpoint show ... --full > endpoint.yaml` writes a clean file).
+- `brackish visualize ... --format openapi --out X.yaml` writes the assembled OpenAPI doc to a file.
+- Exit codes: `0` = success (incl. a timed-out `wait` with zero events); `1` = operation error (4xx); `2` = config/auth/connection error.
 
-## When the user says "we should negotiate this"
+## When the user says "let's negotiate the API"
 
-Run `brackish whoami` to confirm you're configured (identity + server), then `brackish inbox` to see what's already in flight, then propose / send / wait as appropriate. If `whoami` fails with "no config", the user hasn't run `brackish init --identity <name>` yet — flag that.
+1. `brackish whoami` — confirm you're configured. If it fails, `brackish init --identity <name>` and tell the user.
+2. `brackish inbox` — see what's already in flight.
+3. `brackish docs` — see what documents exist. Reuse or `brackish doc new`.
+4. Propose the convention first (`brackish convention propose`), then the schemas, then the endpoints. The other side will accept/reject.
+5. Use `brackish visualize` to see the assembled state; use `brackish endpoint/schema diff` to see what's changed.
