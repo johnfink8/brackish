@@ -194,6 +194,9 @@ export const SendMessageRequestSchema = z.object({
 });
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 
+export const SendMessageResponseSchema = z.object({ event: EventSchema });
+export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
+
 export const ProposeArtifactRequestSchema = z.object({
   name: ArtifactNameSchema,
   kind: ArtifactKindSchema,
