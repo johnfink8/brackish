@@ -72,7 +72,7 @@ function readTomlIfExists(path: string): unknown {
 }
 
 /** Load + merge client config from file + env. Throws if `identity` is missing after merge. */
-export function loadClientConfig(opts: { explicitPath?: string } = {}): ClientConfig {
+export function loadClientConfig(opts: { explicitPath?: string | undefined } = {}): ClientConfig {
   const filePath =
     opts.explicitPath ??
     (existsSync(projectClientConfigPath()) ? projectClientConfigPath() : defaultClientConfigPath());
@@ -119,7 +119,7 @@ export const ServerConfigSchema = z.object({
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 
 /** Load server config, applying defaults for omitted fields. */
-export function loadServerConfig(opts: { explicitPath?: string } = {}): ServerConfig {
+export function loadServerConfig(opts: { explicitPath?: string | undefined } = {}): ServerConfig {
   const filePath = opts.explicitPath ?? defaultServerConfigPath();
   const fromFile = ServerConfigFileSchema.parse(readTomlIfExists(filePath));
   const merged = {
