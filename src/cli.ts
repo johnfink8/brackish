@@ -6,9 +6,10 @@
 //   - stderr is for metadata + diagnostics; stdout is for the "thing"
 //   - exit 0 = success (including timed-out wait); 1 = operation error; 2 = usage/auth/connection
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
+import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { BrackishClient, ClientError, clientOptionsFromConfig, redeemInvite } from './client.js';
 import {
   defaultClientConfigPath,
@@ -30,17 +31,32 @@ import {
   uninstallHook,
   uninstallSkill,
 } from './install.js';
-import { IdentitySchema, TokenSchema } from './models.js';
 import {
+  type ConventionSpec,
+  HttpMethodSchema,
+  IdentitySchema,
+  type JSONSchema,
+  type OperationSpec,
+  TokenSchema,
+} from './models.js';
+import { assembleDocument, type OpenAPIDocument } from './openapi.js';
+import {
+  describeConvention,
+  describeOperation,
+  describeSchema,
   formatDocuments,
+  formatEndpointSummaries,
   formatEvents,
   formatEventsStream,
   formatInbox,
   formatParties,
+  formatSchemaSummaries,
 } from './output.js';
+import { renderHtml, renderJson, renderMarkdown, renderOpenAPIYaml, renderText } from './render.js';
 import { startServer } from './server.js';
+import type { RationaleEntry } from './store/index.js';
 
-const CLI_VERSION = '0.1.0';
+const CLI_VERSION = '0.2.0';
 
 export function buildProgram(): Command {
   const program = new Command();
@@ -351,6 +367,406 @@ export function buildProgram(): Command {
       }),
     );
 
+  // --- endpoints ---
+
+  const endpoint = program.command('endpoint').description('OpenAPI Operation lifecycle');
+
+  endpoint
+    .command('propose <doc> <method> <path>')
+    .description('propose an OpenAPI Operation (request/responses/security/x-brackish-*)')
+    .option('--summary <text>')
+    .option('--description <text>')
+    .option('--request-content <ct=schema>', 'media type=schemaName (repeatable)', collect, [])
+    .option(
+      '--response <status:ct:schema:desc>',
+      'status:contentType:schema:description (repeatable)',
+      collect,
+      [],
+    )
+    .option('--security <scheme>', 'security scheme name (repeatable)', collect, [])
+    .option('--idempotent', 'x-brackish-idempotent: true')
+    .option('--side-effect <text>', 'x-brackish-side-effect note (repeatable)', collect, [])
+    .option('--timing-p50 <duration>', 'x-brackish-timing.p50')
+    .option('--timing-p99 <duration>', 'x-brackish-timing.p99')
+    .option('--timeout <duration>', 'x-brackish-timing.timeout')
+    .option(
+      '--file <path>',
+      'load full Operation Object from YAML/JSON file (replaces other flags)',
+    )
+    .option('--json', 'output JSON')
+    .action(async (doc: string, methodRaw: string, path: string, opts: EndpointProposeOpts) =>
+      withClient(async (client) => {
+        const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+        const spec = opts.file
+          ? (loadSpecFile(opts.file) as OperationSpec)
+          : buildOperationSpec(opts);
+        const v = await client.proposeEndpoint(doc, method, path, spec);
+        if (opts.json) emitJson(v);
+        else emit(`proposed ${describeOperation(v)}`);
+      }),
+    );
+
+  endpoint
+    .command('list <doc>')
+    .description('list endpoints with current + latest-proposed versions')
+    .option('--json', 'output JSON')
+    .action(async (doc: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const endpoints = await client.listEndpoints(doc);
+        if (opts.json) emitJson({ endpoints });
+        else emit(formatEndpointSummaries(endpoints));
+      }),
+    );
+
+  endpoint
+    .command('show <doc> <method> <path>')
+    .description('show an endpoint (compact by default; --full for the Operation body)')
+    .option('--version <n>')
+    .option('--proposed')
+    .option('--full', 'include the Operation body')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        methodRaw: string,
+        path: string,
+        opts: { version?: string; proposed?: boolean; full?: boolean; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+          const v = await client.getEndpoint(doc, method, path, {
+            ...(opts.version !== undefined ? { version: Number.parseInt(opts.version, 10) } : {}),
+            ...(opts.proposed ? { proposed: true } : {}),
+          });
+          if (opts.json) emitJson(v);
+          else if (opts.full) emit(`${describeOperation(v)}\n${yamlStringify(v.spec).trimEnd()}`);
+          else emit(describeOperation(v));
+        }),
+    );
+
+  endpoint
+    .command('accept <doc> <method> <path>')
+    .description('accept the latest proposed version (or --version N)')
+    .option('--version <n>')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        methodRaw: string,
+        path: string,
+        opts: { version?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+          const v = await client.acceptEndpoint(doc, method, path, versionN);
+          if (opts.json) emitJson(v);
+          else emit(`accepted ${describeOperation(v)}`);
+        }),
+    );
+
+  endpoint
+    .command('reject <doc> <method> <path> <reason>')
+    .description('reject the latest proposed version with a reason')
+    .option('--version <n>')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        methodRaw: string,
+        path: string,
+        reason: string,
+        opts: { version?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+          const v = await client.rejectEndpoint(doc, method, path, reason, versionN);
+          if (opts.json) emitJson(v);
+          else emit(`rejected ${describeOperation(v)}`);
+        }),
+    );
+
+  endpoint
+    .command('diff <doc> <method> <path>')
+    .description('RFC 6902 JSON Patch between two versions (defaults: prev → latest)')
+    .option('--from <n>')
+    .option('--to <n>')
+    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .action(
+      async (
+        doc: string,
+        methodRaw: string,
+        path: string,
+        opts: { from?: string; to?: string; format: string },
+      ) =>
+        withClient(async (client) => {
+          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+          const diff = await client.diffEndpoint(doc, method, path, {
+            ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
+            ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
+          });
+          emitDiff(diff, opts.format);
+        }),
+    );
+
+  // --- schemas ---
+
+  const schema = program.command('schema').description('JSON Schema component lifecycle');
+
+  schema
+    .command('propose <doc> <name>')
+    .description('propose a JSON Schema for components.schemas[name]')
+    .option('--field <spec>', "field: 'name:type[?][:description]' (repeatable)", collect, [])
+    .option('--description <text>')
+    .option('--file <path>', 'load full JSON Schema from YAML/JSON file (replaces --field)')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        name: string,
+        opts: { field: string[]; description?: string; file?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const spec = opts.file ? (loadSpecFile(opts.file) as JSONSchema) : buildSchemaSpec(opts);
+          const v = await client.proposeSchema(doc, name, spec);
+          if (opts.json) emitJson(v);
+          else emit(`proposed ${describeSchema(v)}`);
+        }),
+    );
+
+  schema
+    .command('list <doc>')
+    .option('--json')
+    .action(async (doc: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const schemas = await client.listSchemas(doc);
+        if (opts.json) emitJson({ schemas });
+        else emit(formatSchemaSummaries(schemas));
+      }),
+    );
+
+  schema
+    .command('show <doc> <name>')
+    .option('--version <n>')
+    .option('--proposed')
+    .option('--full')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        name: string,
+        opts: { version?: string; proposed?: boolean; full?: boolean; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const v = await client.getSchema(doc, name, {
+            ...(opts.version !== undefined ? { version: Number.parseInt(opts.version, 10) } : {}),
+            ...(opts.proposed ? { proposed: true } : {}),
+          });
+          if (opts.json) emitJson(v);
+          else if (opts.full) emit(`${describeSchema(v)}\n${yamlStringify(v.spec).trimEnd()}`);
+          else emit(describeSchema(v));
+        }),
+    );
+
+  schema
+    .command('accept <doc> <name>')
+    .option('--version <n>')
+    .option('--json')
+    .action(async (doc: string, name: string, opts: { version?: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+        const v = await client.acceptSchema(doc, name, versionN);
+        if (opts.json) emitJson(v);
+        else emit(`accepted ${describeSchema(v)}`);
+      }),
+    );
+
+  schema
+    .command('reject <doc> <name> <reason>')
+    .option('--version <n>')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        name: string,
+        reason: string,
+        opts: { version?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+          const v = await client.rejectSchema(doc, name, reason, versionN);
+          if (opts.json) emitJson(v);
+          else emit(`rejected ${describeSchema(v)}`);
+        }),
+    );
+
+  schema
+    .command('diff <doc> <name>')
+    .option('--from <n>')
+    .option('--to <n>')
+    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .action(
+      async (doc: string, name: string, opts: { from?: string; to?: string; format: string }) =>
+        withClient(async (client) => {
+          const diff = await client.diffSchema(doc, name, {
+            ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
+            ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
+          });
+          emitDiff(diff, opts.format);
+        }),
+    );
+
+  // --- convention ---
+
+  const convention = program
+    .command('convention')
+    .description('Document-level Info/Servers/SecuritySchemes');
+
+  convention
+    .command('propose <doc>')
+    .option('--title <text>')
+    .option('--api-version <text>', 'API version (e.g. "1.0.0")')
+    .option('--description <text>')
+    .option('--server <url:description>', 'server URL (repeatable)', collect, [])
+    .option(
+      '--security-scheme <name:type:config>',
+      '"bearer:http:bearerFormat=JWT" (repeatable)',
+      collect,
+      [],
+    )
+    .option('--file <path>', 'load full Convention block from YAML/JSON file')
+    .option('--json')
+    .action(async (doc: string, opts: ConventionProposeOpts) =>
+      withClient(async (client) => {
+        const spec = opts.file
+          ? (loadSpecFile(opts.file) as ConventionSpec)
+          : buildConventionSpec(opts);
+        const v = await client.proposeConvention(doc, spec);
+        if (opts.json) emitJson(v);
+        else emit(`proposed ${describeConvention(v)}`);
+      }),
+    );
+
+  convention
+    .command('show <doc>')
+    .option('--proposed')
+    .option('--full')
+    .option('--json')
+    .action(async (doc: string, opts: { proposed?: boolean; full?: boolean; json?: boolean }) =>
+      withClient(async (client) => {
+        const v = opts.proposed
+          ? await client.getConventionProposed(doc)
+          : await client.getConventionCurrent(doc);
+        if (opts.json) emitJson(v);
+        else if (opts.full) emit(`${describeConvention(v)}\n${yamlStringify(v.spec).trimEnd()}`);
+        else emit(describeConvention(v));
+      }),
+    );
+
+  convention
+    .command('accept <doc>')
+    .option('--version <n>')
+    .option('--json')
+    .action(async (doc: string, opts: { version?: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+        const v = await client.acceptConvention(doc, versionN);
+        if (opts.json) emitJson(v);
+        else emit(`accepted ${describeConvention(v)}`);
+      }),
+    );
+
+  convention
+    .command('reject <doc> <reason>')
+    .option('--version <n>')
+    .option('--json')
+    .action(async (doc: string, reason: string, opts: { version?: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+        const v = await client.rejectConvention(doc, reason, versionN);
+        if (opts.json) emitJson(v);
+        else emit(`rejected ${describeConvention(v)}`);
+      }),
+    );
+
+  convention
+    .command('diff <doc>')
+    .option('--from <n>')
+    .option('--to <n>')
+    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .action(async (doc: string, opts: { from?: string; to?: string; format: string }) =>
+      withClient(async (client) => {
+        const diff = await client.diffConvention(doc, {
+          ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
+          ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
+        });
+        emitDiff(diff, opts.format);
+      }),
+    );
+
+  // --- visualize ---
+
+  program
+    .command('visualize <doc>')
+    .description('render the current OpenAPI document in text/openapi/markdown/json/html')
+    .option('--format <fmt>', 'text|openapi|markdown|json|html', 'text')
+    .option('--full', 'text: include operation/schema bodies (default: ToC only)')
+    .option('--out <path>', 'write to file instead of stdout')
+    .action(async (doc: string, opts: { format: string; full?: boolean; out?: string }) =>
+      withClient(async (client) => {
+        let output: string;
+        switch (opts.format) {
+          case 'openapi':
+            output = await client.getOpenApiYaml(doc);
+            break;
+          case 'json':
+            output = `${JSON.stringify(await client.getOpenApiJson(doc), null, 2)}\n`;
+            break;
+          case 'text':
+          case 'markdown':
+          case 'html': {
+            const document = (await client.getOpenApiJson(doc)) as OpenAPIDocument;
+            const rationaleJson = (await client.getRationaleJson(doc)) as {
+              endpoints: Record<string, RationaleEntry[]>;
+              schemas: Record<string, RationaleEntry[]>;
+              convention: RationaleEntry[];
+            };
+            const rationale = {
+              endpoints: new Map(Object.entries(rationaleJson.endpoints)),
+              schemas: new Map(Object.entries(rationaleJson.schemas)),
+              convention: rationaleJson.convention,
+            };
+            if (opts.format === 'text') {
+              output = renderText({ document, rationale }, opts.full ? { full: true } : {});
+            } else if (opts.format === 'markdown') {
+              const ev = await client.listEvents(doc, { limit: 1000 });
+              output = renderMarkdown({ document, rationale, events: ev.events });
+            } else {
+              output = renderHtml({ document, rationale }, { documentName: doc });
+            }
+            break;
+          }
+          default:
+            errExit(2, `visualize: unknown --format "${opts.format}"`);
+        }
+        if (opts.out) {
+          writeFileSync(opts.out, output);
+          process.stderr.write(`wrote ${opts.out}\n`);
+        } else {
+          process.stdout.write(output);
+          if (!output.endsWith('\n')) process.stdout.write('\n');
+        }
+        // Silence the never-typed `output` warning in the default branch above.
+        void renderJson;
+        void renderOpenAPIYaml;
+        void assembleDocument;
+      }),
+    );
+
   // --- install / uninstall / hook-snippet ---
 
   program
@@ -517,6 +933,227 @@ export function buildProgram(): Command {
 }
 
 // --- helpers ---
+
+// Commander accumulator for repeatable options
+function collect(value: string, prev: string[]): string[] {
+  return [...prev, value];
+}
+
+type EndpointProposeOpts = {
+  summary?: string;
+  description?: string;
+  requestContent: string[];
+  response: string[];
+  security: string[];
+  idempotent?: boolean;
+  sideEffect: string[];
+  timingP50?: string;
+  timingP99?: string;
+  timeout?: string;
+  file?: string;
+  json?: boolean;
+};
+
+type ConventionProposeOpts = {
+  title?: string;
+  apiVersion?: string;
+  description?: string;
+  server: string[];
+  securityScheme: string[];
+  file?: string;
+  json?: boolean;
+};
+
+function loadSpecFile(path: string): unknown {
+  const raw = readFileSync(path, 'utf8');
+  if (path.endsWith('.json')) return JSON.parse(raw);
+  return yamlParse(raw);
+}
+
+function buildOperationSpec(opts: EndpointProposeOpts): OperationSpec {
+  const spec: Record<string, unknown> = {};
+  if (opts.summary !== undefined) spec.summary = opts.summary;
+  if (opts.description !== undefined) spec.description = opts.description;
+
+  // requestBody
+  if (opts.requestContent.length > 0) {
+    const content: Record<string, unknown> = {};
+    for (const entry of opts.requestContent) {
+      // form: 'application/json=SchemaName' or 'application/json=inline'
+      const eq = entry.indexOf('=');
+      if (eq < 0) {
+        throw new Error(`--request-content requires "ct=schema" form (got: ${entry})`);
+      }
+      const ct = entry.slice(0, eq);
+      const sch = entry.slice(eq + 1);
+      content[ct] = { schema: parseSchemaRefOrInline(sch) };
+    }
+    spec.requestBody = { content };
+  }
+
+  // responses (required by OpenAPI)
+  const responses: Record<string, unknown> = {};
+  if (opts.response.length === 0) {
+    responses['200'] = { description: 'OK' };
+  } else {
+    for (const entry of opts.response) {
+      // status:ct:schema:description (last 3 segments optional after status)
+      const parts = entry.split(':');
+      const status = parts[0] ?? '200';
+      const ct = parts[1];
+      const sch = parts[2];
+      const desc = parts.slice(3).join(':') || (ct === undefined ? status : '');
+      const r: Record<string, unknown> = { description: desc || 'response' };
+      if (ct !== undefined && sch !== undefined && sch !== '') {
+        r.content = { [ct]: { schema: parseSchemaRefOrInline(sch) } };
+      }
+      responses[status] = r;
+    }
+  }
+  spec.responses = responses;
+
+  if (opts.security.length > 0) {
+    spec.security = opts.security.map((s) => ({ [s]: [] }));
+  }
+
+  // brackish extensions
+  if (opts.idempotent) spec['x-brackish-idempotent'] = true;
+  if (opts.sideEffect.length > 0) spec['x-brackish-side-effects'] = opts.sideEffect;
+  if (opts.timingP50 || opts.timingP99 || opts.timeout) {
+    const timing: Record<string, string> = {};
+    if (opts.timingP50) timing.p50 = opts.timingP50;
+    if (opts.timingP99) timing.p99 = opts.timingP99;
+    if (opts.timeout) timing.timeout = opts.timeout;
+    spec['x-brackish-timing'] = timing;
+  }
+
+  return spec as OperationSpec;
+}
+
+function parseSchemaRefOrInline(s: string): JSONSchema {
+  // If it starts with a capital letter and is a single token, treat as a $ref.
+  if (/^[A-Z][A-Za-z0-9_]*$/.test(s)) {
+    return { $ref: `#/components/schemas/${s}` };
+  }
+  // Otherwise try JSON parse (for inline schemas).
+  try {
+    return JSON.parse(s) as JSONSchema;
+  } catch {
+    return { type: s };
+  }
+}
+
+function buildSchemaSpec(opts: { field: string[]; description?: string }): JSONSchema {
+  if (opts.field.length === 0) {
+    return opts.description !== undefined
+      ? { type: 'object', description: opts.description }
+      : { type: 'object' };
+  }
+  const properties: Record<string, JSONSchema> = {};
+  const required: string[] = [];
+  for (const f of opts.field) {
+    const firstColon = f.indexOf(':');
+    if (firstColon < 0)
+      throw new Error(`invalid --field "${f}" (expected name:type[?][:description])`);
+    const name = f.slice(0, firstColon);
+    const rest = f.slice(firstColon + 1);
+    let isOptional = false;
+    let description: string | undefined;
+    const descColon = rest.indexOf(':');
+    let typeStr = rest;
+    if (descColon >= 0) {
+      typeStr = rest.slice(0, descColon);
+      description = rest.slice(descColon + 1);
+    }
+    if (typeStr.endsWith('?')) {
+      isOptional = true;
+      typeStr = typeStr.slice(0, -1);
+    }
+    properties[name] = fieldTypeToSchema(typeStr, description);
+    if (!isOptional) required.push(name);
+  }
+  const out: JSONSchema = { type: 'object', properties };
+  if (required.length > 0) out.required = required;
+  if (opts.description !== undefined) out.description = opts.description;
+  return out;
+}
+
+function fieldTypeToSchema(typeStr: string, description?: string): JSONSchema {
+  const base: JSONSchema = description !== undefined ? { description } : {};
+  if (typeStr.endsWith('[]')) {
+    return { ...base, type: 'array', items: fieldTypeToSchema(typeStr.slice(0, -2)) };
+  }
+  if (['string', 'integer', 'number', 'boolean', 'null'].includes(typeStr)) {
+    return { ...base, type: typeStr };
+  }
+  if (/^[A-Z][A-Za-z0-9_]*$/.test(typeStr)) {
+    return { ...base, $ref: `#/components/schemas/${typeStr}` };
+  }
+  return { ...base, type: typeStr };
+}
+
+function buildConventionSpec(opts: ConventionProposeOpts): ConventionSpec {
+  const info: Record<string, unknown> = {
+    title: opts.title ?? 'Untitled',
+    version: opts.apiVersion ?? '0.0.0',
+  };
+  if (opts.description !== undefined) info.description = opts.description;
+  const spec: Record<string, unknown> = { info };
+  if (opts.server.length > 0) {
+    spec.servers = opts.server.map((s) => {
+      const colon = s.indexOf(':');
+      // URLs have colons; only treat the LAST colon-separated chunk as description if it doesn't
+      // look like a URL scheme. Simpler heuristic: split into url + ":" + description after the
+      // ://. If no '://' found, treat whole thing as the URL.
+      const proto = s.indexOf('://');
+      if (proto < 0 && colon >= 0)
+        return { url: s.slice(0, colon), description: s.slice(colon + 1) };
+      // Find the colon AFTER the scheme.
+      const afterScheme = s.indexOf(':', proto + 3);
+      if (afterScheme < 0) return { url: s };
+      return { url: s.slice(0, afterScheme), description: s.slice(afterScheme + 1) };
+    });
+  }
+  if (opts.securityScheme.length > 0) {
+    const schemes: Record<string, Record<string, unknown>> = {};
+    for (const entry of opts.securityScheme) {
+      // form: 'name:type:k=v[,k=v...]'
+      const parts = entry.split(':');
+      const name = parts[0];
+      const type = parts[1];
+      if (!name || !type) {
+        throw new Error(`invalid --security-scheme "${entry}" (expected name:type:config)`);
+      }
+      const cfg: Record<string, unknown> = { type };
+      if (parts[2]) {
+        for (const kv of parts[2].split(',')) {
+          const [k, v] = kv.split('=');
+          if (k && v !== undefined) cfg[k] = v;
+        }
+      }
+      schemes[name] = cfg;
+    }
+    spec.securitySchemes = schemes;
+  }
+  return spec as ConventionSpec;
+}
+
+function emitDiff(
+  diff: { fromVersion: number; toVersion: number; patch: unknown[] },
+  format: string,
+): void {
+  if (format === 'yaml') {
+    process.stdout.write(yamlStringify(diff));
+    return;
+  }
+  if (format === 'json') {
+    process.stdout.write(`${JSON.stringify(diff, null, 2)}\n`);
+    return;
+  }
+  // 'patch' (default): emit just the patch array as JSON, plus a header line on stderr
+  process.stderr.write(`diff ${diff.fromVersion} → ${diff.toVersion}:\n`);
+  process.stdout.write(`${JSON.stringify(diff.patch, null, 2)}\n`);
+}
 
 type LoadedClientShape = {
   client: BrackishClient;
