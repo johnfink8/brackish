@@ -715,13 +715,23 @@ async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
 
 // --- main ---
 
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const entry = process.argv[1];
-const thisFile = fileURLToPath(import.meta.url);
-const isMain = entry !== undefined && (entry === thisFile || thisFile.startsWith(entry));
+function isMainModule(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  const thisFile = fileURLToPath(import.meta.url);
+  if (entry === thisFile) return true;
+  // npm installs as a symlink in <prefix>/bin/<bin>; resolve to the real path.
+  try {
+    return realpathSync(entry) === thisFile;
+  } catch {
+    return false;
+  }
+}
 
-if (isMain) {
+if (isMainModule()) {
   buildProgram()
     .parseAsync(process.argv)
     .catch((err) => {
