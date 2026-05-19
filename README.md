@@ -78,7 +78,7 @@ The demo is a "Hello-world realtime chat" API negotiated between two identities 
 
 - **Convention re-negotiation** — v1 bearer-only; v2 adds a cookie-session scheme once an HTML page enters the picture.
 - **Schema rejection cycles** — `User` v1 (snake_case) gets rejected, v2 (camelCase) accepted; `Message` v1 (`from: string`) gets rejected, v2 (`from: $ref User`) accepted.
-- **Endpoint rejection cycles** — `POST /messages` v1 (`200 OK`) rejected, v2 (`201 Created`) accepted; `GET /messages/stream` v1 (weird `tail: boolean`) rejected, v2 (`since` cursor) accepted.
+- **Endpoint rejection cycles, including a two-sided fight** — `POST /messages` v1 (`200 OK`) rejected by bob, v2 (`201 Created`) accepted. `GET /messages/stream` is the contested one: alice proposes v1 (SSE), bob rejects and counter-proposes v2 (long-poll over JSON), alice rejects bob's counter, alice re-proposes v3 (SSE), bob accepts. Frontend domain knowledge wins; backend gets a deploy-note about disabling proxy buffering.
 - **Multiple content types** — `application/json`, `application/octet-stream` (file upload + download), `text/event-stream` (SSE), `text/html` (the chat page).
 - **WebSocket handshake** documented as `GET /ws` with `x-brackish-protocol: websocket` plus `x-brackish-frames` enumerating both directions.
 - **Brackish extensions** — `x-brackish-timing`, `x-brackish-side-effects` annotate the operations.
