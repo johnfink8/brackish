@@ -182,6 +182,56 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('endpoint propose concurrency', () => {
+    const opSpec = {
+      summary: 'create',
+      responses: { '200': { description: 'ok' } },
+    };
+
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'c' } });
+    });
+
+    it('second propose without flags → 409 version_in_flight', async () => {
+      const ok = await call('POST', '/documents/c/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+      });
+      expect(ok.status).toBe(201);
+      const blocked = await call('POST', '/documents/c/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'peer',
+      });
+      expect(blocked.status).toBe(409);
+      const body = (await blocked.json()) as { code: string };
+      expect(body.code).toBe('version_in_flight');
+    });
+
+    it('force=true overrides the in-flight block', async () => {
+      await call('POST', '/documents/c/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+      });
+      const forced = await call('POST', '/documents/c/endpoints?force=true', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'peer',
+      });
+      expect(forced.status).toBe(201);
+    });
+
+    it('expected_version=new on a fresh artifact → 201; on an existing one → 409 version_mismatch', async () => {
+      const fresh = await call('POST', '/documents/c/endpoints?expected_version=new', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+      });
+      expect(fresh.status).toBe(201);
+      const conflict = await call('POST', '/documents/c/endpoints?expected_version=new', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'peer',
+      });
+      expect(conflict.status).toBe(409);
+      const body = (await conflict.json()) as { code: string };
+      expect(body.code).toBe('version_mismatch');
+    });
+  });
+
   describe('inbox', () => {
     it('lists documents with new events for the caller', async () => {
       await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });

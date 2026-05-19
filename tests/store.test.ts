@@ -258,6 +258,7 @@ describe('SqliteStore', () => {
           responses: { '200': { description: 'ok' }, '409': { description: 'taken' } },
         },
         'host',
+        { force: true },
       );
       expect(v2.version).toBe(2);
       const events = await store.listEvents('d', 0, 100);
@@ -326,6 +327,89 @@ describe('SqliteStore', () => {
       expect(r[0]?.rejectionReason).toBe('needs 409');
       expect(r[1]?.status).toBe('accepted');
       expect(r[1]?.delta).not.toBeNull();
+    });
+  });
+
+  describe('propose concurrency (race protection)', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+    });
+
+    const minOp = (summary: string) => ({
+      summary,
+      responses: { '200': { description: 'ok' } },
+    });
+
+    it('blocks a second propose when latest is still in `proposed` status', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await expect(
+        store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'host'),
+      ).rejects.toMatchObject({ code: 'version_in_flight' });
+    });
+
+    it('allows --force to stack a counter-proposal on a pending version', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'peer', {
+        force: true,
+      });
+      expect(v2.version).toBe(2);
+    });
+
+    it('allows propose after the previous version is accepted', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'host');
+      expect(v2.version).toBe(2);
+    });
+
+    it('allows propose after the previous version is rejected', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.rejectEndpoint('d', 'post', '/users', 1, 'nope', 'peer');
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'host');
+      expect(v2.version).toBe(2);
+    });
+
+    it('expectedVersion=new succeeds when nothing exists', async () => {
+      const v = await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host', {
+        expectedVersion: 'new',
+      });
+      expect(v.version).toBe(1);
+    });
+
+    it('expectedVersion=new fails when something exists', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await expect(
+        store.proposeEndpoint('d', 'post', '/users', minOp('v1-other'), 'peer', {
+          expectedVersion: 'new',
+        }),
+      ).rejects.toMatchObject({ code: 'version_mismatch' });
+    });
+
+    it('expectedVersion=N succeeds when latest matches', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'host', {
+        expectedVersion: 1,
+      });
+      expect(v2.version).toBe(2);
+    });
+
+    it('expectedVersion=N fails when latest differs', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      // latest is now v1, but caller expects v2
+      await expect(
+        store.proposeEndpoint('d', 'post', '/users', minOp('v3'), 'host', { expectedVersion: 2 }),
+      ).rejects.toMatchObject({ code: 'version_mismatch' });
+    });
+
+    it('expectedVersion=N bypasses the in-flight block (the assertion is the explicit choice)', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      // v1 is still `proposed`, but caller knows + intends to chain v2 on top.
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2-counter'), 'peer', {
+        expectedVersion: 1,
+      });
+      expect(v2.version).toBe(2);
     });
   });
 

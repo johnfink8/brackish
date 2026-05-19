@@ -159,8 +159,13 @@ describe('parseBindAddress', () => {
     expect(parseBindAddress(':9000')).toEqual({ host: '127.0.0.1', port: 9000 });
   });
 
-  it('rejects bind without colon', () => {
-    expect(() => parseBindAddress('11442')).toThrow();
+  it('defaults port when only host is given (no colon)', () => {
+    expect(parseBindAddress('0.0.0.0')).toEqual({ host: '0.0.0.0', port: 11442 });
+    expect(parseBindAddress('localhost')).toEqual({ host: 'localhost', port: 11442 });
+  });
+
+  it('defaults to 0.0.0.0:11442 for empty string', () => {
+    expect(parseBindAddress('')).toEqual({ host: '0.0.0.0', port: 11442 });
   });
 
   it('rejects out-of-range port', () => {
