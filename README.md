@@ -66,12 +66,17 @@ brackish artifact get <doc> <name> --version 3
 
 ## Demo
 
-A pre-built sample document is built into the CLI. After `brackish serve` is up:
-
 ```sh
-brackish demo                                # seeds a `chatter-api` document (use a different name if it exists)
-brackish visualize chatter-api --format markdown | less
-# or with a TCP bind: open http://127.0.0.1:<port>/ui/chatter-api in a browser
+npm install -g brackish-cli
+brackish demo                                # one shot — open the URL it prints
+```
+
+That's it. `brackish demo` starts an ephemeral daemon in a sandbox dir, seeds the negotiated document, mints a browser-friendly token, prints a ready-to-open URL, and stays in the foreground until you Ctrl-C (at which point the sandbox is wiped). No `init` or `serve` required; doesn't touch any existing brackish state.
+
+Other formats (while the demo daemon is running, from another shell):
+```sh
+brackish visualize chatter-api --format markdown | less    # via the printed BRACKISH_HOME
+brackish visualize chatter-api --format openapi > spec.yaml
 ```
 
 The demo is a "Hello-world realtime chat" API negotiated between two identities (`alice` proposes, `bob` accepts/rejects). It exercises everything brackish does:

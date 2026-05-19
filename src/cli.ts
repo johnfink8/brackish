@@ -6,7 +6,9 @@
 //   - stderr is for metadata + diagnostics; stdout is for the "thing"
 //   - exit 0 = success (including timed-out wait); 1 = operation error; 2 = usage/auth/connection
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
@@ -19,6 +21,7 @@ import {
   ensureBrackishHome,
   loadClientConfig,
   loadServerConfig,
+  parseBindAddress,
   saveClientConfig,
   saveServerConfig,
 } from './config.js';
@@ -768,49 +771,113 @@ export function buildProgram(): Command {
       }),
     );
 
-  // --- demo (seed a sample negotiated document for the browser UI demo) ---
+  // --- demo (one-shot: ephemeral daemon + sample negotiation + browser URL) ---
 
   program
     .command('demo [doc]')
     .description(
-      'seed a sample chat-API negotiation (multi-content-type, with rejections + a WS endpoint) for the /ui browser demo. Uses the socket transport to impersonate two identities, so run after `brackish serve` is up.',
+      "one-shot: starts an ephemeral brackish daemon in a tmp sandbox, seeds a sample chat-API negotiation (with rejections, multiple content types, a WS endpoint), and prints a ready-to-open /ui URL. Stays in the foreground; ^C tears down and cleans up. Doesn't touch your existing brackish state — no `init`/`serve` needed.",
     )
+    .option('--bind <addr>', 'TCP host:port (default 127.0.0.1:0 = ephemeral port)', '127.0.0.1:0')
     .option('--alice <name>', 'identity for the proposing side', 'alice')
     .option('--bob <name>', 'identity for the accepting/rejecting side', 'bob')
-    .action(async (docArg: string | undefined, opts: { alice: string; bob: string }) => {
-      const cfg = loadClientConfig();
-      if (cfg.socketPath === undefined) {
-        errExit(
-          2,
-          'demo: the seed needs the socket transport (peer-trust) to impersonate two identities. Configure --socket-path via `brackish init` or set BRACKISH_SOCKET.',
-        );
-      }
-      const docName = docArg ?? 'chatter-api';
-      IdentitySchema.parse(opts.alice);
-      IdentitySchema.parse(opts.bob);
-      try {
-        await seedChatterDemo({
-          socketPath: cfg.socketPath,
-          documentName: docName,
-          alice: opts.alice,
-          bob: opts.bob,
-          onStep: (m) => process.stderr.write(`  ${m}\n`),
+    .option('--ttl <seconds>', 'lifetime of the issued browser token (default 3600)', '3600')
+    .option('--keep', 'keep the sandbox dir after shutdown (default: removed)')
+    .action(
+      async (
+        docArg: string | undefined,
+        opts: { bind: string; alice: string; bob: string; ttl: string; keep?: boolean },
+      ) => {
+        const docName = docArg ?? 'chatter-api';
+        IdentitySchema.parse(opts.alice);
+        IdentitySchema.parse(opts.bob);
+        const ttl = Number.parseInt(opts.ttl, 10);
+        if (!Number.isFinite(ttl) || ttl < 60)
+          errExit(2, 'demo: --ttl must be at least 60 seconds');
+
+        // Sandbox: a fresh BRACKISH_HOME so the demo can never collide with the user's real one.
+        const sandbox = mkdtempSync(join(tmpdir(), 'brackish-demo-'));
+        const socketPath = join(sandbox, 'brackish.sock');
+        const dataPath = join(sandbox, 'brackish.db');
+
+        process.stderr.write(`brackish demo: sandbox=${sandbox}\n`);
+        process.stderr.write(`               starting ephemeral daemon...\n`);
+        const server = await startServer({
+          config: { socketPath, dataPath, bind: opts.bind },
         });
-      } catch (err) {
-        if (err instanceof ClientError && err.code === 'document_exists') {
-          errExit(
-            1,
-            `demo: document "${docName}" already exists. Pick a different name (e.g. \`brackish demo my-chatter\`) or delete the existing one first.`,
-          );
+        if (!server.tcpAddress) {
+          await server.close();
+          errExit(2, `demo: failed to bind TCP at ${opts.bind}`);
         }
-        throw err;
-      }
-      process.stderr.write(
-        `\ndone. Look at the result:\n` +
-          `  brackish visualize ${docName} --format markdown | less\n` +
-          `  open http://127.0.0.1:<port>/ui/${docName}   (if brackish serve --bind is up)\n`,
-      );
-    });
+
+        // Shutdown on signal: close the server (fire-and-forget — keep-alive connections shouldn't
+        // block ^C) + (unless --keep) wipe the sandbox + exit.
+        let shuttingDown = false;
+        const shutdown = (sig: string): void => {
+          if (shuttingDown) return;
+          shuttingDown = true;
+          process.stderr.write(`\nbrackish demo: shutting down (${sig})\n`);
+          void server.close().catch(() => {});
+          if (!opts.keep) {
+            try {
+              rmSync(sandbox, { recursive: true, force: true });
+            } catch {
+              /* sandbox already gone */
+            }
+          }
+          process.exit(0);
+        };
+        process.on('SIGINT', () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+        // Seed the doc.
+        process.stderr.write('               seeding...\n');
+        try {
+          await seedChatterDemo({
+            socketPath,
+            documentName: docName,
+            alice: opts.alice,
+            bob: opts.bob,
+            onStep: (m) => process.stderr.write(`                 ${m}\n`),
+          });
+        } catch (err) {
+          await server.close();
+          if (!opts.keep) rmSync(sandbox, { recursive: true, force: true });
+          throw err;
+        }
+
+        // Mint a browser-friendly token: invite a `viewer` identity over the socket (peer-trust),
+        // redeem it over TCP, append it as a query param to the /ui URL.
+        const admin = new BrackishClient({ socketPath, identity: opts.alice });
+        let url: string;
+        try {
+          const invite = await admin.createInvite('viewer', ttl);
+          const tcpUrl = `http://127.0.0.1:${server.tcpAddress.port}`;
+          const persistent = await redeemInvite(tcpUrl, invite.inviteToken);
+          url = `${tcpUrl}/ui/${encodeURIComponent(docName)}?token=${persistent.token}`;
+        } finally {
+          await admin.close();
+        }
+
+        process.stderr.write(
+          [
+            '',
+            'Demo ready. Open in your browser:',
+            '',
+            `  ${url}`,
+            '',
+            `Other views (while this is running):`,
+            `  BRACKISH_HOME=${sandbox} BRACKISH_IDENTITY=${opts.alice} brackish visualize ${docName} --format markdown | less`,
+            `  curl -s "${url.replace('/ui/', '/documents/').replace(`?token=`, `/openapi.yaml?token=`)}"`,
+            '',
+            '(Ctrl-C to stop and clean up the sandbox.)',
+            '',
+          ].join('\n'),
+        );
+
+        // Block forever — the bound sockets keep the event loop alive until SIGINT.
+      },
+    );
 
   // --- install / uninstall / hook-snippet ---
 
