@@ -126,19 +126,47 @@ export async function seedChatterDemo(opts: SeedOptions): Promise<{ documentName
     await a.proposeEndpoint(docName, 'get', '/messages', getMessagesOp);
     await b.acceptEndpoint(docName, 'get', '/messages');
 
-    // --- GET /messages/stream: v1 weird `tail` flag rejected; v2 with `since` cursor accepted ---
-    step('endpoint GET /messages/stream v1 (text/event-stream, weird "tail" flag)');
+    // --- GET /messages/stream: SSE vs long-poll debate; alice's SSE wins ---
+    // v1 (alice: SSE) → bob rejects, counter-proposes v2 (long-poll JSON) → alice rejects bob's
+    // counter → alice re-proposes v3 ≈ v1 → bob accepts. The frontend's domain knowledge
+    // (EventSource ergonomics, Last-Event-ID resume, ordering) prevails.
+    step('endpoint GET /messages/stream v1 (alice: SSE with since cursor)');
     await a.proposeEndpoint(docName, 'get', '/messages/stream', getMessagesStreamOpV1);
-    step('  rejected by bob (filter shape)');
+    await a.sendMessage(
+      docName,
+      'opening with SSE — one open connection, server pushes, EventSource handles reconnect with Last-Event-ID for us.',
+    );
+    step('  rejected by bob (counter-pitch: long-poll)');
     await b.rejectEndpoint(
       docName,
       'get',
       '/messages/stream',
-      "replace `tail` with a `since` cursor — clients can resume from the last event id; matches EventSource's Last-Event-ID semantics",
+      'SSE needs nginx/proxy buffering tuned off + we lose request-level idempotency. Counter-proposing a long-poll: client GETs, server holds the connection up to ~30s and returns Message[] when new ones arrive or empty on timeout. Simpler infra.',
     );
-    step('endpoint GET /messages/stream v2 (since cursor)');
-    await a.proposeEndpoint(docName, 'get', '/messages/stream', getMessagesStreamOpV2);
+    await b.sendMessage(
+      docName,
+      'going to counter-propose v2 with the long-poll shape so we can compare side-by-side.',
+    );
+    step('endpoint GET /messages/stream v2 (bob: long-poll counter-proposal)');
+    await b.proposeEndpoint(docName, 'get', '/messages/stream', getMessagesStreamOpV2BobCounter);
+    step('  rejected by alice (back to SSE)');
+    await a.rejectEndpoint(
+      docName,
+      'get',
+      '/messages/stream',
+      'long-poll loses per-message ordering guarantees across reconnects, has no built-in Last-Event-ID resume, and the per-cycle overhead is significant at chat-room scale. EventSource is one line of client code. The proxy-buffering thing is a one-time deploy-side config change.',
+    );
+    await a.sendMessage(
+      docName,
+      're-proposing SSE as v3 — same shape as v1 but with explicit Last-Event-ID language in the description so the resume semantics are unambiguous.',
+    );
+    step('endpoint GET /messages/stream v3 (alice: SSE again, clarified)');
+    await a.proposeEndpoint(docName, 'get', '/messages/stream', getMessagesStreamOpV3);
     await b.acceptEndpoint(docName, 'get', '/messages/stream');
+    await b.sendMessage(
+      docName,
+      "ok, you're right about ordering + reconnect. Will disable proxy_buffering on this path; noting in the deploy runbook.",
+    );
 
     // --- POST /attachments (octet-stream upload) ---
     step('endpoint POST /attachments (application/octet-stream)');
@@ -436,14 +464,15 @@ const getMessagesOp: OperationSpec = {
 
 const getMessagesStreamOpV1: OperationSpec = {
   summary: 'Stream live messages (SSE)',
-  description: 'Server-Sent Events stream of new messages.',
+  description:
+    'Server-Sent Events stream of new messages since the cursor. Each frame is `event: message`, `data: <JSON-encoded Message>`.',
   security: [{ bearer: [] }],
   parameters: [
     {
-      name: 'tail',
+      name: 'since',
       in: 'query',
-      description: 'if true, only stream new messages from connect time',
-      schema: { type: 'boolean', default: true },
+      description: 'message id cursor; only messages with id > since are streamed',
+      schema: { type: 'string' },
     },
   ],
   responses: {
@@ -451,26 +480,54 @@ const getMessagesStreamOpV1: OperationSpec = {
       description: 'event stream',
       content: {
         'text/event-stream': {
-          schema: {
-            type: 'string',
-            description: 'each event has data = JSON-encoded Message',
-          },
+          schema: { type: 'string', description: 'each event.data is a JSON-encoded Message' },
         },
       },
     },
   },
 };
 
-const getMessagesStreamOpV2: OperationSpec = {
-  summary: 'Stream live messages (SSE)',
+const getMessagesStreamOpV2BobCounter: OperationSpec = {
+  summary: 'Poll for new messages (long-poll)',
   description:
-    'Server-Sent Events stream. Pass `Last-Event-ID` header (or `?since=`) to resume from a cursor. Each event has `event: message` and `data: <Message JSON>`.',
+    'Long-poll alternative to SSE: server holds the connection up to `timeout` seconds and returns when new messages arrive, or returns an empty array on timeout. Client should immediately re-request with the latest `since` cursor.',
   security: [{ bearer: [] }],
   parameters: [
     {
       name: 'since',
       in: 'query',
-      description: 'message id cursor; only messages with id > since are streamed',
+      description: 'message id cursor',
+      schema: { type: 'string' },
+    },
+    {
+      name: 'timeout',
+      in: 'query',
+      description: 'max seconds to hold the connection (default 30, max 60)',
+      schema: { type: 'integer', default: 30, maximum: 60 },
+    },
+  ],
+  responses: {
+    '200': {
+      description: 'new messages since cursor (possibly empty)',
+      content: {
+        'application/json': {
+          schema: { type: 'array', items: { $ref: '#/components/schemas/Message' } },
+        },
+      },
+    },
+  },
+};
+
+const getMessagesStreamOpV3: OperationSpec = {
+  summary: 'Stream live messages (SSE)',
+  description:
+    "Server-Sent Events stream. Pass the `Last-Event-ID` request header (or `?since=` as a fallback) to resume from a cursor; `EventSource` does this automatically on reconnect, so resume after a dropped connection is free. Each frame has `event: message` and `data: <JSON-encoded Message>`.\n\nDeploy note: this path needs `proxy_buffering off` (nginx) or equivalent so the proxy doesn't hold frames.",
+  security: [{ bearer: [] }],
+  parameters: [
+    {
+      name: 'since',
+      in: 'query',
+      description: 'fallback cursor when Last-Event-ID header is unavailable',
       schema: { type: 'string' },
     },
   ],
