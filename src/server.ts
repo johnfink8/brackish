@@ -6,24 +6,36 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
+import { stringify as yamlStringify } from 'yaml';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from './config.js';
+import { generatePatch } from './diff.js';
 import {
+  CONVENTION_KEY,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
   type DocumentName,
   DocumentNameSchema,
   type Event,
+  type HttpMethod,
   IdentitySchema,
+  parseOperationIdentityKey,
+  ProposeConventionRequestSchema,
+  ProposeEndpointRequestSchema,
+  ProposeSchemaRequestSchema,
   RedeemInviteRequestSchema,
+  RejectArtifactRequestSchema,
+  SchemaNameSchema,
   SendMessageRequestSchema,
 } from './models.js';
 import { EventNotifier } from './notifier.js';
+import { assembleDocument } from './openapi.js';
+import { renderHtml, type RationaleMap } from './render.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.2.0';
 
 const WAIT_TIMEOUT_DEFAULT_S = 30;
 const WAIT_TIMEOUT_MIN_S = 1;
@@ -155,6 +167,231 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, documents });
   });
 
+  // --- endpoints (operation artifacts) ---
+
+  app.post('/documents/:name/endpoints', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = ProposeEndpointRequestSchema.parse(await c.req.json());
+    const v = await store.proposeEndpoint(docName, body.method, body.path, body.spec, c.get('identity'));
+    return c.json(v, 201);
+  });
+
+  app.get('/documents/:name/endpoints', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const endpoints = await store.listEndpoints(docName);
+    return c.json({ endpoints });
+  });
+
+  app.get('/documents/:name/endpoints/:id', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { method, path } = decodeEndpointId(c.req.param('id'));
+    const versionStr = c.req.query('version');
+    const wantProposed = boolQuery(c.req.query('proposed'));
+    if (versionStr !== undefined) {
+      const v = Number.parseInt(versionStr, 10);
+      if (!Number.isFinite(v) || v < 1) return c.json({ error: 'invalid version' }, 400);
+      const found = await store.getEndpointByVersion(docName, method, path, v);
+      if (!found) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+      return c.json(found);
+    }
+    const found = wantProposed
+      ? await store.getEndpointProposed(docName, method, path)
+      : await store.getEndpointCurrent(docName, method, path);
+    if (!found) {
+      return c.json(
+        { error: `no ${wantProposed ? 'proposed' : 'accepted'} version`, code: 'artifact_not_found' },
+        404,
+      );
+    }
+    return c.json(found);
+  });
+
+  app.post('/documents/:name/endpoints/:id/accept', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { method, path } = decodeEndpointId(c.req.param('id'));
+    const version = await resolveEndpointTargetVersion(store, docName, method, path, c.req.query('version'));
+    const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.post('/documents/:name/endpoints/:id/reject', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { method, path } = decodeEndpointId(c.req.param('id'));
+    const body = RejectArtifactRequestSchema.parse(await c.req.json());
+    const version = await resolveEndpointTargetVersion(store, docName, method, path, c.req.query('version'));
+    const v = await store.rejectEndpoint(docName, method, path, version, body.reason, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.get('/documents/:name/endpoints/:id/diff', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { method, path } = decodeEndpointId(c.req.param('id'));
+    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
+      store.getEndpointByVersion(docName, method, path, v),
+    );
+    if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
+    const patch = generatePatch(from.spec, to.spec);
+    return c.json({ fromVersion: from.version, toVersion: to.version, patch });
+  });
+
+  // --- schemas ---
+
+  app.post('/documents/:name/schemas', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = ProposeSchemaRequestSchema.parse(await c.req.json());
+    const v = await store.proposeSchema(docName, body.name, body.spec, c.get('identity'));
+    return c.json(v, 201);
+  });
+
+  app.get('/documents/:name/schemas', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemas = await store.listSchemas(docName);
+    return c.json({ schemas });
+  });
+
+  app.get('/documents/:name/schemas/:schemaName', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
+    const versionStr = c.req.query('version');
+    const wantProposed = boolQuery(c.req.query('proposed'));
+    if (versionStr !== undefined) {
+      const v = Number.parseInt(versionStr, 10);
+      if (!Number.isFinite(v) || v < 1) return c.json({ error: 'invalid version' }, 400);
+      const found = await store.getSchemaByVersion(docName, schemaName, v);
+      if (!found) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+      return c.json(found);
+    }
+    const found = wantProposed
+      ? await store.getSchemaProposed(docName, schemaName)
+      : await store.getSchemaCurrent(docName, schemaName);
+    if (!found) {
+      return c.json(
+        { error: `no ${wantProposed ? 'proposed' : 'accepted'} version`, code: 'artifact_not_found' },
+        404,
+      );
+    }
+    return c.json(found);
+  });
+
+  app.post('/documents/:name/schemas/:schemaName/accept', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
+    const version = await resolveSchemaTargetVersion(store, docName, schemaName, c.req.query('version'));
+    const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.post('/documents/:name/schemas/:schemaName/reject', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
+    const body = RejectArtifactRequestSchema.parse(await c.req.json());
+    const version = await resolveSchemaTargetVersion(store, docName, schemaName, c.req.query('version'));
+    const v = await store.rejectSchema(docName, schemaName, version, body.reason, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.get('/documents/:name/schemas/:schemaName/diff', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
+    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
+      store.getSchemaByVersion(docName, schemaName, v),
+    );
+    if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
+    const patch = generatePatch(from.spec, to.spec);
+    return c.json({ fromVersion: from.version, toVersion: to.version, patch });
+  });
+
+  // --- convention (singleton per document) ---
+
+  app.post('/documents/:name/convention', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = ProposeConventionRequestSchema.parse(await c.req.json());
+    const v = await store.proposeConvention(docName, body.spec, c.get('identity'));
+    return c.json(v, 201);
+  });
+
+  app.get('/documents/:name/convention', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const v = await store.getConventionCurrent(docName);
+    if (!v) return c.json({ error: 'no accepted convention', code: 'artifact_not_found' }, 404);
+    return c.json(v);
+  });
+
+  app.get('/documents/:name/convention/proposed', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const v = await store.getConventionProposed(docName);
+    if (!v) return c.json({ error: 'no proposed convention', code: 'artifact_not_found' }, 404);
+    return c.json(v);
+  });
+
+  app.post('/documents/:name/convention/accept', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));
+    const v = await store.acceptConvention(docName, version, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.post('/documents/:name/convention/reject', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = RejectArtifactRequestSchema.parse(await c.req.json());
+    const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));
+    const v = await store.rejectConvention(docName, version, body.reason, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.get('/documents/:name/convention/diff', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
+      store.getConventionByVersion(docName, v),
+    );
+    if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
+    const patch = generatePatch(from.spec, to.spec);
+    return c.json({ fromVersion: from.version, toVersion: to.version, patch });
+  });
+
+  // --- render routes (used by visualize CLI + browser UI) ---
+
+  app.get('/documents/:name/openapi.yaml', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const doc = await buildOpenAPI(store, docName);
+    return c.body(yamlStringify(doc), 200, { 'content-type': 'application/yaml; charset=utf-8' });
+  });
+
+  app.get('/documents/:name/openapi.json', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const doc = await buildOpenAPI(store, docName);
+    return c.json(doc);
+  });
+
+  app.get('/documents/:name/rationale.json', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const rationale = await buildRationaleMap(store, docName);
+    return c.json({
+      endpoints: Object.fromEntries(rationale.endpoints),
+      schemas: Object.fromEntries(rationale.schemas),
+      convention: rationale.convention,
+    });
+  });
+
+  // --- browser UI ---
+
+  app.get('/ui', async (c) => {
+    const docs = await store.listDocuments();
+    const links = docs
+      .map((d) => `<li><a href="/ui/${encodeURIComponent(d.name)}">${escapeHtml(d.name)}</a></li>`)
+      .join('\n');
+    return c.html(`<!doctype html><meta charset=utf-8><title>brackish documents</title>
+<h1>brackish documents</h1>
+<ul>${links || '<li>(none)</li>'}</ul>`);
+  });
+
+  app.get('/ui/:doc', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('doc'));
+    const document = await buildOpenAPI(store, docName);
+    const rationale = await buildRationaleMap(store, docName);
+    return c.html(renderHtml({ document, rationale }, { documentName: docName }));
+  });
+
   return app;
 }
 
@@ -202,6 +439,178 @@ function clampTimeoutSeconds(raw: string | undefined): number {
   const n = Number.parseFloat(raw);
   if (!Number.isFinite(n) || n <= 0) return WAIT_TIMEOUT_DEFAULT_S;
   return Math.min(Math.max(n, WAIT_TIMEOUT_MIN_S), WAIT_TIMEOUT_MAX_S);
+}
+
+function decodeEndpointId(rawId: string): { method: HttpMethod; path: string } {
+  return parseOperationIdentityKey(decodeURIComponent(rawId));
+}
+
+function boolQuery(raw: string | undefined): boolean {
+  return raw === '1' || raw === 'true';
+}
+
+async function resolveEndpointTargetVersion(
+  store: Store,
+  docName: DocumentName,
+  method: HttpMethod,
+  path: string,
+  raw: string | undefined,
+): Promise<number> {
+  if (raw !== undefined) {
+    const v = Number.parseInt(raw, 10);
+    if (!Number.isFinite(v) || v < 1) throw new HttpError(400, 'invalid version');
+    return v;
+  }
+  const proposed = await store.getEndpointProposed(docName, method, path);
+  if (!proposed)
+    throw new StoreError(
+      'artifact_not_found',
+      `no proposed version of endpoint ${method} ${path} to act on`,
+    );
+  return proposed.version;
+}
+
+async function resolveSchemaTargetVersion(
+  store: Store,
+  docName: DocumentName,
+  name: string,
+  raw: string | undefined,
+): Promise<number> {
+  if (raw !== undefined) {
+    const v = Number.parseInt(raw, 10);
+    if (!Number.isFinite(v) || v < 1) throw new HttpError(400, 'invalid version');
+    return v;
+  }
+  const proposed = await store.getSchemaProposed(docName, name);
+  if (!proposed)
+    throw new StoreError(
+      'artifact_not_found',
+      `no proposed version of schema ${name} to act on`,
+    );
+  return proposed.version;
+}
+
+async function resolveConventionTargetVersion(
+  store: Store,
+  docName: DocumentName,
+  raw: string | undefined,
+): Promise<number> {
+  if (raw !== undefined) {
+    const v = Number.parseInt(raw, 10);
+    if (!Number.isFinite(v) || v < 1) throw new HttpError(400, 'invalid version');
+    return v;
+  }
+  const proposed = await store.getConventionProposed(docName);
+  if (!proposed)
+    throw new StoreError(
+      'artifact_not_found',
+      'no proposed version of convention to act on',
+    );
+  return proposed.version;
+}
+
+type VersionedSpec = { version: number; spec: unknown };
+
+async function resolveDiffRange<T extends VersionedSpec | null>(
+  fromRaw: string | undefined,
+  toRaw: string | undefined,
+  fetchByVersion: (v: number) => Promise<T>,
+): Promise<{ from: VersionedSpec | null; to: VersionedSpec | null }> {
+  // Defaults: --to is the latest existing version; --from is to-1 if not given.
+  const toV = toRaw !== undefined ? Number.parseInt(toRaw, 10) : NaN;
+  const fromV = fromRaw !== undefined ? Number.parseInt(fromRaw, 10) : NaN;
+
+  let to: VersionedSpec | null = null;
+  if (Number.isFinite(toV) && toV >= 1) {
+    const v = await fetchByVersion(toV);
+    if (v) to = { version: v.version, spec: v.spec };
+  } else {
+    // Walk down from a high version until we find one. For typical use the agent will pass --to.
+    for (let v = 50; v >= 1; v--) {
+      const found = await fetchByVersion(v);
+      if (found) {
+        to = { version: found.version, spec: found.spec };
+        break;
+      }
+    }
+  }
+  if (!to) return { from: null, to: null };
+  const targetFrom = Number.isFinite(fromV) && fromV >= 1 ? fromV : to.version - 1;
+  if (targetFrom < 1) return { from: null, to };
+  const fromV2 = await fetchByVersion(targetFrom);
+  return {
+    from: fromV2 ? { version: fromV2.version, spec: fromV2.spec } : null,
+    to,
+  };
+}
+
+async function buildOpenAPI(
+  store: Store,
+  docName: DocumentName,
+): Promise<ReturnType<typeof assembleDocument>> {
+  const [endpoints, schemas, convention] = await Promise.all([
+    collectAcceptedEndpoints(store, docName),
+    collectAcceptedSchemas(store, docName),
+    store.getConventionCurrent(docName),
+  ]);
+  return assembleDocument({ operations: endpoints, schemas, convention });
+}
+
+async function collectAcceptedEndpoints(
+  store: Store,
+  docName: DocumentName,
+): Promise<Array<NonNullable<Awaited<ReturnType<Store['getEndpointCurrent']>>>>> {
+  const summaries = await store.listEndpoints(docName);
+  const result: Array<NonNullable<Awaited<ReturnType<Store['getEndpointCurrent']>>>> = [];
+  for (const s of summaries) {
+    if (s.currentVersion === null) continue;
+    const v = await store.getEndpointCurrent(docName, s.method, s.path);
+    if (v) result.push(v);
+  }
+  return result;
+}
+
+async function collectAcceptedSchemas(
+  store: Store,
+  docName: DocumentName,
+): Promise<Array<NonNullable<Awaited<ReturnType<Store['getSchemaCurrent']>>>>> {
+  const summaries = await store.listSchemas(docName);
+  const result: Array<NonNullable<Awaited<ReturnType<Store['getSchemaCurrent']>>>> = [];
+  for (const s of summaries) {
+    if (s.currentVersion === null) continue;
+    const v = await store.getSchemaCurrent(docName, s.name);
+    if (v) result.push(v);
+  }
+  return result;
+}
+
+async function buildRationaleMap(store: Store, docName: DocumentName): Promise<RationaleMap> {
+  const endpoints = new Map<string, Awaited<ReturnType<Store['rationaleForEndpoint']>>>();
+  const schemas = new Map<string, Awaited<ReturnType<Store['rationaleForSchema']>>>();
+  const epSummaries = await store.listEndpoints(docName);
+  for (const s of epSummaries) {
+    const r = await store.rationaleForEndpoint(docName, s.method, s.path);
+    if (r.length > 0) endpoints.set(`${s.method.toUpperCase()} ${s.path}`, r);
+  }
+  const schemaSummaries = await store.listSchemas(docName);
+  for (const s of schemaSummaries) {
+    const r = await store.rationaleForSchema(docName, s.name);
+    if (r.length > 0) schemas.set(s.name, r);
+  }
+  const convention = await store.rationaleForConvention(docName);
+  return { endpoints, schemas, convention };
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => {
+    const m: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+    };
+    return m[c] ?? c;
+  });
 }
 
 
