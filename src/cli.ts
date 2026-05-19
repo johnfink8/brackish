@@ -7,6 +7,7 @@
 //   - exit 0 = success (including timed-out wait); 1 = operation error; 2 = usage/auth/connection
 
 import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline/promises';
 import { Command } from 'commander';
 import { BrackishClient, ClientError, clientOptionsFromConfig, redeemInvite } from './client.js';
 import {
@@ -20,6 +21,15 @@ import {
   saveClientConfig,
   saveServerConfig,
 } from './config.js';
+import {
+  defaultSkillDest,
+  hookSnippet,
+  inspectInstall,
+  installHook,
+  installSkill,
+  uninstallHook,
+  uninstallSkill,
+} from './install.js';
 import { IdentitySchema, TokenSchema } from './models.js';
 import {
   describeArtifactVersion,
@@ -444,6 +454,168 @@ export function buildProgram(): Command {
         }),
     );
 
+  // --- install / uninstall / hook-snippet ---
+
+  program
+    .command('install')
+    .description(
+      'install the brackish skill and (with confirmation) the inbox UserPromptSubmit hook',
+    )
+    .option('--skill-only', 'install just the skill, not the hook')
+    .option('--hook-only', 'install just the hook, not the skill')
+    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
+    .option('--yes', 'non-interactive: assume yes to all confirmations')
+    .option('--force', 'overwrite existing skill dir')
+    .action(
+      async (opts: {
+        skillOnly?: boolean;
+        hookOnly?: boolean;
+        dest?: string;
+        yes?: boolean;
+        force?: boolean;
+      }) => {
+        if (opts.skillOnly && opts.hookOnly) {
+          errExit(2, 'install: pass at most one of --skill-only or --hook-only');
+        }
+        const dest = opts.dest ?? defaultSkillDest();
+        const plan = inspectInstall({ dest });
+
+        // Print plan to stderr.
+        process.stderr.write('brackish install — plan:\n');
+        if (!opts.hookOnly) {
+          const skillNote = plan.skill.exists
+            ? opts.force
+              ? 'OVERWRITE (force)'
+              : 'exists — needs --force to overwrite'
+            : 'create';
+          process.stderr.write(`  skill: ${plan.skill.destPath}\n    ${skillNote}\n`);
+        }
+        if (!opts.skillOnly) {
+          if (plan.hook.settingsParseError) {
+            errExit(
+              2,
+              `install: settings.json at ${plan.hook.settingsPath} is malformed:\n  ${plan.hook.settingsParseError}\nFix it (or move it aside) and re-run.`,
+            );
+          }
+          const hookNote = plan.hook.alreadyInstalled
+            ? 'already installed (no edit needed)'
+            : plan.hook.settingsExists
+              ? `merge into existing settings.json (other hooks preserved: ${plan.hook.otherHookCount})`
+              : `create settings.json`;
+          process.stderr.write(`  hook: ${plan.hook.settingsPath}\n    ${hookNote}\n`);
+        }
+
+        // Per-artifact confirmation.
+        const doSkill = !opts.hookOnly && (opts.yes || (await confirm('Install skill?', true)));
+        const doHook =
+          !opts.skillOnly &&
+          !plan.hook.alreadyInstalled &&
+          (opts.yes || (await confirm('Install hook?', true)));
+
+        const summary: string[] = [];
+        if (doSkill) {
+          const res = installSkill(dest, opts.force ? { force: true } : {});
+          summary.push(`  skill: wrote ${res.wroteFiles} files to ${res.destPath}`);
+        } else if (!opts.hookOnly) {
+          summary.push('  skill: skipped');
+        }
+        if (doHook) {
+          // After the skill is copied, the hook script is at dest/hooks/inbox-on-prompt.sh.
+          const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
+          const res = installHook(scriptPath);
+          if (res.alreadyInstalled) summary.push('  hook: already installed (skipped)');
+          else
+            summary.push(
+              `  hook: added entry → ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`,
+            );
+        } else if (!opts.skillOnly) {
+          summary.push(
+            plan.hook.alreadyInstalled ? '  hook: already installed (skipped)' : '  hook: skipped',
+          );
+        }
+
+        process.stderr.write(`\nbrackish install — done:\n${summary.join('\n')}\n`);
+        if (doSkill || doHook) {
+          process.stderr.write(
+            '\nNext: `brackish init --identity <name>` (if not already), then `brackish serve &`.\n',
+          );
+        }
+      },
+    );
+
+  program
+    .command('uninstall')
+    .description('reverse `brackish install`: remove the skill dir + our hook entry')
+    .option('--skill-only', 'remove only the skill, leave the hook')
+    .option('--hook-only', 'remove only the hook, leave the skill')
+    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
+    .option('--yes', 'non-interactive: assume yes to all confirmations')
+    .action(
+      async (opts: { skillOnly?: boolean; hookOnly?: boolean; dest?: string; yes?: boolean }) => {
+        if (opts.skillOnly && opts.hookOnly) {
+          errExit(2, 'uninstall: pass at most one of --skill-only or --hook-only');
+        }
+        const dest = opts.dest ?? defaultSkillDest();
+        const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
+
+        const plan = inspectInstall({ dest });
+        process.stderr.write('brackish uninstall — plan:\n');
+        if (!opts.hookOnly) {
+          process.stderr.write(
+            `  skill: ${plan.skill.destPath}\n    ${plan.skill.exists ? 'remove' : 'nothing to remove'}\n`,
+          );
+        }
+        if (!opts.skillOnly) {
+          process.stderr.write(
+            `  hook:  ${plan.hook.settingsPath}\n    ${plan.hook.alreadyInstalled ? 'remove our entry' : 'nothing to remove'}\n`,
+          );
+        }
+
+        const doSkill =
+          !opts.hookOnly &&
+          plan.skill.exists &&
+          (opts.yes || (await confirm('Uninstall skill?', true)));
+        const doHook =
+          !opts.skillOnly &&
+          plan.hook.alreadyInstalled &&
+          (opts.yes || (await confirm('Uninstall hook?', true)));
+
+        const summary: string[] = [];
+        if (doSkill) {
+          const removed = uninstallSkill(dest);
+          summary.push(removed ? `  skill: removed ${dest}` : '  skill: nothing to remove');
+        } else if (!opts.hookOnly && plan.skill.exists) {
+          summary.push('  skill: skipped');
+        } else if (!opts.hookOnly) {
+          summary.push('  skill: nothing to remove');
+        }
+        if (doHook) {
+          const res = uninstallHook(scriptPath);
+          summary.push(
+            res.removed
+              ? `  hook: removed entry from ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`
+              : '  hook: nothing to remove',
+          );
+        } else if (!opts.skillOnly) {
+          summary.push(
+            plan.hook.alreadyInstalled ? '  hook: skipped' : '  hook: nothing to remove',
+          );
+        }
+
+        process.stderr.write(`\nbrackish uninstall — done:\n${summary.join('\n')}\n`);
+      },
+    );
+
+  program
+    .command('hook-snippet')
+    .description('print the settings.json JSON fragment for the inbox hook (writes nothing)')
+    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
+    .action((opts: { dest?: string }) => {
+      const dest = opts.dest ?? defaultSkillDest();
+      const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
+      process.stdout.write(`${hookSnippet(scriptPath)}\n`);
+    });
+
   return program;
 }
 
@@ -527,6 +699,18 @@ function errExit(code: number, message: string): never {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const suffix = defaultYes ? '[Y/n]' : '[y/N]';
+    const ans = (await rl.question(`${prompt} ${suffix} `)).trim().toLowerCase();
+    if (ans === '') return defaultYes;
+    return ans === 'y' || ans === 'yes';
+  } finally {
+    rl.close();
+  }
 }
 
 // --- main ---
