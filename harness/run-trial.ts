@@ -11,14 +11,7 @@
 // The harness rebuilds dist if missing.
 
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import {
-  appendFileSync,
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -324,6 +317,34 @@ function meetsSuccessCriterion(summary: DocumentSummary, scenario: Scenario): bo
 
 // --- final render ---
 
+/** Per-side post-mortem critique budget. Smaller than negotiation rounds — reflection doesn't
+ *  need much exploration; we mostly want one sub-Claude turn with a focused prompt. */
+const CRITIQUE_BUDGET_USD = 0.4;
+
+function buildCritiquePrompt(
+  side: Side,
+  terminationReason: string,
+  summary: DocumentSummary | undefined,
+): string {
+  const accEnds = summary?.acceptedEndpoints.length ?? 0;
+  const accSchemas = summary?.acceptedSchemas.length ?? 0;
+  const rejs = summary?.rejectionCount ?? 0;
+  return [
+    `The brackish negotiation has ended. Termination: ${terminationReason}.`,
+    `Final state: ${accEnds} endpoints accepted, ${accSchemas} schemas accepted, ${rejs} rejections during the run, convention ${summary?.conventionStatus ?? 'none'}.`,
+    '',
+    'This is a **post-mortem turn**. Do NOT propose, accept, reject, or withdraw anything. Do NOT call `brackish send`. You may read with `brackish read`, `brackish status`, `brackish endpoint show`, `brackish visualize` for grounding, but the goal is reflection — not action.',
+    '',
+    `You're the ${side} Claude. In ≤300 words, give an honest assessment of brackish as a tool you just used. Be concrete — cite specific verbs (\`brackish status\`, \`endpoint propose --file\`, etc.), flags, or error messages by name. Cover:`,
+    '',
+    '- **What worked.** Which verbs/flags/skill instructions saved you tokens or round-trips?',
+    '- **Friction.** Where did you spend turns on things that should have been local or instantaneous? Any error message or skill section that was unclear?',
+    '- **Missing.** What CLI verb, flag, or skill instruction would have saved you a turn?',
+    '',
+    'Focus on the tool experience. Do **not** restate the contract content.',
+  ].join('\n');
+}
+
 function renderFinal(
   brackishBin: string,
   brackishHome: string,
@@ -409,6 +430,7 @@ async function main(): Promise<void> {
   const frontendDir = join(trialDir, 'frontend');
   const backendDir = join(trialDir, 'backend');
 
+  const critiqueDir = join(trialDir, 'critiques');
   for (const d of [
     trialDir,
     brackishHome,
@@ -417,29 +439,20 @@ async function main(): Promise<void> {
     binDir,
     frontendDir,
     backendDir,
+    critiqueDir,
   ]) {
     mkdirSync(d, { recursive: true });
   }
 
-  // Side scaffolding: CLAUDE.md + notes.md only (the "minimal" choice).
-  //
-  // The CLAUDE.md is the role brief followed by the brackish skill teaching — without the skill,
-  // trial Claudes have to invent vocabulary for `x-brackish` fields and end up with slips like
-  // `sideEffect` (singular). Production Claudes have the skill via `brackish install`; the trial
-  // gets parity by inlining the skill body here.
-  const skillBody = readFileSync(join(REPO_ROOT, 'skill', 'SKILL.md'), 'utf8');
-  const skillAppendix = [
-    '',
-    '---',
-    '',
-    '# Appendix: brackish skill (canonical teaching)',
-    '',
-    'The content below is `skill/SKILL.md` shipped with brackish. In production, Claudes load this via `brackish install`; this trial inlines it so you have the same teaching. **Use the canonical field names it defines** (e.g. `x-brackish.sideEffects` plural, not `sideEffect`).',
-    '',
-    skillBody,
-  ].join('\n');
-  writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend + skillAppendix);
-  writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend + skillAppendix);
+  // Side scaffolding: CLAUDE.md is the role brief ONLY — no brackish-specific text. In
+  // production a Claude doesn't have an inlined plugin teaching in CLAUDE.md; it has the skill
+  // installed via `brackish install`. The trial matches that path: we run `brackish install
+  // --local --yes --permission --force` in each side's dir below, which drops the project-scope
+  // skill into `.claude/skills/brackish/`, the UserPromptSubmit hook into `.claude/settings.json`,
+  // and the `Bash(brackish *)` allow-rule. The sub-Claude discovers the skill the same way a
+  // real user's Claude does.
+  writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend);
+  writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend);
   writeFileSync(
     join(frontendDir, 'notes.md'),
     "# scratchpad — frontend Claude\n\nUse this for any local note-taking that's not part of the contract.\n",
@@ -452,6 +465,28 @@ async function main(): Promise<void> {
   // Wrapper bin: ensures the sub-claudes' `brackish` resolves to *our* dist build, not whatever
   // global install might be on the user's PATH.
   const brackishBin = writeWrapperBin(binDir, brackishEntry);
+
+  // Install the brackish skill into each side's project-scope `.claude/`. Mirrors validate-skill.
+  const installEnv = (home: string): NodeJS.ProcessEnv => ({
+    ...process.env,
+    BRACKISH_HOME: home,
+    BRACKISH_SOCKET: join(home, 'brackish.sock'),
+    PATH: `${binDir}:${process.env.PATH ?? ''}`,
+  });
+  for (const [side, dir] of [
+    ['frontend', frontendDir],
+    ['backend', backendDir],
+  ] as const) {
+    console.error(`harness: ${side}-side \`brackish install --local --yes --permission\``);
+    const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--permission', '--force'], {
+      cwd: dir,
+      env: installEnv(brackishHome),
+      encoding: 'utf8',
+    });
+    if (r.status !== 0) {
+      throw new Error(`brackish install --local failed (cwd=${dir}):\n${r.stderr}`);
+    }
+  }
 
   // Record the run config for repeatability.
   writeFileSync(
@@ -585,6 +620,45 @@ async function main(): Promise<void> {
     if (round > scenario.maxRounds) {
       console.error(`harness: hit maxRounds=${scenario.maxRounds}`);
     }
+
+    // Post-mortem critiques: each side gets one read-only turn to assess brackish itself.
+    // Failures here don't tank the trial — the negotiation result is the primary artifact.
+    const lastSummaryForCritique = summaryHistory[summaryHistory.length - 1];
+    console.error('harness: running post-mortem critiques (parallel)');
+    const critiqueStart = Date.now();
+    const critiqueResults = await Promise.allSettled(
+      (['frontend', 'backend'] as const).map((side) =>
+        runOneTurn({
+          side,
+          prompt: buildCritiquePrompt(side, terminationReason, lastSummaryForCritique),
+          cwd: side === 'frontend' ? frontendDir : backendDir,
+          brackishHome,
+          budgetUsd: CRITIQUE_BUDGET_USD,
+          timeoutMs: scenario.perTurnTimeoutMs,
+          pathBinDir: binDir,
+          transcriptPath: join(transcriptDir, `critique-${side}.json`),
+        }),
+      ),
+    );
+    let critiqueCostTotal = 0;
+    (['frontend', 'backend'] as const).forEach((side, i) => {
+      const r = critiqueResults[i];
+      if (!r) return;
+      if (r.status === 'fulfilled') {
+        writeFileSync(join(critiqueDir, `${side}.md`), r.value.finalText);
+        critiqueCostTotal += r.value.costUsd;
+        console.error(
+          `harness:   ${side} critique: ${(r.value.durationMs / 1000).toFixed(1)}s, $${r.value.costUsd.toFixed(3)}`,
+        );
+      } else {
+        const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        writeFileSync(join(critiqueDir, `${side}.md`), `(critique failed: ${msg})\n`);
+        console.error(`harness:   ${side} critique FAILED: ${msg}`);
+      }
+    });
+    console.error(
+      `harness:   critiques done in ${((Date.now() - critiqueStart) / 1000).toFixed(1)}s ($${critiqueCostTotal.toFixed(3)})`,
+    );
   } finally {
     // Render final artifacts BEFORE killing the daemon.
     try {
@@ -601,12 +675,12 @@ async function main(): Promise<void> {
 
   // Write summary report.
   const lastSummary = summaryHistory[summaryHistory.length - 1];
-  const totalCost = turnLog.reduce((acc, t) => acc + t.costUsd, 0);
+  const negotiationCost = turnLog.reduce((acc, t) => acc + t.costUsd, 0);
   const summaryReport = [
     `# trial ${scenario.name}-${trialId}`,
     `terminated: ${terminationReason}`,
     `rounds: ${turnLog.length}`,
-    `total cost: $${totalCost.toFixed(2)}`,
+    `negotiation cost: $${negotiationCost.toFixed(2)} (critiques tracked separately under critiques/)`,
     '',
     '## final document',
     `endpoints accepted: ${lastSummary?.acceptedEndpoints.length ?? 0}`,
@@ -629,7 +703,10 @@ async function main(): Promise<void> {
   writeFileSync(join(trialDir, 'summary.txt'), summaryReport);
 
   console.error(`\nharness: trial complete.\n  → ${trialDir}`);
-  console.error(`harness: termination=${terminationReason}, total=$${totalCost.toFixed(2)}`);
+  console.error(
+    `harness: termination=${terminationReason}, negotiation=$${negotiationCost.toFixed(2)}`,
+  );
+  console.error(`harness: critiques at ${critiqueDir}/{frontend,backend}.md`);
 }
 
 main().catch((e) => {
