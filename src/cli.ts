@@ -21,7 +21,6 @@ import {
   ensureBrackishHome,
   loadClientConfig,
   loadServerConfig,
-  parseBindAddress,
   saveClientConfig,
   saveServerConfig,
 } from './config.js';
@@ -1319,15 +1318,6 @@ function readStdin(): Promise<string> {
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
   });
-}
-
-async function readContent(file: string | undefined): Promise<string> {
-  if (file === '-' || file === undefined) {
-    // Treat undefined like `-` if stdin is piped — saves typing.
-    if (!process.stdin.isTTY || file === '-') return readStdin();
-    errExit(2, 'propose: provide --file PATH or pipe content via stdin');
-  }
-  return readFileSync(file, 'utf8');
 }
 
 function emit(text: string): void {

@@ -11,7 +11,6 @@ import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from './config.js';
 import { generatePatch } from './diff.js';
 import {
-  CONVENTION_KEY,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
