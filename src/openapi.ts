@@ -26,6 +26,7 @@ export type OpenAPIDocument = {
     [extra: string]: unknown;
   };
   servers?: Array<{ url: string; description?: string | undefined; [extra: string]: unknown }>;
+  security?: Array<Record<string, string[]>>;
   paths: Record<string, Record<string, OperationSpec>>;
   components?: {
     schemas?: Record<string, JSONSchema>;
@@ -62,6 +63,19 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
   const securitySchemes = conventionSpec?.securitySchemes;
   if (securitySchemes && Object.keys(securitySchemes).length > 0) {
     doc.components = { ...(doc.components ?? {}), securitySchemes };
+  }
+
+  // Hoist any extension fields the convention carries (`security`, `x-brackish`, etc.) to the
+  // document root so codegen tools see them where OpenAPI specifies they live.
+  if (conventionSpec) {
+    const passthrough = conventionSpec as Record<string, unknown>;
+    const security = passthrough.security;
+    if (Array.isArray(security) && security.length > 0) {
+      doc.security = security as Array<Record<string, string[]>>;
+    }
+    for (const key of Object.keys(passthrough)) {
+      if (key.startsWith('x-')) doc[key] = passthrough[key];
+    }
   }
 
   for (const op of input.operations) {

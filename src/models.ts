@@ -324,6 +324,15 @@ export const ArtifactRejectedEventSchema = z.object({
   reason: z.string(),
 });
 
+export const ArtifactWithdrawnEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('artifact_withdrawn'),
+  from: IdentitySchema,
+  artifactKind: ArtifactKindSchema,
+  identityKey: z.string(),
+  version: z.number().int().positive(),
+});
+
 export const DocumentCreatedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('document_created'),
@@ -335,6 +344,7 @@ export const EventSchema = z.discriminatedUnion('kind', [
   ArtifactProposedEventSchema,
   ArtifactAcceptedEventSchema,
   ArtifactRejectedEventSchema,
+  ArtifactWithdrawnEventSchema,
   DocumentCreatedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
@@ -342,6 +352,7 @@ export type MessageEvent = z.infer<typeof MessageEventSchema>;
 export type ArtifactProposedEvent = z.infer<typeof ArtifactProposedEventSchema>;
 export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
 export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
+export type ArtifactWithdrawnEvent = z.infer<typeof ArtifactWithdrawnEventSchema>;
 export type DocumentCreatedEvent = z.infer<typeof DocumentCreatedEventSchema>;
 
 // --- inbox summary ---

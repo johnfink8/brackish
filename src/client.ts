@@ -229,6 +229,20 @@ export class BrackishClient {
     );
   }
 
+  withdrawEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    version?: number,
+  ): Promise<OperationArtifact> {
+    const id = encodeURIComponent(operationIdentityKey(method, path));
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints/${id}/withdraw`,
+      OperationArtifactSchema,
+      { method: 'POST', query: { version } },
+    );
+  }
+
   diffEndpoint(
     document: DocumentName,
     method: HttpMethod,
@@ -302,6 +316,18 @@ export class BrackishClient {
     );
   }
 
+  withdrawSchema(
+    document: DocumentName,
+    name: SchemaName,
+    version?: number,
+  ): Promise<SchemaArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}/withdraw`,
+      SchemaArtifactSchema,
+      { method: 'POST', query: { version } },
+    );
+  }
+
   diffSchema(
     document: DocumentName,
     name: SchemaName,
@@ -342,6 +368,14 @@ export class BrackishClient {
     );
   }
 
+  getConventionByVersion(document: DocumentName, version: number): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention`,
+      ConventionArtifactSchema,
+      { query: { version } },
+    );
+  }
+
   acceptConvention(document: DocumentName, version?: number): Promise<ConventionArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/convention/accept`,
@@ -359,6 +393,14 @@ export class BrackishClient {
       `/documents/${encodeURIComponent(document)}/convention/reject`,
       ConventionArtifactSchema,
       { method: 'POST', body: { reason }, query: { version } },
+    );
+  }
+
+  withdrawConvention(document: DocumentName, version?: number): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/withdraw`,
+      ConventionArtifactSchema,
+      { method: 'POST', query: { version } },
     );
   }
 

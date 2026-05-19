@@ -22,23 +22,29 @@ Skip brackish if:
 - The API is already shipped and the shape is locked.
 - There's no other Claude on the other side.
 
-## Start of session: `brackish up`
+## Start of session: `up` → `documents` → `inbox` → claim scope
 
-At the start of any session that might involve cross-component contracts, run:
-
-```
-brackish up
-```
-
-This is idempotent: it writes a client config if you don't have one yet (identity defaults to your hostname; pass `--identity <name>` to override), then starts the daemon in the background if it isn't already running. After `up`, every other brackish command can talk to the daemon. Tear down later with `brackish down`.
-
-Then check the inbox:
+At the start of any session that might involve cross-component contracts:
 
 ```
-brackish inbox
+brackish up           # idempotent: writes client config if missing + starts daemon if not running
+brackish documents    # which documents already exist? you might be joining mid-stream
+brackish inbox        # any pending events for your identity? handle them first
 ```
 
-If there are pending events for your identity, deal with them before resuming. Other-you may have proposed/rejected something that should change your next move.
+**Empty inbox does not mean the peer is idle.** They may be mid-propose (the hook hasn't fired yet) or working in a different document. Always check `documents` first to avoid `brackish doc new` on a name that's already taken.
+
+### Coordinate scope first (before any propose)
+
+After the three steps above, send **one chat message claiming scope** before you touch any artifacts:
+
+```
+brackish send <doc> "I'll take the User/Auth schemas and POST /users + POST /sessions. You take Message + GET/POST /messages."
+```
+
+This is the single highest-leverage move for avoiding duplicate-name collisions. The proposer-side concurrency check (the 409 you'd get on a race) is the safety net; the chat message is the prevention.
+
+Tear down later with `brackish down`.
 
 ## The model: it's literally OpenAPI 3.1
 
@@ -80,32 +86,64 @@ brackish documents               # list existing docs (alias: `brackish docs`)
 brackish doc new orders-api      # if you need a new one
 ```
 
-Then propose pieces:
+### Propose the convention with the document-level defaults baked in
 
 ```
-brackish convention propose orders-api \
+brackish convention propose orders-api --expected-new \
   --title "Orders API" --api-version 1.0.0 \
   --server "https://api.example.com:production" \
-  --security-scheme "bearer:http:bearerFormat=JWT"
-
-brackish schema propose orders-api UserCreate \
-  --field 'email:string' --field 'name:string'
-
-brackish schema propose orders-api User \
-  --field 'id:string' --field 'email:string' \
-  --field 'createdAt:string:ISO 8601'
-
-brackish endpoint propose orders-api POST /users \
-  --summary "Create a user" \
-  --request-content 'application/json=UserCreate' \
-  --response '201:application/json:User:created' \
-  --response '409:application/json:Error:email exists' \
-  --idempotent
+  --security-scheme "bearer:http:bearerFormat=JWT" \
+  --global-security bearer \
+  --naming camelCase
 ```
 
-`--field` syntax: `name:type[?][:description]`. Type can be `string`, `integer`, `number`, `boolean`, `null`, `string[]` (array), or a `PascalCase` name (becomes a `$ref` to another schema). The `?` after type marks the property optional.
+- `--global-security bearer` emits an OpenAPI doc-level `security: [{ bearer: [] }]`. Endpoints inherit it automatically (no `--security` per endpoint needed). Opt out with `--no-inherit-security` on a specific endpoint (e.g. `/health`).
+- `--naming camelCase` (or `snake_case`) stamps the JSON-key policy onto `x-brackish.naming` so the convention documents the casing decision once.
 
-When the spec needs more than the sugar covers, pass `--file path/to/operation.yaml` (or `.json`) instead.
+### Schemas: prefer `--file` over the `--field` sugar
+
+The `--field 'name:type[?][:description]'` sugar handles flat objects with primitive/array/ref types. As soon as you need **nullable, enum, nested objects, arrays of refs, additionalProperties, oneOf/anyOf, or per-field examples**, write the schema as a YAML file and pass `--file`:
+
+```
+cat > /tmp/User.yaml <<'EOF'
+type: object
+required: [id, email, createdAt]
+properties:
+  id: { type: string }
+  email: { type: string, format: email }
+  displayName: { type: string, nullable: true }
+  role: { type: string, enum: [admin, member] }
+  createdAt: { type: string, format: date-time }
+EOF
+brackish schema propose orders-api User --expected-new --file /tmp/User.yaml
+```
+
+Don't burn round-trips on `--field` collisions — write the file.
+
+### Endpoints: auto-derived `parameters` and inherited security
+
+```
+brackish endpoint propose orders-api POST /users/{id}/posts --expected-new \
+  --summary "Create a post for a user" \
+  --request-content 'application/json=PostCreate' \
+  --response '201:application/json:Post:created' \
+  --response '409:application/json:Error:duplicate'
+```
+
+`{id}` placeholders auto-become a `parameters` entry (`name: id, in: path, required: true, schema: { type: string }`). The convention's `--global-security` flows in as the operation's `security`. You only need `--security` to override or `--no-inherit-security` to make an endpoint explicitly public.
+
+### `x-brackish` extension fields
+
+For brackish metadata (idempotency, side effects, timing) use the dedicated flags:
+
+```
+brackish endpoint propose orders-api POST /orders \
+  --idempotent \
+  --side-effect "writes orders row" --side-effect "publishes order.created" \
+  --timing-p50 20ms --timing-p99 150ms
+```
+
+They land at `x-brackish: { idempotent, sideEffects, timing }` per the canonical shape.
 
 ## Avoid races: declare what version you expect
 
@@ -122,18 +160,30 @@ The 409 errors are your friend — they catch the race window. Prefer to be expl
 ## Responding to other-you
 
 ```
-brackish read orders-api         # see the conversation + propose events with their delta summary
-brackish endpoint show orders-api POST /users          # compact: status, version chain, latest delta
-brackish endpoint show orders-api POST /users --full   # include the full Operation body
-brackish endpoint show orders-api POST /users --proposed   # the in-flight version
-brackish endpoint accept orders-api POST /users        # accept the latest proposed
+brackish read orders-api                                                # conversation + propose events with delta summary
+brackish endpoint show orders-api POST /users                           # compact: status, version chain, latest delta
+brackish endpoint show orders-api POST /users --full                    # include the full Operation body
+brackish endpoint show orders-api POST /users --proposed                # the in-flight version (falls back to accepted w/ a hint if none in flight)
+brackish endpoint accept orders-api POST /users                         # accept the latest proposed
 brackish endpoint reject orders-api POST /users "needs auth section"
-brackish endpoint diff orders-api POST /users --from 1 --to 2   # see only what changed
+brackish endpoint withdraw orders-api POST /users                       # take back your OWN still-proposed version
+brackish endpoint diff orders-api POST /users --from 1 --to 2           # default: RFC 6902 patch
+brackish endpoint diff orders-api POST /users --from 1 --to 2 --format rendered   # side-by-side YAML for human review
 ```
 
 Same verbs for `schema` and `convention`.
 
-You **can't accept your own proposal** (the server enforces it). One side proposes; the other side accepts or rejects.
+You **can't accept your own proposal** (the server enforces it). One side proposes; the other side accepts or rejects. If you proposed something you shouldn't have (wrong path, wrong name, raced the other side), `brackish <kind> withdraw <id>` takes it back — only works on your own still-proposed versions.
+
+### `brackish status <doc>` — "what am I blocked on?"
+
+When the document has many artifacts in flight, the cleanest single view is:
+
+```
+brackish status orders-api
+```
+
+Buckets by ownership: **awaiting peer review** (you proposed), **awaiting your review** (peer proposed), **accepted**. Add `--verbose` to also list withdrawn / rejected items, or `--json` for structured output.
 
 ## Token-efficient catch-up (do this)
 
@@ -145,6 +195,55 @@ A high-churn negotiation can balloon an agent's context if you're not careful. b
 4. `brackish visualize <doc>` — defaults to a table-of-contents (no spec bodies). Add `--full` for everything. Use `--format openapi` to write a real OpenAPI YAML; `--format markdown` for a human-readable doc with rationale interleaved.
 
 Rough rule: **don't pull a full spec body until you've decided you need it.** The delta summary + diff command tell you what changed at a fraction of the bytes.
+
+## WebSocket and SSE: canonical patterns
+
+Frame catalogs are **documentation, not codegen targets** — codegen tools won't auto-generate a dispatcher from `x-brackish.frames`. Use these patterns so the next pair of agents reading the spec doesn't reinvent them:
+
+### WebSocket handshake
+
+Model the handshake as a `GET` operation with response code `101 Switching Protocols`. Put the frame catalog in `x-brackish.frames` as arrays of **`$ref` strings**, pointing at component schemas that define each frame shape:
+
+```yaml
+# brackish endpoint propose <doc> GET /ws --file ws-handshake.yaml
+summary: WebSocket handshake
+responses:
+  "101": { description: Switching Protocols }
+  "401": { description: missing/invalid auth }
+security:
+  - bearer: []
+x-brackish:
+  protocol: websocket
+  frames:
+    client_to_server:
+      - "#/components/schemas/ClientHello"
+      - "#/components/schemas/ClientMessage"
+    server_to_client:
+      - "#/components/schemas/ServerEvent"
+      - "#/components/schemas/ServerError"
+```
+
+### SSE stream
+
+Model the stream as a `GET` returning `text/event-stream`. Put the event-type catalog in `x-brackish.streaming` + `x-brackish.eventTypes`:
+
+```yaml
+summary: Live order updates
+responses:
+  "200":
+    description: SSE stream; reconnect with Last-Event-ID
+    content: { text/event-stream: {} }
+security:
+  - bearer: []
+x-brackish:
+  streaming: sse
+  eventTypes:
+    - "#/components/schemas/OrderCreatedEvent"
+    - "#/components/schemas/OrderUpdatedEvent"
+    - "#/components/schemas/OrderCancelledEvent"
+```
+
+Both patterns: the consumer reads the catalog to know **which schemas to expect**, but the runtime dispatcher (the `case event.type === 'order.created'` block) is still hand-written.
 
 ## Once an artifact is accepted
 
@@ -193,7 +292,7 @@ The slash-command verbs mirror the bash CLI: `/brackish invite NAME` means "run 
 When the user says something like `/brackish invite my-macbook` (or "invite my macbook" / "mint a token for the frontend Claude"):
 
 1. `brackish up --bind` — ensures the daemon is running with TCP enabled. Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind` to restart it with TCP.
-2. `brackish invite <peer-name> --json` — mint a one-time connect token. The output's `connectCommand` field is a bash string like `brackish connect URL --token T --identity NAME`.
+2. `brackish invite <peer-name> --json` — mint a one-time connect token. The output's `connectCommand` field is a bash string like `brackish connect URL --token T --identity NAME`. For a multi-hour negotiation, pass `--ttl 86400` so the invite doesn't expire mid-session.
 3. **Print a single line the user can paste verbatim into the peer Claude.** Take the `brackish connect …` string and replace the leading `brackish ` with `/brackish `. Result:
    ```
    /brackish connect <URL> --token <T> --identity <peer-name>
@@ -215,8 +314,9 @@ After connect, every brackish command on this side goes to the remote daemon tra
 ## When the user says "let's negotiate the API"
 
 1. `brackish up` — daemon + client config in one idempotent step.
-2. `brackish inbox` — see what's already in flight.
-3. `brackish documents` — see what documents exist. Reuse or `brackish doc new <name>`.
-4. Propose the convention first (`brackish convention propose ... --expected-new`), then the schemas, then the endpoints — pass `--expected-new` so a parallel agent can't silently stomp you.
-5. When revising, pass `--expected-version <N>` (where N is the version you just read). On 409, re-read and reconcile.
-6. Use `brackish visualize` to see the assembled state; use `brackish endpoint/schema diff` to see what's changed.
+2. `brackish documents` — see what documents exist. Reuse or `brackish doc new <name>` (only after confirming the name's free).
+3. `brackish inbox` — see what's already pending for your identity.
+4. **`brackish send <doc> "I'll take A, B, C; you take D, E, F"`** — claim scope via chat before any propose.
+5. Propose the convention first (with `--global-security` + `--naming` to bake in document-level defaults), then schemas (`--file` for anything non-trivial), then endpoints (path placeholders auto-derive `parameters`; convention security flows in automatically). Always pass `--expected-new` on first proposal.
+6. When revising, pass `--expected-version <N>` (where N is the version you just read). On 409, re-read with `brackish read` + `brackish status` and reconcile.
+7. Use `brackish status <doc>` to see what's blocked on you vs them; `brackish endpoint diff … --format rendered` for side-by-side review; `brackish visualize` for the assembled state.

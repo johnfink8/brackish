@@ -191,6 +191,8 @@ export function renderMarkdown(input: RenderInput): string {
   return `${out.join('\n')}\n`;
 }
 
+const WITHDRAWN_REASON = 'withdrawn by proposer';
+
 function formatRationaleEntry(e: RationaleEntry): string {
   const delta = e.delta ? ` (${e.delta})` : '';
   const head = (() => {
@@ -200,6 +202,9 @@ function formatRationaleEntry(e: RationaleEntry): string {
       case 'accepted':
         return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **accepted** by \`${e.acceptedBy}\` at ${e.acceptedAt}`;
       case 'rejected':
+        if (e.rejectionReason === WITHDRAWN_REASON) {
+          return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **↩ withdrawn** by \`${e.rejectedBy}\` at ${e.rejectedAt}`;
+        }
         return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **rejected** by \`${e.rejectedBy}\` at ${e.rejectedAt}: "${e.rejectionReason}"`;
     }
   })();
@@ -251,6 +256,7 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   #rationale .version { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #ddd; background: #fff; font-size: 12px; }
   #rationale .version.accepted { border-color: #4caf50; }
   #rationale .version.rejected { border-color: #f44336; }
+  #rationale .version.withdrawn { border-color: #f9a825; }
   #rationale .version.proposed { border-color: #2196f3; }
   #rationale .who { color: #666; }
   #rationale .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; }
@@ -275,11 +281,14 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   const rationale = ${rationaleJson};
   function escape(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function renderVersion(v) {
-    let body = '<div class="version ' + v.status + '">';
+    const isWithdrawn = v.status === 'rejected' && v.rejectionReason === 'withdrawn by proposer';
+    const cls = isWithdrawn ? 'withdrawn' : v.status;
+    let body = '<div class="version ' + cls + '">';
     body += 'v' + v.version + ' <span class="who">proposed by ' + escape(v.proposedBy) + '</span>';
     if (v.delta) body += ' <span class="delta">' + escape(v.delta) + '</span>';
     if (v.status === 'accepted') body += '<br><span class="who">accepted by ' + escape(v.acceptedBy) + '</span>';
-    if (v.status === 'rejected') body += '<br><span class="who">rejected by ' + escape(v.rejectedBy) + '</span>: <span class="reason">' + escape(v.rejectionReason) + '</span>';
+    if (v.status === 'rejected' && isWithdrawn) body += '<br><span class="who">↩ withdrawn by ' + escape(v.rejectedBy) + '</span>';
+    else if (v.status === 'rejected') body += '<br><span class="who">rejected by ' + escape(v.rejectedBy) + '</span>: <span class="reason">' + escape(v.rejectionReason) + '</span>';
     if (v.specYaml) body += '<details class="spec"><summary>show v' + v.version + ' content</summary><pre>' + escape(v.specYaml) + '</pre></details>';
     return body + '</div>';
   }

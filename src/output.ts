@@ -31,6 +31,8 @@ const eventPreview = (e: Event): string => {
       return `${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
       return `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`;
+    case 'artifact_withdrawn':
+      return `${e.artifactKind} ${e.identityKey} v${e.version} (withdrawn by proposer)`;
     case 'document_created':
       return `created by ${e.by}`;
   }

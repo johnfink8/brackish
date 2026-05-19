@@ -88,6 +88,13 @@ export interface Store {
     reason: string,
     by: Identity,
   ): Promise<OperationArtifact>;
+  withdrawEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+    version: number,
+    by: Identity,
+  ): Promise<OperationArtifact>;
   getEndpointCurrent(
     documentName: DocumentName,
     method: HttpMethod,
@@ -127,6 +134,12 @@ export interface Store {
     reason: string,
     by: Identity,
   ): Promise<SchemaArtifact>;
+  withdrawSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    by: Identity,
+  ): Promise<SchemaArtifact>;
   getSchemaCurrent(documentName: DocumentName, name: SchemaName): Promise<SchemaArtifact | null>;
   getSchemaProposed(documentName: DocumentName, name: SchemaName): Promise<SchemaArtifact | null>;
   getSchemaByVersion(
@@ -152,6 +165,11 @@ export interface Store {
     documentName: DocumentName,
     version: number,
     reason: string,
+    by: Identity,
+  ): Promise<ConventionArtifact>;
+  withdrawConvention(
+    documentName: DocumentName,
+    version: number,
     by: Identity,
   ): Promise<ConventionArtifact>;
   getConventionCurrent(documentName: DocumentName): Promise<ConventionArtifact | null>;

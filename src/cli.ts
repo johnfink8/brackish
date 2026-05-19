@@ -62,6 +62,7 @@ import {
   userClaudeHome,
 } from './install.js';
 import {
+  type ConventionArtifact,
   type ConventionSpec,
   HttpMethodSchema,
   IdentitySchema,
@@ -86,7 +87,7 @@ import { renderHtml, renderJson, renderMarkdown, renderOpenAPIYaml, renderText }
 import { startServer } from './server.js';
 import type { RationaleEntry } from './store/index.js';
 
-const CLI_VERSION = '0.2.1';
+const CLI_VERSION = '0.3.0';
 
 export function buildProgram(): Command {
   const program = new Command();
@@ -612,6 +613,10 @@ export function buildProgram(): Command {
       [],
     )
     .option('--security <scheme>', 'security scheme name (repeatable)', collect, [])
+    .option(
+      '--no-inherit-security',
+      "don't inherit doc-level `security` from the accepted convention (use for explicitly public endpoints)",
+    )
     .option('--idempotent', 'x-brackish.idempotent: true')
     .option('--side-effect <text>', 'x-brackish.sideEffects entry (repeatable)', collect, [])
     .option('--timing-p50 <duration>', 'x-brackish.timing.p50')
@@ -628,9 +633,15 @@ export function buildProgram(): Command {
     .action(async (doc: string, methodRaw: string, path: string, opts: EndpointProposeOpts) =>
       withClient(async (client) => {
         const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+        // Fetch the accepted convention so we can inherit doc-level security as a default.
+        // Best-effort: a missing convention is fine (no inheritance, no error).
+        const convention =
+          opts.inheritSecurity === false
+            ? null
+            : await client.getConventionCurrent(doc).catch(() => null);
         const spec = opts.file
           ? (loadSpecFile(opts.file) as OperationSpec)
-          : buildOperationSpec(opts);
+          : buildOperationSpec(opts, { path, convention });
         const v = await client.proposeEndpoint(doc, method, path, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
         else emit(`proposed ${describeOperation(v)}`);
@@ -665,10 +676,16 @@ export function buildProgram(): Command {
       ) =>
         withClient(async (client) => {
           const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
-          const v = await client.getEndpoint(doc, method, path, {
-            ...(opts.version !== undefined ? { version: Number.parseInt(opts.version, 10) } : {}),
-            ...(opts.proposed ? { proposed: true } : {}),
-          });
+          const v = await fetchOrFallback(
+            () =>
+              client.getEndpoint(doc, method, path, {
+                ...(opts.version !== undefined
+                  ? { version: Number.parseInt(opts.version, 10) }
+                  : {}),
+                ...(opts.proposed ? { proposed: true } : {}),
+              }),
+            opts.proposed ? () => client.getEndpoint(doc, method, path) : null,
+          );
           if (opts.json) emitJson(v);
           else if (opts.full) emit(`${describeOperation(v)}\n${yamlStringify(v.spec).trimEnd()}`);
           else emit(describeOperation(v));
@@ -721,11 +738,37 @@ export function buildProgram(): Command {
     );
 
   endpoint
+    .command('withdraw <doc> <method> <path>')
+    .description('take back your own still-proposed version (only the proposer can withdraw)')
+    .option('--version <n>')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        methodRaw: string,
+        path: string,
+        opts: { version?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+          const v = await client.withdrawEndpoint(doc, method, path, versionN);
+          if (opts.json) emitJson(v);
+          else emit(`withdrew ${describeOperation(v)}`);
+        }),
+    );
+
+  endpoint
     .command('diff <doc> <method> <path>')
-    .description('RFC 6902 JSON Patch between two versions (defaults: prev → latest)')
+    .description('JSON Patch between two versions (defaults: prev → latest); see --format')
     .option('--from <n>')
     .option('--to <n>')
-    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .option(
+      '--format <patch|yaml|json|rendered>',
+      'patch=RFC 6902 array; yaml/json=wrapped envelope; rendered=side-by-side YAML',
+      'patch',
+    )
     .action(
       async (
         doc: string,
@@ -739,6 +782,14 @@ export function buildProgram(): Command {
             ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
             ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
           });
+          if (opts.format === 'rendered') {
+            const [from, to] = await Promise.all([
+              client.getEndpoint(doc, method, path, { version: diff.fromVersion }),
+              client.getEndpoint(doc, method, path, { version: diff.toVersion }),
+            ]);
+            emitRenderedDiff(from.spec, to.spec, diff.fromVersion, diff.toVersion);
+            return;
+          }
           emitDiff(diff, opts.format);
         }),
     );
@@ -800,10 +851,16 @@ export function buildProgram(): Command {
         opts: { version?: string; proposed?: boolean; full?: boolean; json?: boolean },
       ) =>
         withClient(async (client) => {
-          const v = await client.getSchema(doc, name, {
-            ...(opts.version !== undefined ? { version: Number.parseInt(opts.version, 10) } : {}),
-            ...(opts.proposed ? { proposed: true } : {}),
-          });
+          const v = await fetchOrFallback(
+            () =>
+              client.getSchema(doc, name, {
+                ...(opts.version !== undefined
+                  ? { version: Number.parseInt(opts.version, 10) }
+                  : {}),
+                ...(opts.proposed ? { proposed: true } : {}),
+              }),
+            opts.proposed ? () => client.getSchema(doc, name) : null,
+          );
           if (opts.json) emitJson(v);
           else if (opts.full) emit(`${describeSchema(v)}\n${yamlStringify(v.spec).trimEnd()}`);
           else emit(describeSchema(v));
@@ -844,10 +901,28 @@ export function buildProgram(): Command {
     );
 
   schema
+    .command('withdraw <doc> <name>')
+    .description('take back your own still-proposed version (only the proposer can withdraw)')
+    .option('--version <n>')
+    .option('--json')
+    .action(async (doc: string, name: string, opts: { version?: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+        const v = await client.withdrawSchema(doc, name, versionN);
+        if (opts.json) emitJson(v);
+        else emit(`withdrew ${describeSchema(v)}`);
+      }),
+    );
+
+  schema
     .command('diff <doc> <name>')
     .option('--from <n>')
     .option('--to <n>')
-    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .option(
+      '--format <patch|yaml|json|rendered>',
+      'patch=RFC 6902; yaml/json=wrapped envelope; rendered=side-by-side YAML',
+      'patch',
+    )
     .action(
       async (doc: string, name: string, opts: { from?: string; to?: string; format: string }) =>
         withClient(async (client) => {
@@ -855,6 +930,14 @@ export function buildProgram(): Command {
             ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
             ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
           });
+          if (opts.format === 'rendered') {
+            const [from, to] = await Promise.all([
+              client.getSchema(doc, name, { version: diff.fromVersion }),
+              client.getSchema(doc, name, { version: diff.toVersion }),
+            ]);
+            emitRenderedDiff(from.spec, to.spec, diff.fromVersion, diff.toVersion);
+            return;
+          }
           emitDiff(diff, opts.format);
         }),
     );
@@ -876,6 +959,16 @@ export function buildProgram(): Command {
       '"bearer:http:bearerFormat=JWT" (repeatable)',
       collect,
       [],
+    )
+    .option(
+      '--global-security <scheme>',
+      'apply this security scheme to every endpoint by default (repeatable; emitted as top-level OpenAPI `security`)',
+      collect,
+      [],
+    )
+    .option(
+      '--naming <case>',
+      'JSON-key naming policy: camelCase or snake_case (sets x-brackish.naming)',
     )
     .option('--file <path>', 'load full Convention block from YAML/JSON file')
     .option('--expected-new', 'require no prior version (refuse if anything exists)')
@@ -900,9 +993,11 @@ export function buildProgram(): Command {
     .option('--json')
     .action(async (doc: string, opts: { proposed?: boolean; full?: boolean; json?: boolean }) =>
       withClient(async (client) => {
-        const v = opts.proposed
-          ? await client.getConventionProposed(doc)
-          : await client.getConventionCurrent(doc);
+        const v = await fetchOrFallback(
+          () =>
+            opts.proposed ? client.getConventionProposed(doc) : client.getConventionCurrent(doc),
+          opts.proposed ? () => client.getConventionCurrent(doc) : null,
+        );
         if (opts.json) emitJson(v);
         else if (opts.full) emit(`${describeConvention(v)}\n${yamlStringify(v.spec).trimEnd()}`);
         else emit(describeConvention(v));
@@ -936,17 +1031,155 @@ export function buildProgram(): Command {
     );
 
   convention
+    .command('withdraw <doc>')
+    .description('take back your own still-proposed version (only the proposer can withdraw)')
+    .option('--version <n>')
+    .option('--json')
+    .action(async (doc: string, opts: { version?: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+        const v = await client.withdrawConvention(doc, versionN);
+        if (opts.json) emitJson(v);
+        else emit(`withdrew ${describeConvention(v)}`);
+      }),
+    );
+
+  convention
     .command('diff <doc>')
     .option('--from <n>')
     .option('--to <n>')
-    .option('--format <patch|yaml|json>', 'patch=array, yaml/json=wrapped envelope', 'patch')
+    .option(
+      '--format <patch|yaml|json|rendered>',
+      'patch=RFC 6902; yaml/json=wrapped envelope; rendered=side-by-side YAML',
+      'patch',
+    )
     .action(async (doc: string, opts: { from?: string; to?: string; format: string }) =>
       withClient(async (client) => {
         const diff = await client.diffConvention(doc, {
           ...(opts.from !== undefined ? { from: Number.parseInt(opts.from, 10) } : {}),
           ...(opts.to !== undefined ? { to: Number.parseInt(opts.to, 10) } : {}),
         });
+        if (opts.format === 'rendered') {
+          const [from, to] = await Promise.all([
+            client.getConventionByVersion(doc, diff.fromVersion),
+            client.getConventionByVersion(doc, diff.toVersion),
+          ]);
+          emitRenderedDiff(from.spec, to.spec, diff.fromVersion, diff.toVersion);
+          return;
+        }
         emitDiff(diff, opts.format);
+      }),
+    );
+
+  // --- status (agent-facing "what am I blocked on") ---
+
+  program
+    .command('status <doc>')
+    .description('summarize the document by ownership: awaiting peer, awaiting me, accepted')
+    .option('--verbose', 'also list withdrawn/rejected items')
+    .option('--json', 'output JSON (structured buckets)')
+    .action(async (doc: string, opts: { verbose?: boolean; json?: boolean }) =>
+      withClient(async (client, cfg) => {
+        const me = cfg.identity;
+        const [endpoints, schemas, conventionCurrent, conventionProposed] = await Promise.all([
+          client.listEndpoints(doc),
+          client.listSchemas(doc),
+          client.getConventionCurrent(doc).catch(() => null),
+          client.getConventionProposed(doc).catch(() => null),
+        ]);
+
+        type StatusRow = {
+          kind: 'endpoint' | 'schema' | 'convention';
+          label: string;
+          version: number | null;
+          proposedVersion: number | null;
+          proposedBy: string | null;
+          delta: string | null;
+        };
+
+        const awaitingPeer: StatusRow[] = [];
+        const awaitingMe: StatusRow[] = [];
+        const accepted: StatusRow[] = [];
+
+        const classify = (
+          kind: StatusRow['kind'],
+          label: string,
+          currentVersion: number | null,
+          latestProposedVersion: number | null,
+          latestProposedBy: string | null,
+          latestDelta: string | null,
+        ): void => {
+          const row: StatusRow = {
+            kind,
+            label,
+            version: currentVersion,
+            proposedVersion: latestProposedVersion,
+            proposedBy: latestProposedBy,
+            delta: latestDelta,
+          };
+          const hasInFlight =
+            latestProposedVersion !== null && latestProposedVersion > (currentVersion ?? 0);
+          if (hasInFlight) {
+            if (latestProposedBy === me) awaitingPeer.push(row);
+            else awaitingMe.push(row);
+          } else if (currentVersion !== null) {
+            accepted.push(row);
+          }
+        };
+
+        for (const e of endpoints) {
+          classify(
+            'endpoint',
+            `${e.method.toUpperCase()} ${e.path}`,
+            e.currentVersion,
+            e.latestProposedVersion,
+            e.latestProposedBy,
+            e.latestDelta,
+          );
+        }
+        for (const s of schemas) {
+          classify(
+            'schema',
+            s.name,
+            s.currentVersion,
+            s.latestProposedVersion,
+            s.latestProposedBy,
+            s.latestDelta,
+          );
+        }
+        // Convention: derive a synthetic summary row from current+proposed.
+        if (conventionCurrent || conventionProposed) {
+          const cur = conventionCurrent?.version ?? null;
+          const prop = conventionProposed?.version ?? null;
+          const propBy =
+            conventionProposed?.status === 'proposed' ? conventionProposed.proposedBy : null;
+          classify('convention', 'convention', cur, prop, propBy, null);
+        }
+
+        if (opts.json) {
+          emitJson({ identity: me, awaitingPeer, awaitingMe, accepted });
+          return;
+        }
+
+        const lines: string[] = [`${doc} — your identity = ${me}`];
+        const bucket = (header: string, rows: StatusRow[]): void => {
+          if (rows.length === 0) return;
+          lines.push('');
+          lines.push(header);
+          for (const r of rows) {
+            const v = r.proposedVersion ?? r.version ?? 0;
+            const delta = r.delta ? `  ${r.delta}` : r.proposedVersion === 1 ? '  (new)' : '';
+            const by = r.proposedBy && r.proposedBy !== me ? ` by ${r.proposedBy}` : '';
+            lines.push(`  ${r.kind.padEnd(10)} ${r.label.padEnd(36)} v${v}${by}${delta}`);
+          }
+        };
+        bucket('awaiting peer review (you proposed):', awaitingPeer);
+        bucket('awaiting your review (peer proposed):', awaitingMe);
+        bucket(`accepted (${accepted.length}):`, accepted);
+        if (awaitingPeer.length + awaitingMe.length + accepted.length === 0) {
+          lines.push('', '(nothing yet)');
+        }
+        emit(lines.join('\n'));
       }),
     );
 
@@ -1386,6 +1619,7 @@ type EndpointProposeOpts = ConcurrencyOpts & {
   requestContent: string[];
   response: string[];
   security: string[];
+  inheritSecurity?: boolean;
   idempotent?: boolean;
   sideEffect: string[];
   timingP50?: string;
@@ -1427,6 +1661,8 @@ type ConventionProposeOpts = ConcurrencyOpts & {
   description?: string;
   server: string[];
   securityScheme: string[];
+  globalSecurity: string[];
+  naming?: string;
   file?: string;
   json?: boolean;
 };
@@ -1437,10 +1673,25 @@ function loadSpecFile(path: string): unknown {
   return yamlParse(raw);
 }
 
-function buildOperationSpec(opts: EndpointProposeOpts): OperationSpec {
+function buildOperationSpec(
+  opts: EndpointProposeOpts,
+  ctx: { path: string; convention: ConventionArtifact | null },
+): OperationSpec {
   const spec: Record<string, unknown> = {};
   if (opts.summary !== undefined) spec.summary = opts.summary;
   if (opts.description !== undefined) spec.description = opts.description;
+
+  // Auto-derive parameters from `{var}` placeholders in the path.
+  const pathParams = [...ctx.path.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)].map((m) => m[1]);
+  if (pathParams.length > 0) {
+    spec.parameters = pathParams.map((name) => ({
+      name,
+      in: 'path',
+      required: true,
+      description: `${name} path parameter`,
+      schema: { type: 'string' },
+    }));
+  }
 
   // requestBody
   if (opts.requestContent.length > 0) {
@@ -1481,6 +1732,10 @@ function buildOperationSpec(opts: EndpointProposeOpts): OperationSpec {
 
   if (opts.security.length > 0) {
     spec.security = opts.security.map((s) => ({ [s]: [] }));
+  } else if (opts.inheritSecurity !== false && ctx.convention) {
+    // Inherit the convention's top-level `security` if it has one. Skipped on --no-inherit-security.
+    const convSec = (ctx.convention.spec as Record<string, unknown>).security;
+    if (Array.isArray(convSec) && convSec.length > 0) spec.security = convSec;
   }
 
   // brackish extensions — all consolidated under `x-brackish` per the skill.
@@ -1604,7 +1859,38 @@ function buildConventionSpec(opts: ConventionProposeOpts): ConventionSpec {
     }
     spec.securitySchemes = schemes;
   }
+  if (opts.globalSecurity.length > 0) {
+    // Top-level OpenAPI `security` is `[{ schemeName: [scopes] }, …]`. We don't model
+    // scopes here; each --global-security <scheme> becomes `{ <scheme>: [] }`.
+    spec.security = opts.globalSecurity.map((s) => ({ [s]: [] }));
+  }
+  if (opts.naming !== undefined) {
+    if (opts.naming !== 'camelCase' && opts.naming !== 'snake_case') {
+      throw new Error(`--naming must be "camelCase" or "snake_case" (got "${opts.naming}")`);
+    }
+    spec['x-brackish'] = { ...(spec['x-brackish'] as object | undefined), naming: opts.naming };
+  }
   return spec as ConventionSpec;
+}
+
+/**
+ * Try `primary`; if it fails with `artifact_not_found` AND a `fallback` is provided, retry the
+ * fallback and emit a stderr hint. Lets `show --proposed` degrade to "showing latest accepted"
+ * instead of looking like the artifact was deleted.
+ */
+async function fetchOrFallback<T>(
+  primary: () => Promise<T>,
+  fallback: (() => Promise<T>) | null,
+): Promise<T> {
+  try {
+    return await primary();
+  } catch (e) {
+    if (fallback && e instanceof ClientError && e.code === 'artifact_not_found') {
+      process.stderr.write('note: no proposed version; showing latest accepted\n');
+      return fallback();
+    }
+    throw e;
+  }
 }
 
 function emitDiff(
@@ -1622,6 +1908,45 @@ function emitDiff(
   // 'patch' (default): emit just the patch array as JSON, plus a header line on stderr
   process.stderr.write(`diff ${diff.fromVersion} → ${diff.toVersion}:\n`);
   process.stdout.write(`${JSON.stringify(diff.patch, null, 2)}\n`);
+}
+
+/** Unified-style line diff between the YAML rendering of two specs. Output uses `- ` / `+ ` / `  ` prefixes. */
+function emitRenderedDiff(from: unknown, to: unknown, fromV: number, toV: number): void {
+  const a = yamlStringify(from).split('\n');
+  const b = yamlStringify(to).split('\n');
+  if (a[a.length - 1] === '') a.pop();
+  if (b[b.length - 1] === '') b.pop();
+  const m = a.length;
+  const n = b.length;
+  // LCS DP over a flat row-major array; index (i,j) → i*(n+1)+j.
+  const dp = new Array<number>((m + 1) * (n + 1)).fill(0);
+  const at = (i: number, j: number): number => dp[i * (n + 1) + j] ?? 0;
+  const set = (i: number, j: number, v: number): void => {
+    dp[i * (n + 1) + j] = v;
+  };
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      set(i, j, a[i] === b[j] ? at(i + 1, j + 1) + 1 : Math.max(at(i + 1, j), at(i, j + 1)));
+    }
+  }
+  const lines: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      lines.push(`  ${a[i]}`);
+      i++;
+      j++;
+    } else if (at(i + 1, j) >= at(i, j + 1)) {
+      lines.push(`- ${a[i++]}`);
+    } else {
+      lines.push(`+ ${b[j++]}`);
+    }
+  }
+  while (i < m) lines.push(`- ${a[i++]}`);
+  while (j < n) lines.push(`+ ${b[j++]}`);
+  process.stderr.write(`diff v${fromV} → v${toV} (rendered):\n`);
+  process.stdout.write(`${lines.join('\n')}\n`);
 }
 
 type LoadedClientShape = {

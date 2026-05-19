@@ -34,7 +34,7 @@ import { type RationaleMap, renderHtml } from './render.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
-const SERVER_VERSION = '0.2.1';
+const SERVER_VERSION = '0.3.0';
 
 const WAIT_TIMEOUT_DEFAULT_S = 30;
 const WAIT_TIMEOUT_MIN_S = 1;
@@ -251,6 +251,20 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(v);
   });
 
+  app.post('/documents/:name/endpoints/:id/withdraw', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const { method, path } = decodeEndpointId(c.req.param('id'));
+    const version = await resolveEndpointTargetVersion(
+      store,
+      docName,
+      method,
+      path,
+      c.req.query('version'),
+    );
+    const v = await store.withdrawEndpoint(docName, method, path, version, c.get('identity'));
+    return c.json(v);
+  });
+
   app.get('/documents/:name/endpoints/:id/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const { method, path } = decodeEndpointId(c.req.param('id'));
@@ -343,6 +357,19 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(v);
   });
 
+  app.post('/documents/:name/schemas/:schemaName/withdraw', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
+    const version = await resolveSchemaTargetVersion(
+      store,
+      docName,
+      schemaName,
+      c.req.query('version'),
+    );
+    const v = await store.withdrawSchema(docName, schemaName, version, c.get('identity'));
+    return c.json(v);
+  });
+
   app.get('/documents/:name/schemas/:schemaName/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
@@ -370,6 +397,20 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.get('/documents/:name/convention', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const versionQuery = c.req.query('version');
+    if (versionQuery !== undefined) {
+      const version = Number.parseInt(versionQuery, 10);
+      if (!Number.isFinite(version) || version < 1) {
+        return c.json({ error: 'invalid version', code: 'bad_request' }, 400);
+      }
+      const v = await store.getConventionByVersion(docName, version);
+      if (!v)
+        return c.json(
+          { error: `convention v${version} not found`, code: 'artifact_not_found' },
+          404,
+        );
+      return c.json(v);
+    }
     const v = await store.getConventionCurrent(docName);
     if (!v) return c.json({ error: 'no accepted convention', code: 'artifact_not_found' }, 404);
     return c.json(v);
@@ -394,6 +435,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const body = RejectArtifactRequestSchema.parse(await c.req.json());
     const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));
     const v = await store.rejectConvention(docName, version, body.reason, c.get('identity'));
+    return c.json(v);
+  });
+
+  app.post('/documents/:name/convention/withdraw', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));
+    const v = await store.withdrawConvention(docName, version, c.get('identity'));
     return c.json(v);
   });
 
@@ -470,6 +518,7 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
       return 409;
     case 'cannot_accept_own':
     case 'cannot_reject_own':
+    case 'cannot_withdraw_others':
       return 403;
     default:
       return 400;

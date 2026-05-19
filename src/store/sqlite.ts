@@ -470,6 +470,62 @@ export class SqliteStore implements Store {
     return row;
   }
 
+  /** Self-withdraw a still-proposed version. Marks it rejected with reason
+   *  `withdrawn by proposer` and emits an `artifact_withdrawn` event for visibility. */
+  private withdrawRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    version: number,
+    by: Identity,
+  ): ArtifactRow {
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+      if (!existing) {
+        throw new StoreError('artifact_not_found', `${kind} ${identityKey}@v${version} not found`);
+      }
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `${kind} ${identityKey}@v${version} is ${existing.status}, only proposed versions can be withdrawn`,
+        );
+      }
+      if (existing.proposed_by !== by) {
+        throw new StoreError(
+          'cannot_withdraw_others',
+          `${by} cannot withdraw ${kind} ${identityKey}@v${version} — it was proposed by ${existing.proposed_by}`,
+        );
+      }
+      const rejectedAt = now();
+      this.db
+        .prepare(
+          `UPDATE artifact_versions
+             SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_reason = ?
+             WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?`,
+        )
+        .run(by, rejectedAt, 'withdrawn by proposer', documentName, kind, identityKey, version);
+      this.insertEvent(documentName, 'artifact_withdrawn', {
+        from: by,
+        artifactKind: kind,
+        identityKey,
+        version,
+      });
+      row = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+    });
+    tx();
+    if (!row) throw new Error('withdrawRaw: row missing after update');
+    return row;
+  }
+
   private getRaw(
     documentName: DocumentName,
     kind: 'operation' | 'schema' | 'convention',
@@ -659,6 +715,18 @@ export class SqliteStore implements Store {
     );
   }
 
+  async withdrawEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+    version: number,
+    by: Identity,
+  ): Promise<OperationArtifact> {
+    return this.rowToOperationArtifact(
+      this.withdrawRaw(documentName, 'operation', operationIdentityKey(method, path), version, by),
+    );
+  }
+
   async getEndpointCurrent(
     documentName: DocumentName,
     method: HttpMethod,
@@ -761,6 +829,15 @@ export class SqliteStore implements Store {
     );
   }
 
+  async withdrawSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    by: Identity,
+  ): Promise<SchemaArtifact> {
+    return this.rowToSchemaArtifact(this.withdrawRaw(documentName, 'schema', name, version, by));
+  }
+
   async getSchemaCurrent(
     documentName: DocumentName,
     name: SchemaName,
@@ -836,6 +913,16 @@ export class SqliteStore implements Store {
   ): Promise<ConventionArtifact> {
     return this.rowToConventionArtifact(
       this.rejectRaw(documentName, 'convention', CONVENTION_KEY, version, reason, by),
+    );
+  }
+
+  async withdrawConvention(
+    documentName: DocumentName,
+    version: number,
+    by: Identity,
+  ): Promise<ConventionArtifact> {
+    return this.rowToConventionArtifact(
+      this.withdrawRaw(documentName, 'convention', CONVENTION_KEY, version, by),
     );
   }
 
@@ -1075,6 +1162,8 @@ function previewOf(e: Event): string {
       return `accepted ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
       return `rejected ${e.artifactKind} ${e.identityKey} v${e.version}: ${truncate(e.reason, 50)}`;
+    case 'artifact_withdrawn':
+      return `withdrew ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'document_created':
       return `document created by ${e.by}`;
   }
