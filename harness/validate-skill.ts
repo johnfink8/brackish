@@ -1,13 +1,9 @@
-// Validate the brackish skill's /brackish invite + /brackish connect flows with real Claudes.
-//
-// Spawns two `claude -p` sub-sessions:
-//   1. "server" Claude in a working dir with the skill loaded → prompted with /brackish invite <peer>
-//      → expected to run `brackish up --bind` + `brackish invite` and print the connect command.
-//   2. "client" Claude in a separate dir → prompted with /brackish connect <command-from-server>
-//      → expected to run the command verbatim and confirm via `brackish whoami`.
-//
-// Final assertions: server daemon is up + bound to TCP; client config.toml has the right shape;
-// running `brackish docs` from the client over TCP returns successfully.
+// Validate the brackish skill's /brackish invite + /brackish connect flows with real Claudes,
+// using the **shipping install path** — no inlined CLAUDE.md, no role briefing. Each side gets
+// `brackish install --local --yes --permission` run in its working dir; Claude Code discovers the
+// project-scope skill, the UserPromptSubmit hook, and the Bash(brackish *) allow-rule from
+// `./.claude/`. Sub-Claudes are spawned with a single slash-command prompt; the skill must do
+// the rest unaided.
 //
 // Run: `npx tsx harness/validate-skill.ts`
 
@@ -124,20 +120,6 @@ function safeJson(s: string): unknown {
   }
 }
 
-function buildClaudeMd(skillBody: string, role: string, extra: string): string {
-  return [
-    `# Role: ${role}`,
-    '',
-    extra,
-    '',
-    '---',
-    '',
-    '# Appendix: the brackish skill (loaded inline)',
-    '',
-    skillBody,
-  ].join('\n');
-}
-
 function brackishCall(
   brackishBin: string,
   env: NodeJS.ProcessEnv,
@@ -159,6 +141,19 @@ function extractSlashConnect(result: string): string | null {
   return fallback ? `/${fallback[0]}` : null;
 }
 
+/** Run `brackish install --local --yes --permission` in `cwd`. Writes `<cwd>/.claude/skills/brackish/`
+ *  + project settings.json hook + Bash(brackish *) allow-rule. Mirrors the path a real user takes. */
+function installLocalSkill(brackishBin: string, cwd: string, env: NodeJS.ProcessEnv): void {
+  const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--permission', '--force'], {
+    cwd,
+    env,
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) {
+    throw new Error(`brackish install --local failed (cwd=${cwd}):\n${r.stderr}`);
+  }
+}
+
 async function main(): Promise<void> {
   const distEntry = ensureBuilt();
   const trialId = stamp();
@@ -174,20 +169,7 @@ async function main(): Promise<void> {
   }
   const brackishBin = writeWrapperBin(binDir, distEntry);
 
-  const skillBody = readFileSync(join(REPO_ROOT, 'skill', 'SKILL.md'), 'utf8');
-
   // --- ROUND 1: server side ---
-
-  const serverClaudeMd = buildClaudeMd(
-    skillBody,
-    'server (host running the brackish daemon)',
-    `You are the brackish "server" side. The brackish CLI is on your PATH. Your env already has \`BRACKISH_HOME\` and \`BRACKISH_IDENTITY=host\` set.
-
-When you receive the prompt, follow the skill's **\`/brackish invite\`** section exactly. The success criterion is: you print the resulting **\`brackish connect …\`** command on its own line in your final response so the user can copy it. Don't paraphrase the command; emit it verbatim.
-
-After printing the connect command, you may exit (no need to wait for follow-up).`,
-  );
-  writeFileSync(join(serverDir, 'CLAUDE.md'), serverClaudeMd);
 
   const serverEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -195,6 +177,9 @@ After printing the connect command, you may exit (no need to wait for follow-up)
     BRACKISH_IDENTITY: 'host',
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
   };
+
+  console.error(`harness: server-side \`brackish install --local --yes --permission\``);
+  installLocalSkill(brackishBin, serverDir, serverEnv);
 
   console.error(`harness: round 1 — server Claude (/brackish invite ${PEER_NAME})`);
   const t0 = Date.now();
@@ -232,25 +217,14 @@ After printing the connect command, you may exit (no need to wait for follow-up)
 
   // --- ROUND 2: client side ---
 
-  const clientClaudeMd = buildClaudeMd(
-    skillBody,
-    'client (peer connecting to a remote brackish daemon)',
-    `You are the brackish "client" side. The brackish CLI is on your PATH. Your env already has \`BRACKISH_HOME\` set. You do NOT yet have a brackish config.
-
-The user is about to send a \`/brackish connect …\` slash-command-style line that came from the other side. Follow the skill's **\`/brackish connect\`** section exactly:
-  1. Translate the slash-form into the bash form (drop the leading slash) and run it.
-  2. Run \`brackish whoami\` to confirm.
-  3. Run \`brackish inbox\` (it may be empty; that's fine).
-
-Report success in your final response.`,
-  );
-  writeFileSync(join(clientDir, 'CLAUDE.md'), clientClaudeMd);
-
   const clientEnv: NodeJS.ProcessEnv = {
     ...process.env,
     BRACKISH_HOME: clientHome,
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
   };
+
+  console.error(`harness: client-side \`brackish install --local --yes --permission\``);
+  installLocalSkill(brackishBin, clientDir, clientEnv);
 
   console.error(`harness: round 2 — client Claude (${slashConnect})`);
   const t1 = Date.now();
