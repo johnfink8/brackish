@@ -413,6 +413,86 @@ describe('SqliteStore', () => {
     });
   });
 
+  describe('withdraw lifecycle', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+    });
+
+    const minOp = (summary: string) => ({
+      summary,
+      responses: { '200': { description: 'ok' } },
+    });
+
+    it('proposer can withdraw their own still-proposed version', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      const v = await store.withdrawEndpoint('d', 'post', '/users', 1, 'host');
+      expect(v.status).toBe('rejected');
+      // withdraw uses the rejected lifecycle row with a sentinel reason.
+      if (v.status === 'rejected') {
+        expect(v.rejectedBy).toBe('host');
+        expect(v.rejectionReason).toBe('withdrawn by proposer');
+      }
+    });
+
+    it('non-proposer cannot withdraw — errors with cannot_withdraw_others', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await expect(store.withdrawEndpoint('d', 'post', '/users', 1, 'peer')).rejects.toMatchObject({
+        code: 'cannot_withdraw_others',
+      });
+    });
+
+    it('cannot withdraw an already-accepted version', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      await expect(store.withdrawEndpoint('d', 'post', '/users', 1, 'host')).rejects.toMatchObject({
+        code: 'artifact_not_pending',
+      });
+    });
+
+    it('cannot withdraw an already-rejected version', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.rejectEndpoint('d', 'post', '/users', 1, 'nope', 'peer');
+      await expect(store.withdrawEndpoint('d', 'post', '/users', 1, 'host')).rejects.toMatchObject({
+        code: 'artifact_not_pending',
+      });
+    });
+
+    it('after withdraw, next propose without --force succeeds (latest is no longer in-flight)', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.withdrawEndpoint('d', 'post', '/users', 1, 'host');
+      const v2 = await store.proposeEndpoint('d', 'post', '/users', minOp('v2'), 'host');
+      expect(v2.version).toBe(2);
+    });
+
+    it('emits an artifact_withdrawn event', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.withdrawEndpoint('d', 'post', '/users', 1, 'host');
+      const events = await store.listEvents('d', 0, 100);
+      const wd = events.filter((e) => e.kind === 'artifact_withdrawn');
+      expect(wd).toHaveLength(1);
+      if (wd[0]?.kind === 'artifact_withdrawn') {
+        expect(wd[0].from).toBe('host');
+        expect(wd[0].artifactKind).toBe('operation');
+        expect(wd[0].version).toBe(1);
+      }
+    });
+
+    it('schema withdraw works the same way', async () => {
+      const spec = { type: 'object' as const, properties: { id: { type: 'string' } } };
+      await store.proposeSchema('d', 'User', spec, 'host');
+      const v = await store.withdrawSchema('d', 'User', 1, 'host');
+      expect(v.status).toBe('rejected');
+      if (v.status === 'rejected') expect(v.rejectionReason).toBe('withdrawn by proposer');
+    });
+
+    it('convention withdraw works the same way', async () => {
+      await store.proposeConvention('d', { info: { title: 't', version: '0.1.0' } }, 'host');
+      const v = await store.withdrawConvention('d', 1, 'host');
+      expect(v.status).toBe('rejected');
+      if (v.status === 'rejected') expect(v.rejectionReason).toBe('withdrawn by proposer');
+    });
+  });
+
   describe('schema artifact lifecycle', () => {
     beforeEach(async () => {
       await store.createDocument('d', 'host');

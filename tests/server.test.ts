@@ -232,6 +232,56 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('endpoint withdraw', () => {
+    const opSpec = {
+      summary: 'create',
+      responses: { '200': { description: 'ok' } },
+    };
+
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'wd' } });
+    });
+
+    it('proposer can withdraw — 200', async () => {
+      await call('POST', '/documents/wd/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'host',
+      });
+      const res = await call('POST', '/documents/wd/endpoints/POST%20%2Fusers/withdraw', {
+        identity: 'host',
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('non-proposer gets 403 cannot_withdraw_others', async () => {
+      await call('POST', '/documents/wd/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'host',
+      });
+      const res = await call('POST', '/documents/wd/endpoints/POST%20%2Fusers/withdraw', {
+        identity: 'peer',
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('cannot_withdraw_others');
+    });
+
+    it('withdraw of an already-accepted version (explicit ?version=N) → 409 artifact_not_pending', async () => {
+      await call('POST', '/documents/wd/endpoints', {
+        body: { method: 'post', path: '/users', spec: opSpec },
+        identity: 'host',
+      });
+      await call('POST', '/documents/wd/endpoints/POST%20%2Fusers/accept', { identity: 'peer' });
+      // Explicit version=1 because there's no proposed version to default to.
+      const res = await call('POST', '/documents/wd/endpoints/POST%20%2Fusers/withdraw?version=1', {
+        identity: 'host',
+      });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('artifact_not_pending');
+    });
+  });
+
   describe('inbox', () => {
     it('lists documents with new events for the caller', async () => {
       await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });
