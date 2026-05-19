@@ -13,6 +13,9 @@ brackish.db-journal
 *.sock
 .brackish/
 
+# adversarial-trial output
+trials/
+
 # IDE
 .vscode/
 .idea/
