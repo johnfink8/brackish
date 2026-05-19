@@ -188,7 +188,9 @@ export class SqliteStore implements Store {
     if (row.status === 'proposed') return { ...base, status: 'proposed' };
     if (row.status === 'accepted') {
       if (row.accepted_by === null || row.accepted_at === null) {
-        throw new Error(`accepted artifact ${row.identity_key}@v${row.version} missing accepted_by/at`);
+        throw new Error(
+          `accepted artifact ${row.identity_key}@v${row.version} missing accepted_by/at`,
+        );
       }
       return {
         ...base,
@@ -198,7 +200,9 @@ export class SqliteStore implements Store {
       };
     }
     if (row.rejected_by === null || row.rejected_at === null || row.rejection_reason === null) {
-      throw new Error(`rejected artifact ${row.identity_key}@v${row.version} missing rejected_by/at/reason`);
+      throw new Error(
+        `rejected artifact ${row.identity_key}@v${row.version} missing rejected_by/at/reason`,
+      );
     }
     return {
       ...base,
@@ -341,10 +345,7 @@ export class SqliteStore implements Store {
         )
         .get(documentName, kind, identityKey, version);
       if (!existing) {
-        throw new StoreError(
-          'artifact_not_found',
-          `${kind} ${identityKey}@v${version} not found`,
-        );
+        throw new StoreError('artifact_not_found', `${kind} ${identityKey}@v${version} not found`);
       }
       if (existing.status !== 'proposed') {
         throw new StoreError(
@@ -400,10 +401,7 @@ export class SqliteStore implements Store {
         )
         .get(documentName, kind, identityKey, version);
       if (!existing) {
-        throw new StoreError(
-          'artifact_not_found',
-          `${kind} ${identityKey}@v${version} not found`,
-        );
+        throw new StoreError('artifact_not_found', `${kind} ${identityKey}@v${version} not found`);
       }
       if (existing.status !== 'proposed') {
         throw new StoreError(

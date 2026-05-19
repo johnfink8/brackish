@@ -199,7 +199,6 @@ describe('server (Unix-socket transport)', () => {
       expect(names).toContain('b');
     });
   });
-
 });
 
 describe('server (TCP transport + invite/connect)', () => {

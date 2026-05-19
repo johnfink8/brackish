@@ -9,18 +9,36 @@ import type { z } from 'zod';
 import {
   type ConnectResponse,
   ConnectResponseSchema,
+  type ConventionArtifact,
+  ConventionArtifactSchema,
+  type ConventionSpec,
+  type DiffResponse,
+  DiffResponseSchema,
   type Document,
   type DocumentName,
   DocumentSchema,
+  type EndpointListResponse,
+  EndpointListResponseSchema,
   type EventListResponse,
   EventListResponseSchema,
+  type HttpMethod,
   type Identity,
   type InboxResponse,
   InboxResponseSchema,
   type InviteCreatedResponse,
   InviteCreatedResponseSchema,
+  type JSONSchema,
+  type OperationArtifact,
+  OperationArtifactSchema,
+  type OperationSpec,
+  operationIdentityKey,
   type PartiesResponse,
   PartiesResponseSchema,
+  type SchemaArtifact,
+  SchemaArtifactSchema,
+  type SchemaListResponse,
+  SchemaListResponseSchema,
+  type SchemaName,
   SendMessageResponseSchema,
   type WhoamiResponse,
   WhoamiResponseSchema,
@@ -143,6 +161,231 @@ export class BrackishClient {
 
   inbox(): Promise<InboxResponse> {
     return this.fetchAndParse('/inbox', InboxResponseSchema);
+  }
+
+  // --- endpoints (operation artifacts) ---
+
+  proposeEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
+  ): Promise<OperationArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints`,
+      OperationArtifactSchema,
+      { method: 'POST', body: { method, path, spec } },
+    );
+  }
+
+  listEndpoints(document: DocumentName): Promise<EndpointListResponse['endpoints']> {
+    return this.fetchAndParse<EndpointListResponse>(
+      `/documents/${encodeURIComponent(document)}/endpoints`,
+      EndpointListResponseSchema,
+    ).then((r) => r.endpoints);
+  }
+
+  getEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    opts: { version?: number; proposed?: boolean } = {},
+  ): Promise<OperationArtifact> {
+    const id = encodeURIComponent(operationIdentityKey(method, path));
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints/${id}`,
+      OperationArtifactSchema,
+      { query: { version: opts.version, proposed: opts.proposed ? '1' : undefined } },
+    );
+  }
+
+  acceptEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    version?: number,
+  ): Promise<OperationArtifact> {
+    const id = encodeURIComponent(operationIdentityKey(method, path));
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints/${id}/accept`,
+      OperationArtifactSchema,
+      { method: 'POST', query: { version } },
+    );
+  }
+
+  rejectEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    reason: string,
+    version?: number,
+  ): Promise<OperationArtifact> {
+    const id = encodeURIComponent(operationIdentityKey(method, path));
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints/${id}/reject`,
+      OperationArtifactSchema,
+      { method: 'POST', body: { reason }, query: { version } },
+    );
+  }
+
+  diffEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    opts: { from?: number; to?: number } = {},
+  ): Promise<DiffResponse> {
+    const id = encodeURIComponent(operationIdentityKey(method, path));
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/endpoints/${id}/diff`,
+      DiffResponseSchema,
+      { query: { from: opts.from, to: opts.to } },
+    );
+  }
+
+  // --- schemas (JSON Schema component artifacts) ---
+
+  proposeSchema(
+    document: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+  ): Promise<SchemaArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas`,
+      SchemaArtifactSchema,
+      { method: 'POST', body: { name, spec } },
+    );
+  }
+
+  listSchemas(document: DocumentName): Promise<SchemaListResponse['schemas']> {
+    return this.fetchAndParse<SchemaListResponse>(
+      `/documents/${encodeURIComponent(document)}/schemas`,
+      SchemaListResponseSchema,
+    ).then((r) => r.schemas);
+  }
+
+  getSchema(
+    document: DocumentName,
+    name: SchemaName,
+    opts: { version?: number; proposed?: boolean } = {},
+  ): Promise<SchemaArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}`,
+      SchemaArtifactSchema,
+      { query: { version: opts.version, proposed: opts.proposed ? '1' : undefined } },
+    );
+  }
+
+  acceptSchema(
+    document: DocumentName,
+    name: SchemaName,
+    version?: number,
+  ): Promise<SchemaArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}/accept`,
+      SchemaArtifactSchema,
+      { method: 'POST', query: { version } },
+    );
+  }
+
+  rejectSchema(
+    document: DocumentName,
+    name: SchemaName,
+    reason: string,
+    version?: number,
+  ): Promise<SchemaArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}/reject`,
+      SchemaArtifactSchema,
+      { method: 'POST', body: { reason }, query: { version } },
+    );
+  }
+
+  diffSchema(
+    document: DocumentName,
+    name: SchemaName,
+    opts: { from?: number; to?: number } = {},
+  ): Promise<DiffResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}/diff`,
+      DiffResponseSchema,
+      { query: { from: opts.from, to: opts.to } },
+    );
+  }
+
+  // --- convention (singleton per document) ---
+
+  proposeConvention(document: DocumentName, spec: ConventionSpec): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention`,
+      ConventionArtifactSchema,
+      { method: 'POST', body: { spec } },
+    );
+  }
+
+  getConventionCurrent(document: DocumentName): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention`,
+      ConventionArtifactSchema,
+    );
+  }
+
+  getConventionProposed(document: DocumentName): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/proposed`,
+      ConventionArtifactSchema,
+    );
+  }
+
+  acceptConvention(document: DocumentName, version?: number): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/accept`,
+      ConventionArtifactSchema,
+      { method: 'POST', query: { version } },
+    );
+  }
+
+  rejectConvention(
+    document: DocumentName,
+    reason: string,
+    version?: number,
+  ): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/reject`,
+      ConventionArtifactSchema,
+      { method: 'POST', body: { reason }, query: { version } },
+    );
+  }
+
+  diffConvention(
+    document: DocumentName,
+    opts: { from?: number; to?: number } = {},
+  ): Promise<DiffResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/diff`,
+      DiffResponseSchema,
+      { query: { from: opts.from, to: opts.to } },
+    );
+  }
+
+  // --- render helpers ---
+
+  async getOpenApiYaml(document: DocumentName): Promise<string> {
+    const res = await this.request(`/documents/${encodeURIComponent(document)}/openapi.yaml`);
+    if (!res.ok) {
+      const body = (await res.json()) as { error?: string; code?: string };
+      throw new ClientError(res.status, body.code ?? null, body.error ?? `HTTP ${res.status}`);
+    }
+    return res.text();
+  }
+
+  async getOpenApiJson(document: DocumentName): Promise<unknown> {
+    const res = await this.request(`/documents/${encodeURIComponent(document)}/openapi.json`);
+    return okJson(res);
+  }
+
+  async getRationaleJson(document: DocumentName): Promise<unknown> {
+    const res = await this.request(`/documents/${encodeURIComponent(document)}/rationale.json`);
+    return okJson(res);
   }
 
   // --- parties, invites, connect ---

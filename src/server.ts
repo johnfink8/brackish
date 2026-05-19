@@ -20,10 +20,10 @@ import {
   type Event,
   type HttpMethod,
   IdentitySchema,
-  parseOperationIdentityKey,
   ProposeConventionRequestSchema,
   ProposeEndpointRequestSchema,
   ProposeSchemaRequestSchema,
+  parseOperationIdentityKey,
   RedeemInviteRequestSchema,
   RejectArtifactRequestSchema,
   SchemaNameSchema,
@@ -31,7 +31,7 @@ import {
 } from './models.js';
 import { EventNotifier } from './notifier.js';
 import { assembleDocument } from './openapi.js';
-import { renderHtml, type RationaleMap } from './render.js';
+import { type RationaleMap, renderHtml } from './render.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
@@ -172,7 +172,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/endpoints', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeEndpointRequestSchema.parse(await c.req.json());
-    const v = await store.proposeEndpoint(docName, body.method, body.path, body.spec, c.get('identity'));
+    const v = await store.proposeEndpoint(
+      docName,
+      body.method,
+      body.path,
+      body.spec,
+      c.get('identity'),
+    );
     return c.json(v, 201);
   });
 
@@ -199,7 +205,10 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       : await store.getEndpointCurrent(docName, method, path);
     if (!found) {
       return c.json(
-        { error: `no ${wantProposed ? 'proposed' : 'accepted'} version`, code: 'artifact_not_found' },
+        {
+          error: `no ${wantProposed ? 'proposed' : 'accepted'} version`,
+          code: 'artifact_not_found',
+        },
         404,
       );
     }
@@ -209,7 +218,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/endpoints/:id/accept', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const { method, path } = decodeEndpointId(c.req.param('id'));
-    const version = await resolveEndpointTargetVersion(store, docName, method, path, c.req.query('version'));
+    const version = await resolveEndpointTargetVersion(
+      store,
+      docName,
+      method,
+      path,
+      c.req.query('version'),
+    );
     const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'));
     return c.json(v);
   });
@@ -218,8 +233,21 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const { method, path } = decodeEndpointId(c.req.param('id'));
     const body = RejectArtifactRequestSchema.parse(await c.req.json());
-    const version = await resolveEndpointTargetVersion(store, docName, method, path, c.req.query('version'));
-    const v = await store.rejectEndpoint(docName, method, path, version, body.reason, c.get('identity'));
+    const version = await resolveEndpointTargetVersion(
+      store,
+      docName,
+      method,
+      path,
+      c.req.query('version'),
+    );
+    const v = await store.rejectEndpoint(
+      docName,
+      method,
+      path,
+      version,
+      body.reason,
+      c.get('identity'),
+    );
     return c.json(v);
   });
 
@@ -266,7 +294,10 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       : await store.getSchemaCurrent(docName, schemaName);
     if (!found) {
       return c.json(
-        { error: `no ${wantProposed ? 'proposed' : 'accepted'} version`, code: 'artifact_not_found' },
+        {
+          error: `no ${wantProposed ? 'proposed' : 'accepted'} version`,
+          code: 'artifact_not_found',
+        },
         404,
       );
     }
@@ -276,7 +307,12 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/schemas/:schemaName/accept', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
-    const version = await resolveSchemaTargetVersion(store, docName, schemaName, c.req.query('version'));
+    const version = await resolveSchemaTargetVersion(
+      store,
+      docName,
+      schemaName,
+      c.req.query('version'),
+    );
     const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'));
     return c.json(v);
   });
@@ -285,8 +321,19 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
     const body = RejectArtifactRequestSchema.parse(await c.req.json());
-    const version = await resolveSchemaTargetVersion(store, docName, schemaName, c.req.query('version'));
-    const v = await store.rejectSchema(docName, schemaName, version, body.reason, c.get('identity'));
+    const version = await resolveSchemaTargetVersion(
+      store,
+      docName,
+      schemaName,
+      c.req.query('version'),
+    );
+    const v = await store.rejectSchema(
+      docName,
+      schemaName,
+      version,
+      body.reason,
+      c.get('identity'),
+    );
     return c.json(v);
   });
 
@@ -483,10 +530,7 @@ async function resolveSchemaTargetVersion(
   }
   const proposed = await store.getSchemaProposed(docName, name);
   if (!proposed)
-    throw new StoreError(
-      'artifact_not_found',
-      `no proposed version of schema ${name} to act on`,
-    );
+    throw new StoreError('artifact_not_found', `no proposed version of schema ${name} to act on`);
   return proposed.version;
 }
 
@@ -502,10 +546,7 @@ async function resolveConventionTargetVersion(
   }
   const proposed = await store.getConventionProposed(docName);
   if (!proposed)
-    throw new StoreError(
-      'artifact_not_found',
-      'no proposed version of convention to act on',
-    );
+    throw new StoreError('artifact_not_found', 'no proposed version of convention to act on');
   return proposed.version;
 }
 
@@ -612,7 +653,6 @@ function escapeHtml(s: string): string {
     return m[c] ?? c;
   });
 }
-
 
 /** Long-poll wait: register a notifier resolver, race against timeout, race-guard against
  *  events that landed between the caller calling `since` and our register. */

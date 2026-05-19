@@ -86,12 +86,18 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
 }
 
 /** Helper: pretty list of all (method, path) pairs from a doc. Used by visualize text mode. */
-export function listOperations(doc: OpenAPIDocument): Array<{ method: HttpMethod; path: string; summary?: string }> {
+export function listOperations(
+  doc: OpenAPIDocument,
+): Array<{ method: HttpMethod; path: string; summary?: string }> {
   const out: Array<{ method: HttpMethod; path: string; summary?: string }> = [];
   for (const [path, ops] of Object.entries(doc.paths)) {
     for (const [method, spec] of Object.entries(ops)) {
       const sum: string | undefined = typeof spec.summary === 'string' ? spec.summary : undefined;
-      out.push(sum !== undefined ? { method: method as HttpMethod, path, summary: sum } : { method: method as HttpMethod, path });
+      out.push(
+        sum !== undefined
+          ? { method: method as HttpMethod, path, summary: sum }
+          : { method: method as HttpMethod, path },
+      );
     }
   }
   return out;

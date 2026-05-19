@@ -184,10 +184,7 @@ describe('renderHtml', () => {
       schemas: new Map<string, RationaleEntry[]>(),
       convention: [],
     };
-    const html = renderHtml(
-      { document: fixtureDoc, rationale },
-      { documentName: 'orders-api' },
-    );
+    const html = renderHtml({ document: fixtureDoc, rationale }, { documentName: 'orders-api' });
     expect(html).toContain('rationale-content');
     expect(html).toContain('POST /users');
     expect(html).toContain('host');

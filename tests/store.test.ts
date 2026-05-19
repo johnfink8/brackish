@@ -98,7 +98,6 @@ describe('SqliteStore', () => {
     });
   });
 
-
   describe('parties and tokens', () => {
     it('ensureParty is idempotent', async () => {
       const p1 = await store.ensureParty('alice');
@@ -218,6 +217,186 @@ describe('SqliteStore', () => {
       const inbox = await store.inboxSummary('alice');
       // document_created + 3 messages = 4 events, all past cursor 0
       expect(inbox[0]?.newCount).toBe(4);
+    });
+  });
+
+  describe('endpoint artifact lifecycle', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+    });
+
+    const minOp = (summary: string) => ({
+      summary,
+      responses: { '200': { description: 'ok' } },
+    });
+
+    it('propose returns OperationArtifact with v1 and delta=null; event carries delta=null', async () => {
+      const v = await store.proposeEndpoint('d', 'post', '/users', minOp('Create user'), 'host');
+      expect(v.kind).toBe('operation');
+      expect(v.version).toBe(1);
+      expect(v.status).toBe('proposed');
+      expect(v.method).toBe('post');
+      expect(v.path).toBe('/users');
+      const events = await store.listEvents('d', 0, 100);
+      const proposed = events.find((e) => e.kind === 'artifact_proposed');
+      expect(proposed).toBeDefined();
+      if (proposed?.kind === 'artifact_proposed') {
+        expect(proposed.artifactKind).toBe('operation');
+        expect(proposed.identityKey).toBe('POST /users');
+        expect(proposed.delta).toBeNull();
+      }
+    });
+
+    it('v2 propose computes a compact delta vs v1', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('Create user'), 'host');
+      const v2 = await store.proposeEndpoint(
+        'd',
+        'post',
+        '/users',
+        {
+          ...minOp('Create user'),
+          responses: { '200': { description: 'ok' }, '409': { description: 'taken' } },
+        },
+        'host',
+      );
+      expect(v2.version).toBe(2);
+      const events = await store.listEvents('d', 0, 100);
+      const last = events.filter((e) => e.kind === 'artifact_proposed').at(-1);
+      if (last?.kind === 'artifact_proposed') {
+        expect(last.delta).not.toBeNull();
+        expect(last.delta).toContain('+responses.409');
+      }
+    });
+
+    it('peer can accept; proposer cannot', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('Create user'), 'host');
+      await expect(store.acceptEndpoint('d', 'post', '/users', 1, 'host')).rejects.toMatchObject({
+        code: 'cannot_accept_own',
+      });
+      const accepted = await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      expect(accepted.status).toBe('accepted');
+    });
+
+    it('getEndpointCurrent returns latest accepted; null if none', async () => {
+      const v = await store.proposeEndpoint('d', 'post', '/users', minOp('Create user'), 'host');
+      expect(await store.getEndpointCurrent('d', 'post', '/users')).toBeNull();
+      await store.acceptEndpoint('d', 'post', '/users', v.version, 'peer');
+      const cur = await store.getEndpointCurrent('d', 'post', '/users');
+      expect(cur?.version).toBe(1);
+    });
+
+    it('listEndpoints summarizes current + latest proposed with delta', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('Create user'), 'host');
+      await store.acceptEndpoint('d', 'post', '/users', 1, 'peer');
+      await store.proposeEndpoint(
+        'd',
+        'post',
+        '/users',
+        {
+          ...minOp('Create user'),
+          responses: { '200': { description: 'ok' }, '409': { description: 'taken' } },
+        },
+        'host',
+      );
+      const list = await store.listEndpoints('d');
+      const post = list.find((e) => e.method === 'post' && e.path === '/users');
+      expect(post?.currentVersion).toBe(1);
+      expect(post?.latestProposedVersion).toBe(2);
+      expect(post?.latestDelta).toContain('+responses.409');
+      expect(post?.summary).toBe('Create user');
+    });
+
+    it('rejectEndpoint stores reason; rationale walks the chain', async () => {
+      await store.proposeEndpoint('d', 'post', '/users', minOp('v1'), 'host');
+      await store.rejectEndpoint('d', 'post', '/users', 1, 'needs 409', 'peer');
+      await store.proposeEndpoint(
+        'd',
+        'post',
+        '/users',
+        {
+          ...minOp('v2'),
+          responses: { '200': { description: 'ok' }, '409': { description: 'taken' } },
+        },
+        'host',
+      );
+      await store.acceptEndpoint('d', 'post', '/users', 2, 'peer');
+      const r = await store.rationaleForEndpoint('d', 'post', '/users');
+      expect(r).toHaveLength(2);
+      expect(r[0]?.status).toBe('rejected');
+      expect(r[0]?.rejectionReason).toBe('needs 409');
+      expect(r[1]?.status).toBe('accepted');
+      expect(r[1]?.delta).not.toBeNull();
+    });
+  });
+
+  describe('schema artifact lifecycle', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+    });
+
+    const userSpec = {
+      type: 'object',
+      properties: { id: { type: 'string' } },
+      required: ['id'],
+    };
+
+    it('propose + accept + list', async () => {
+      await store.proposeSchema('d', 'User', userSpec, 'host');
+      await store.acceptSchema('d', 'User', 1, 'peer');
+      const list = await store.listSchemas('d');
+      expect(list).toHaveLength(1);
+      expect(list[0]?.name).toBe('User');
+      expect(list[0]?.currentVersion).toBe(1);
+    });
+
+    it('getSchemaCurrent returns accepted; getSchemaProposed returns in-flight', async () => {
+      await store.proposeSchema('d', 'User', userSpec, 'host');
+      await store.acceptSchema('d', 'User', 1, 'peer');
+      const cur = await store.getSchemaCurrent('d', 'User');
+      expect(cur?.version).toBe(1);
+      await store.proposeSchema(
+        'd',
+        'User',
+        { ...userSpec, properties: { id: { type: 'string' }, email: { type: 'string' } } },
+        'host',
+      );
+      const prop = await store.getSchemaProposed('d', 'User');
+      expect(prop?.version).toBe(2);
+      expect(await store.getSchemaCurrent('d', 'User')).toMatchObject({ version: 1 });
+    });
+  });
+
+  describe('convention artifact (singleton per document)', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+    });
+
+    const conv = {
+      info: { title: 'Orders API', version: '1.0.0' },
+      servers: [{ url: 'https://api.example.com' }],
+    };
+
+    it('propose + accept; getConventionCurrent returns it', async () => {
+      await store.proposeConvention('d', conv, 'host');
+      await store.acceptConvention('d', 1, 'peer');
+      const cur = await store.getConventionCurrent('d');
+      expect(cur?.version).toBe(1);
+      if (cur?.status === 'accepted') {
+        expect(cur.spec.info.title).toBe('Orders API');
+      }
+    });
+
+    it('proposing again increments version; latest accepted wins', async () => {
+      await store.proposeConvention('d', conv, 'host');
+      await store.acceptConvention('d', 1, 'peer');
+      await store.proposeConvention(
+        'd',
+        { ...conv, info: { title: 'Orders API', version: '1.1.0' } },
+        'host',
+      );
+      await store.acceptConvention('d', 2, 'peer');
+      const cur = await store.getConventionCurrent('d');
+      expect(cur?.version).toBe(2);
     });
   });
 });

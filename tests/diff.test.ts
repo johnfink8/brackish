@@ -43,23 +43,17 @@ describe('generatePatch', () => {
   });
 
   it('diffs arrays index-by-index', () => {
-    expect(generatePatch([1, 2, 3], [1, 5, 3])).toEqual([
-      { op: 'replace', path: '/1', value: 5 },
-    ]);
+    expect(generatePatch([1, 2, 3], [1, 5, 3])).toEqual([{ op: 'replace', path: '/1', value: 5 }]);
     expect(generatePatch([1, 2], [1, 2, 3])).toEqual([{ op: 'add', path: '/2', value: 3 }]);
     expect(generatePatch([1, 2, 3], [1, 2])).toEqual([{ op: 'remove', path: '/2' }]);
   });
 
   it('handles array vs object as a whole-subtree replace', () => {
-    expect(generatePatch([1, 2], { a: 1 })).toEqual([
-      { op: 'replace', path: '', value: { a: 1 } },
-    ]);
+    expect(generatePatch([1, 2], { a: 1 })).toEqual([{ op: 'replace', path: '', value: { a: 1 } }]);
   });
 
   it('handles undefined → value as add', () => {
-    expect(generatePatch(undefined, { a: 1 })).toEqual([
-      { op: 'add', path: '', value: { a: 1 } },
-    ]);
+    expect(generatePatch(undefined, { a: 1 })).toEqual([{ op: 'add', path: '', value: { a: 1 } }]);
   });
 
   it('round-trips a representative OpenAPI Operation diff', () => {
