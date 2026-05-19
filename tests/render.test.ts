@@ -111,6 +111,7 @@ describe('renderMarkdown', () => {
             rejectedAt: '2026-05-19T10:05:00Z',
             rejectionReason: 'needs 409 response',
             delta: null,
+            spec: { summary: 'v1 spec', responses: { '200': { description: 'ok' } } },
           },
           {
             version: 2,
@@ -120,6 +121,10 @@ describe('renderMarkdown', () => {
             acceptedBy: 'peer',
             acceptedAt: '2026-05-19T10:15:00Z',
             delta: '+responses.409',
+            spec: {
+              summary: 'v2 spec',
+              responses: { '200': { description: 'ok' }, '409': { description: 'conflict' } },
+            },
           },
         ],
       ],
@@ -135,6 +140,11 @@ describe('renderMarkdown', () => {
     expect(out).toContain('rejected');
     expect(out).toContain('needs 409 response');
     expect(out).toContain('+responses.409');
+    // Each version body is rendered as a collapsible YAML block.
+    expect(out).toContain('v1 content');
+    expect(out).toContain('v2 content');
+    expect(out).toContain('summary: v1 spec');
+    expect(out).toContain('summary: v2 spec');
   });
 
   it('renders message events as a discussion transcript when present', () => {
@@ -177,6 +187,7 @@ describe('renderHtml', () => {
               acceptedBy: 'peer',
               acceptedAt: '2026-05-19T10:05:00Z',
               delta: null,
+              spec: { summary: 'create a user', responses: { '201': { description: 'created' } } },
             },
           ],
         ],
@@ -189,6 +200,12 @@ describe('renderHtml', () => {
     expect(html).toContain('POST /users');
     expect(html).toContain('host');
     expect(html).toContain('peer');
+    // The sidebar surfaces the proposed/rejected content as collapsible YAML blocks.
+    // The text "show v<N> content" is built at runtime in the browser; check the
+    // ingredients: the specYaml string (one line of the inlined YAML) and the
+    // collapsible markup template.
+    expect(html).toContain('summary: create a user');
+    expect(html).toContain('details class="spec"');
   });
 
   it('escapes HTML-special characters in the document name', () => {

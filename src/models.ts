@@ -3,7 +3,7 @@
 //
 // v0.2 model: artifacts are kind-discriminated (operation/schema/convention), each carrying a
 // typed `spec` that's a subset of the corresponding OpenAPI 3.1 object (with passthrough so
-// unknown fields and x-brackish-* extensions round-trip cleanly). No more freeform `kind: string`
+// unknown fields and x-brackish extension round-trip cleanly). No more freeform `kind: string`
 // + opaque `content: string`.
 
 import { z } from 'zod';
@@ -126,7 +126,7 @@ const ParameterSchema = z
   .passthrough();
 
 // OpenAPI Operation Object. responses is required by spec; everything else is optional.
-// .passthrough() is load-bearing here — it preserves x-brackish-* extensions and any OpenAPI
+// .passthrough() is load-bearing here — it preserves x-brackish extension and any OpenAPI
 // fields we haven't enumerated (like callbacks, externalDocs, etc.).
 export const OperationSpecSchema = z
   .object({

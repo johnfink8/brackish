@@ -38,16 +38,32 @@ Every brackish document assembles into a real OpenAPI 3.1 spec. There are exactl
 
 | Kind | What it is | Identity key | When to use |
 |---|---|---|---|
-| `endpoint` | OpenAPI Operation Object (method + path + requestBody + responses + security + x-brackish-*) | `<METHOD> <path>` | One per `(method, path)` |
+| `endpoint` | OpenAPI Operation Object (method + path + requestBody + responses + security + `x-brackish`) | `<METHOD> <path>` | One per `(method, path)` |
 | `schema` | JSON Schema (lives under `components.schemas[name]`) | `<Name>` | Reusable shapes (`User`, `OrderCreate`) |
 | `convention` | `{ info, servers, securitySchemes }` (document-level header) | singleton | One per document |
 
-Brackish-specific metadata uses OpenAPI's `x-` extension hatch:
-- `x-brackish-idempotent: true` — declares intent (orthogonal to HTTP method)
-- `x-brackish-side-effects: ["..."]`
-- `x-brackish-timing: { p50, p99, timeout }`
+Brackish-specific metadata uses OpenAPI's `x-` extension hatch, **consolidated into one key per object** so it reads as a single metadata block and doesn't pattern-match against HTTP headers:
 
-These survive into rendered OpenAPI YAML; Swagger UI ignores them; brackish renders them.
+```yaml
+# On an Operation:
+x-brackish:
+  idempotent: true                              # declares intent (orthogonal to HTTP method)
+  sideEffects:                                  # free-text notes on what state this mutates
+    - "writes orders table"
+    - "publishes order.created event"
+  timing: { p50: 20ms, p99: 150ms, timeout: 2s }
+  streaming: sse                                # for SSE/long-poll endpoints
+  protocol: websocket                           # for WS handshake operations
+  frames:                                       # WS frame catalog (when protocol=websocket)
+    client_to_server: [ "..." ]
+    server_to_client: [ "..." ]
+
+# On a Convention:
+x-brackish:
+  naming: camelCase                             # JSON-key casing across the wire (camelCase | snake_case)
+```
+
+These are **OpenAPI Specification Extensions**, not HTTP headers — they live alongside `responses` and `security` on the Operation Object as vendor metadata. Validators and codegen tools that don't understand them ignore them; Swagger UI passes them through silently; brackish renders them in the markdown + sidebar views. **Use the canonical field names above** — don't invent variants (e.g. `sideEffect` singular, `idempotency`); the consolidation exists so we have one place that defines them.
 
 ## Workflow
 

@@ -376,7 +376,7 @@ export function buildProgram(): Command {
 
   endpoint
     .command('propose <doc> <method> <path>')
-    .description('propose an OpenAPI Operation (request/responses/security/x-brackish-*)')
+    .description('propose an OpenAPI Operation (request/responses/security/x-brackish)')
     .option('--summary <text>')
     .option('--description <text>')
     .option('--request-content <ct=schema>', 'media type=schemaName (repeatable)', collect, [])
@@ -387,11 +387,11 @@ export function buildProgram(): Command {
       [],
     )
     .option('--security <scheme>', 'security scheme name (repeatable)', collect, [])
-    .option('--idempotent', 'x-brackish-idempotent: true')
-    .option('--side-effect <text>', 'x-brackish-side-effect note (repeatable)', collect, [])
-    .option('--timing-p50 <duration>', 'x-brackish-timing.p50')
-    .option('--timing-p99 <duration>', 'x-brackish-timing.p99')
-    .option('--timeout <duration>', 'x-brackish-timing.timeout')
+    .option('--idempotent', 'x-brackish.idempotent: true')
+    .option('--side-effect <text>', 'x-brackish.sideEffects entry (repeatable)', collect, [])
+    .option('--timing-p50 <duration>', 'x-brackish.timing.p50')
+    .option('--timing-p99 <duration>', 'x-brackish.timing.p99')
+    .option('--timeout <duration>', 'x-brackish.timing.timeout')
     .option(
       '--file <path>',
       'load full Operation Object from YAML/JSON file (replaces other flags)',
@@ -1127,16 +1127,18 @@ function buildOperationSpec(opts: EndpointProposeOpts): OperationSpec {
     spec.security = opts.security.map((s) => ({ [s]: [] }));
   }
 
-  // brackish extensions
-  if (opts.idempotent) spec['x-brackish-idempotent'] = true;
-  if (opts.sideEffect.length > 0) spec['x-brackish-side-effects'] = opts.sideEffect;
+  // brackish extensions — all consolidated under `x-brackish` per the skill.
+  const brackishExt: Record<string, unknown> = {};
+  if (opts.idempotent) brackishExt.idempotent = true;
+  if (opts.sideEffect.length > 0) brackishExt.sideEffects = opts.sideEffect;
   if (opts.timingP50 || opts.timingP99 || opts.timeout) {
     const timing: Record<string, string> = {};
     if (opts.timingP50) timing.p50 = opts.timingP50;
     if (opts.timingP99) timing.p99 = opts.timingP99;
     if (opts.timeout) timing.timeout = opts.timeout;
-    spec['x-brackish-timing'] = timing;
+    brackishExt.timing = timing;
   }
+  if (Object.keys(brackishExt).length > 0) spec['x-brackish'] = brackishExt;
 
   return spec as OperationSpec;
 }

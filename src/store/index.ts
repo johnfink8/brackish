@@ -37,6 +37,8 @@ export type RationaleEntry = {
   rejectedAt?: string;
   rejectionReason?: string;
   delta: string | null;
+  /** The artifact body for this version. Object shape depends on artifact kind. */
+  spec: unknown;
 };
 
 export interface Store {

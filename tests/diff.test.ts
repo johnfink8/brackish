@@ -69,7 +69,7 @@ describe('generatePatch', () => {
         '201': { description: 'created' },
         '409': { description: 'email taken' },
       },
-      'x-brackish-idempotent': true,
+      'x-brackish': { idempotent: true },
     };
     const patch = generatePatch(before, after);
     expect(patch).toContainEqual({
@@ -79,8 +79,8 @@ describe('generatePatch', () => {
     });
     expect(patch).toContainEqual({
       op: 'add',
-      path: '/x-brackish-idempotent',
-      value: true,
+      path: '/x-brackish',
+      value: { idempotent: true },
     });
   });
 });

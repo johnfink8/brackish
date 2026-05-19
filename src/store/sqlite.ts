@@ -490,12 +490,19 @@ export class SqliteStore implements Store {
       .slice()
       .sort((a, b) => a.version - b.version)
       .map((r) => {
+        let spec: unknown = null;
+        try {
+          spec = JSON.parse(r.spec);
+        } catch {
+          // Should never happen — spec was JSON.stringify'd on the way in.
+        }
         const entry: RationaleEntry = {
           version: r.version,
           status: r.status,
           proposedBy: r.proposed_by,
           proposedAt: r.proposed_at,
           delta: r.delta,
+          spec,
         };
         if (r.accepted_by) entry.acceptedBy = r.accepted_by;
         if (r.accepted_at) entry.acceptedAt = r.accepted_at;

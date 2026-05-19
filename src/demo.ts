@@ -6,7 +6,7 @@
 //   - schema rejections + re-proposals (User snake_case rejected; Message field-as-string rejected)
 //   - endpoint rejections (POST /messages: status code; GET /messages/stream: filter shape)
 //   - multiple content types: application/json, application/octet-stream, text/event-stream,
-//     text/html, plus a 101 Switching Protocols WS upgrade documented via x-brackish-protocol
+//     text/html, plus a 101 Switching Protocols WS upgrade documented via x-brackish.protocol
 //   - chat-message transcript interleaved with the artifact moves
 //
 // Use the socket transport: peer-trust lets us impersonate both identities from one process.
@@ -179,7 +179,7 @@ export async function seedChatterDemo(opts: SeedOptions): Promise<{ documentName
     await b.acceptEndpoint(docName, 'get', '/attachments/{id}');
 
     // --- GET /ws (websocket upgrade) ---
-    step('endpoint GET /ws (WebSocket upgrade, x-brackish-protocol)');
+    step('endpoint GET /ws (WebSocket upgrade, x-brackish.protocol)');
     await a.proposeEndpoint(docName, 'get', '/ws', getWsOp);
     await b.acceptEndpoint(docName, 'get', '/ws');
 
@@ -394,7 +394,7 @@ const getUsersIdOp: OperationSpec = {
       content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
     },
   },
-  'x-brackish-timing': { p50: '15ms', p99: '80ms' },
+  'x-brackish': { timing: { p50: '15ms', p99: '80ms' } },
 };
 
 const postMessagesOpV1: OperationSpec = {
@@ -434,8 +434,10 @@ const postMessagesOpV2: OperationSpec = {
       content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
     },
   },
-  'x-brackish-side-effects': ['writes messages table', 'broadcasts WsEvent {kind:message}'],
-  'x-brackish-timing': { p50: '20ms', p99: '150ms' },
+  'x-brackish': {
+    sideEffects: ['writes messages table', 'broadcasts WsEvent {kind:message}'],
+    timing: { p50: '20ms', p99: '150ms' },
+  },
 };
 
 const getMessagesOp: OperationSpec = {
@@ -562,8 +564,10 @@ const postAttachmentsOp: OperationSpec = {
       content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
     },
   },
-  'x-brackish-side-effects': ['writes to S3 (bucket: chatter-attachments)'],
-  'x-brackish-timing': { p50: '300ms', p99: '5s' },
+  'x-brackish': {
+    sideEffects: ['writes to S3 (bucket: chatter-attachments)'],
+    timing: { p50: '300ms', p99: '5s' },
+  },
 };
 
 const getAttachmentsIdOp: OperationSpec = {
@@ -592,12 +596,14 @@ const getWsOp: OperationSpec = {
     '101': { description: 'Switching Protocols' },
     '401': { description: 'missing/invalid token' },
   },
-  'x-brackish-protocol': 'websocket',
-  'x-brackish-frames': {
-    serverToClient: '#/components/schemas/WsEvent',
-    clientToServer: '#/components/schemas/MessageCreate',
+  'x-brackish': {
+    protocol: 'websocket',
+    frames: {
+      serverToClient: '#/components/schemas/WsEvent',
+      clientToServer: '#/components/schemas/MessageCreate',
+    },
+    sideEffects: ['subscribes the connection to room broadcasts'],
   },
-  'x-brackish-side-effects': ['subscribes the connection to room broadcasts'],
 };
 
 const getRootOp: OperationSpec = {

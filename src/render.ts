@@ -193,14 +193,24 @@ export function renderMarkdown(input: RenderInput): string {
 
 function formatRationaleEntry(e: RationaleEntry): string {
   const delta = e.delta ? ` (${e.delta})` : '';
-  switch (e.status) {
-    case 'proposed':
-      return `v${e.version} **proposed** by \`${e.proposedBy}\` at ${e.proposedAt}${delta}`;
-    case 'accepted':
-      return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **accepted** by \`${e.acceptedBy}\` at ${e.acceptedAt}`;
-    case 'rejected':
-      return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **rejected** by \`${e.rejectedBy}\` at ${e.rejectedAt}: "${e.rejectionReason}"`;
-  }
+  const head = (() => {
+    switch (e.status) {
+      case 'proposed':
+        return `v${e.version} **proposed** by \`${e.proposedBy}\` at ${e.proposedAt}${delta}`;
+      case 'accepted':
+        return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **accepted** by \`${e.acceptedBy}\` at ${e.acceptedAt}`;
+      case 'rejected':
+        return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **rejected** by \`${e.rejectedBy}\` at ${e.rejectedAt}: "${e.rejectionReason}"`;
+    }
+  })();
+  if (e.spec === undefined || e.spec === null) return head;
+  // Indent the YAML so it nests cleanly under the bullet that wraps each entry.
+  const body = yamlStringify(e.spec)
+    .trimEnd()
+    .split('\n')
+    .map((l) => `  ${l}`)
+    .join('\n');
+  return `${head}\n  <details><summary>v${e.version} content</summary>\n\n  \`\`\`yaml\n${body}\n  \`\`\`\n  </details>`;
 }
 
 // --- html (Swagger UI via CDN + rationale sidebar) ---
@@ -208,10 +218,19 @@ function formatRationaleEntry(e: RationaleEntry): string {
 export function renderHtml(input: RenderInput, opts: { documentName: string }): string {
   const specJson = JSON.stringify(input.document);
   const rationale = input.rationale ?? { endpoints: new Map(), schemas: new Map(), convention: [] };
+
+  // Pre-render each version's spec to a YAML string so the browser doesn't need a YAML
+  // stringifier. The raw spec object is kept too in case callers want it.
+  const withYaml = (e: RationaleEntry) => ({
+    ...e,
+    specYaml: e.spec === undefined || e.spec === null ? '' : yamlStringify(e.spec).trimEnd(),
+  });
   const rationaleJson = JSON.stringify({
-    endpoints: Object.fromEntries(rationale.endpoints),
-    schemas: Object.fromEntries(rationale.schemas),
-    convention: rationale.convention,
+    endpoints: Object.fromEntries(
+      Array.from(rationale.endpoints, ([k, vs]) => [k, vs.map(withYaml)]),
+    ),
+    schemas: Object.fromEntries(Array.from(rationale.schemas, ([k, vs]) => [k, vs.map(withYaml)])),
+    convention: rationale.convention.map(withYaml),
   });
   // Inline the rationale JSON so the page works offline once Swagger UI is cached.
   return `<!doctype html>
@@ -236,6 +255,10 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   #rationale .who { color: #666; }
   #rationale .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; }
   #rationale .reason { font-style: italic; color: #c62828; }
+  #rationale details.spec { margin-top: 6px; }
+  #rationale details.spec > summary { font-size: 11px; color: #1976d2; cursor: pointer; user-select: none; }
+  #rationale details.spec > summary:hover { color: #0d47a1; }
+  #rationale details.spec > pre { margin: 6px 0 0; padding: 8px; background: #f5f5f5; border-radius: 3px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto; }
 </style>
 </head>
 <body>
@@ -257,6 +280,7 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
     if (v.delta) body += ' <span class="delta">' + escape(v.delta) + '</span>';
     if (v.status === 'accepted') body += '<br><span class="who">accepted by ' + escape(v.acceptedBy) + '</span>';
     if (v.status === 'rejected') body += '<br><span class="who">rejected by ' + escape(v.rejectedBy) + '</span>: <span class="reason">' + escape(v.rejectionReason) + '</span>';
+    if (v.specYaml) body += '<details class="spec"><summary>show v' + v.version + ' content</summary><pre>' + escape(v.specYaml) + '</pre></details>';
     return body + '</div>';
   }
   function renderGroup(title, map) {
