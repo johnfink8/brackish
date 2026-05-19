@@ -79,12 +79,11 @@ export const chatAppScenario: Scenario = {
   firstMover: 'backend',
   maxRounds: 24,
   perTurnBudgetUsd: 1.5,
-  // 15 min wall-clock per turn. `claude -p --output-format json` batches its envelope at end,
-  // so any SIGTERM before completion loses ALL accounting (the trial state is preserved via
-  // brackish but the harness records 0 model-turns + $0 cost). The naturalistic briefs invite
-  // deeper deliberation than the prior adversarial set — first observed turn under this scenario
-  // shaped a multi-message plan in 5+ minutes. Plenty of headroom is cheap; truncation isn't.
-  perTurnTimeoutMs: 900_000,
+  // 6 min wall-clock per turn. With the single-shot hint in each brief, sub-Claudes no longer
+  // call `brackish nap` / wait; they finish their moves, summarize, exit. Previous trials under
+  // the inlined-skill setup peaked at ~4.5 min on a heavy round; the split skill adds some file
+  // reads but should still land well under 6.
+  perTurnTimeoutMs: 360_000,
   successCriterion: {
     minAcceptedEndpoints: 3,
     requireAcceptedConvention: true,
