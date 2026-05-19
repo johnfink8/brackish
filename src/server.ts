@@ -423,6 +423,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(v);
   });
 
+  app.get('/documents/:name/convention/latest', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const v = await store.getConventionLatest(docName);
+    if (!v) return c.json({ error: 'no convention', code: 'artifact_not_found' }, 404);
+    return c.json(v);
+  });
+
   app.post('/documents/:name/convention/accept', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));

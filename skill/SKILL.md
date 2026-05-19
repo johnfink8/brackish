@@ -91,14 +91,19 @@ brackish doc new orders-api      # if you need a new one
 ```
 brackish convention propose orders-api --expected-new \
   --title "Orders API" --api-version 1.0.0 \
-  --server "https://api.example.com:production" \
+  --server-url https://api.example.com --server-description "production" \
   --security-scheme "bearer:http:bearerFormat=JWT" \
   --global-security bearer \
   --naming camelCase
 ```
 
-- `--global-security bearer` emits an OpenAPI doc-level `security: [{ bearer: [] }]`. Endpoints inherit it automatically (no `--security` per endpoint needed). Opt out with `--no-inherit-security` on a specific endpoint (e.g. `/health`).
+- `--server-url` + `--server-description` are unambiguous. The older colon-form `--server "url:description"` still works but fails on URLs containing a port colon (`http://host:8000:desc` mis-parses); brackish warns when it sees that shape.
+- `--global-security bearer` emits an OpenAPI doc-level `security: [{ bearer: [] }]`. Endpoints inherit it automatically (no `--security` per endpoint needed). Opt out with `--no-inherit-security` on a specific endpoint (e.g. `/health`); brackish 0.3.1+ emits `security: []` on that op, which is the OpenAPI spelling for "no auth required".
 - `--naming camelCase` (or `snake_case`) stamps the JSON-key policy onto `x-brackish.naming` so the convention documents the casing decision once.
+
+**If the convention gets rejected, hold off on proposing dependents.** Endpoints and schemas inherit doc-level defaults from the convention (security, naming, info.version), so proposing them on top of an in-flight or rejected convention means re-proposing once the convention finally settles. `brackish status <doc>` surfaces a stalled convention in a dedicated "needs attention" bucket — clear it before chewing through the endpoint queue.
+
+**Ground in code, not docs.** If the repo has prior API docs (`API.md`, an older `openapi.yaml`, a README schema block), treat them as a prior-negotiation snapshot, not ground truth. Stale docstrings are common; the actual emit/handler sites win. Before proposing a schema for a payload your peer produces, grep the emit site (`response.json(...)`, `return jsonify(...)`, `WebSocket.send(...)`) in their codebase and reconcile with the docs.
 
 ### Schemas: prefer `--file` over the `--field` sugar
 
@@ -119,6 +124,19 @@ brackish schema propose orders-api User --expected-new --file /tmp/User.yaml
 ```
 
 Don't burn round-trips on `--field` collisions — write the file.
+
+**`--file` replaces other CLI flags, not merges with them.** If you pass `--file convention.yaml --global-security bearer`, the `--global-security` is silently dropped (brackish 0.3.1+ warns to stderr, but the file still wins). Bake every field you want into the file. Same rule for `endpoint propose --file` and `schema propose --file`.
+
+**Block-style descriptions when the text contains `:`, `,`, `(`, `{`.** YAML flow-mappings with embedded colons parse confusingly:
+
+```yaml
+# Foot-gun (flow-style with embedded colon):
+description: "salience: interrupt; barge over current speech"
+
+# Safer (block-style):
+description: |
+  salience: interrupt; barge over current speech
+```
 
 ### Endpoints: auto-derived `parameters` and inherited security
 
@@ -183,16 +201,32 @@ When the document has many artifacts in flight, the cleanest single view is:
 brackish status orders-api
 ```
 
-Buckets by ownership: **awaiting peer review** (you proposed), **awaiting your review** (peer proposed), **accepted**. Add `--verbose` to also list withdrawn / rejected items, or `--json` for structured output.
+Buckets by ownership: **awaiting peer review** (you proposed), **awaiting your review** (peer proposed), **accepted**, plus a **needs attention** bucket that surfaces a rejected or withdrawn convention (which would otherwise be invisible since it's neither current nor proposed). Add `--verbose` to also list withdrawn / rejected items, or `--json` for structured output.
+
+### Triaging a big drop from the peer
+
+If `status` shows you're holding ten or more incoming artifacts (peer dumped a whole batch), don't just power through. **Send a chat message proposing a review order** before chewing through them:
+
+```
+brackish send orders-api "I'll start with the convention + User/Auth/Session schemas, then the auth endpoints, then come back for the rest. Reject any of those that need to ship sooner."
+```
+
+This gives the peer a chance to redirect (maybe the `/health` endpoint matters more than the auth schemas) and saves you from re-running the same triage in your head every turn.
+
+### Rejecting with a reason
+
+`<kind> reject <doc> <selector> "<reason>"` accepts the reason inline. You don't usually need a separate `brackish send` alongside it — the reason is already attached to the reject event and renders in the rationale. Use `brackish send` only when the rationale wouldn't fit (e.g., proposing an alternative spec sketch).
 
 ## Token-efficient catch-up (do this)
 
-A high-churn negotiation can balloon an agent's context if you're not careful. brackish gives you compact paths — use them:
+A high-churn negotiation can balloon an agent's context if you're not careful. brackish gives you compact paths — use them in this order:
 
-1. `brackish read <doc>` — events come with compact `delta` summaries like `+responses.409` so you can see what each propose actually changed without fetching the full spec.
-2. `brackish endpoint show <doc> METHOD /path` — defaults to a status line + delta; only add `--full` when you actually need to read the spec body.
-3. `brackish <kind> diff <doc> <id> --from N --to M` — emits an RFC 6902 JSON Patch between two versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
-4. `brackish visualize <doc>` — defaults to a table-of-contents (no spec bodies). Add `--full` for everything. Use `--format openapi` to write a real OpenAPI YAML; `--format markdown` for a human-readable doc with rationale interleaved.
+1. **`brackish status <doc>` first.** Single best "what am I blocked on?" view; buckets by ownership (awaiting peer, awaiting me, accepted) and surfaces a rejected/withdrawn convention separately (which is what's blocking every dependent, if so). This is where you start a turn, not `read`.
+2. `brackish read <doc>` — events with compact `delta` summaries like `+responses.409` so you can see what each propose changed without fetching the full spec. Reach for it after `status` when you need *why*, not just *what*.
+3. `brackish endpoint show <doc> METHOD /path` — defaults to a status line + delta; only add `--full` when you actually need to read the spec body.
+4. `brackish <kind> diff <doc> <id> --from N --to M` — emits an RFC 6902 JSON Patch between two versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
+5. `brackish visualize <doc>` — defaults to a table-of-contents (no spec bodies). Add `--full` for everything. Use `--format openapi` to write a real OpenAPI YAML; `--format markdown` for a human-readable doc with rationale interleaved.
+6. `brackish nap` — when you've responded to everything in the inbox and have nothing left to do but wait for the peer, `brackish nap` sleeps 60s (override with `--seconds N`), then snapshots the inbox. setTimeout-shape, not a recurring monitor: it returns once, with whatever showed up. Use it instead of asking the human "anything new?". If `nap` returns empty twice in a row, `brackish send <doc> "<status>"` ping the peer rather than napping a third time.
 
 Rough rule: **don't pull a full spec body until you've decided you need it.** The delta summary + diff command tell you what changed at a fraction of the bytes.
 

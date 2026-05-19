@@ -368,6 +368,13 @@ export class BrackishClient {
     );
   }
 
+  getConventionLatest(document: DocumentName): Promise<ConventionArtifact> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/convention/latest`,
+      ConventionArtifactSchema,
+    );
+  }
+
   getConventionByVersion(document: DocumentName, version: number): Promise<ConventionArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/convention`,

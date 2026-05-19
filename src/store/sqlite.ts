@@ -936,6 +936,17 @@ export class SqliteStore implements Store {
     return row ? this.rowToConventionArtifact(row) : null;
   }
 
+  async getConventionLatest(documentName: DocumentName): Promise<ConventionArtifact | null> {
+    const row = this.db
+      .prepare<[string, string, string], ArtifactRow>(
+        `SELECT * FROM artifact_versions
+         WHERE document_name = ? AND kind = ? AND identity_key = ?
+         ORDER BY version DESC LIMIT 1`,
+      )
+      .get(documentName, 'convention', CONVENTION_KEY);
+    return row ? this.rowToConventionArtifact(row) : null;
+  }
+
   async getConventionByVersion(
     documentName: DocumentName,
     version: number,

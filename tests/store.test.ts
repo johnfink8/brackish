@@ -562,6 +562,34 @@ describe('SqliteStore', () => {
       const cur = await store.getConventionCurrent('d');
       expect(cur?.version).toBe(2);
     });
+
+    it('getConventionLatest surfaces a rejected version that current/proposed hide', async () => {
+      await store.proposeConvention('d', conv, 'host');
+      await store.rejectConvention('d', 1, 'no auth section', 'peer');
+      expect(await store.getConventionCurrent('d')).toBeNull();
+      expect(await store.getConventionProposed('d')).toBeNull();
+      const latest = await store.getConventionLatest('d');
+      expect(latest?.version).toBe(1);
+      if (latest?.status === 'rejected') {
+        expect(latest.rejectionReason).toBe('no auth section');
+      } else {
+        throw new Error(`expected rejected, got ${latest?.status}`);
+      }
+    });
+
+    it('getConventionLatest returns the highest-version row regardless of status', async () => {
+      await store.proposeConvention('d', conv, 'host');
+      await store.acceptConvention('d', 1, 'peer');
+      await store.proposeConvention(
+        'd',
+        { ...conv, info: { title: 'Orders API', version: '1.1.0' } },
+        'host',
+      );
+      await store.rejectConvention('d', 2, 'breaks naming', 'peer');
+      const latest = await store.getConventionLatest('d');
+      expect(latest?.version).toBe(2);
+      expect(latest?.status).toBe('rejected');
+    });
   });
 });
 

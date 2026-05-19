@@ -565,6 +565,30 @@ export function buildProgram(): Command {
     );
 
   program
+    .command('nap')
+    .description(
+      "sleep --seconds, then snapshot the inbox. Use when there's nothing to do but wait for the peer — setTimeout-shape, not a recurring monitor.",
+    )
+    .option('--seconds <n>', 'sleep duration in seconds', '60')
+    .option('--json', 'output JSON')
+    .action(async (opts: { seconds: string; json?: boolean }) =>
+      withClient(async (client) => {
+        const seconds = Number.parseFloat(opts.seconds);
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          errExit(2, `--seconds must be a non-negative number (got "${opts.seconds}")`);
+        }
+        await sleep(seconds * 1000);
+        const res = await client.inbox();
+        if (opts.json) emitJson(res);
+        else if (res.documents.length === 0) {
+          emit(`(no peer activity in the last ${seconds}s)`);
+        } else {
+          emit(formatInbox(res.identity, res.documents));
+        }
+      }),
+    );
+
+  program
     .command('watch [document]')
     .description('foreground live tail of events; ^C to stop. Omit <doc> to use --all.')
     .option('--all', 'tail every document (uses inbox + iterative wait)')
@@ -615,7 +639,7 @@ export function buildProgram(): Command {
     .option('--security <scheme>', 'security scheme name (repeatable)', collect, [])
     .option(
       '--no-inherit-security',
-      "don't inherit doc-level `security` from the accepted convention (use for explicitly public endpoints)",
+      "explicitly opt out of doc-level `security`; emits `security: []` on the operation (the OpenAPI spelling for 'no auth required')",
     )
     .option('--idempotent', 'x-brackish.idempotent: true')
     .option('--side-effect <text>', 'x-brackish.sideEffects entry (repeatable)', collect, [])
@@ -639,6 +663,21 @@ export function buildProgram(): Command {
           opts.inheritSecurity === false
             ? null
             : await client.getConventionCurrent(doc).catch(() => null);
+        if (opts.file) {
+          const ignored: string[] = [];
+          if (opts.summary !== undefined) ignored.push('--summary');
+          if (opts.description !== undefined) ignored.push('--description');
+          if (opts.requestContent.length > 0) ignored.push('--request-content');
+          if (opts.response.length > 0) ignored.push('--response');
+          if (opts.security.length > 0) ignored.push('--security');
+          if (opts.inheritSecurity === false) ignored.push('--no-inherit-security');
+          if (opts.idempotent) ignored.push('--idempotent');
+          if (opts.sideEffect.length > 0) ignored.push('--side-effect');
+          if (opts.timingP50 !== undefined) ignored.push('--timing-p50');
+          if (opts.timingP99 !== undefined) ignored.push('--timing-p99');
+          if (opts.timeout !== undefined) ignored.push('--timeout');
+          warnFileClobbers(opts.file, ignored);
+        }
         const spec = opts.file
           ? (loadSpecFile(opts.file) as OperationSpec)
           : buildOperationSpec(opts, { path, convention });
@@ -685,6 +724,9 @@ export function buildProgram(): Command {
                 ...(opts.proposed ? { proposed: true } : {}),
               }),
             opts.proposed ? () => client.getEndpoint(doc, method, path) : null,
+            !opts.proposed && opts.version === undefined
+              ? () => client.getEndpoint(doc, method, path, { proposed: true })
+              : undefined,
           );
           if (opts.json) emitJson(v);
           else if (opts.full) emit(`${describeOperation(v)}\n${yamlStringify(v.spec).trimEnd()}`);
@@ -820,6 +862,12 @@ export function buildProgram(): Command {
         },
       ) =>
         withClient(async (client) => {
+          if (opts.file) {
+            const ignored: string[] = [];
+            if (opts.field.length > 0) ignored.push('--field');
+            if (opts.description !== undefined) ignored.push('--description');
+            warnFileClobbers(opts.file, ignored);
+          }
           const spec = opts.file ? (loadSpecFile(opts.file) as JSONSchema) : buildSchemaSpec(opts);
           const v = await client.proposeSchema(doc, name, spec, parseConcurrencyOpts(opts));
           if (opts.json) emitJson(v);
@@ -860,6 +908,9 @@ export function buildProgram(): Command {
                 ...(opts.proposed ? { proposed: true } : {}),
               }),
             opts.proposed ? () => client.getSchema(doc, name) : null,
+            !opts.proposed && opts.version === undefined
+              ? () => client.getSchema(doc, name, { proposed: true })
+              : undefined,
           );
           if (opts.json) emitJson(v);
           else if (opts.full) emit(`${describeSchema(v)}\n${yamlStringify(v.spec).trimEnd()}`);
@@ -953,7 +1004,17 @@ export function buildProgram(): Command {
     .option('--title <text>')
     .option('--api-version <text>', 'API version (e.g. "1.0.0")')
     .option('--description <text>')
-    .option('--server <url:description>', 'server URL (repeatable)', collect, [])
+    .option(
+      '--server <url:description>',
+      'server URL (repeatable). Colon-delimited form; ambiguous when the URL contains a port — prefer --server-url + --server-description.',
+      collect,
+      [],
+    )
+    .option(
+      '--server-url <url>',
+      "server URL (unambiguous; pair with --server-description). Repeatable but doesn't pair across repeats — use --server for multi-server.",
+    )
+    .option('--server-description <text>', 'description for --server-url (optional)')
     .option(
       '--security-scheme <name:type:config>',
       '"bearer:http:bearerFormat=JWT" (repeatable)',
@@ -977,6 +1038,19 @@ export function buildProgram(): Command {
     .option('--json')
     .action(async (doc: string, opts: ConventionProposeOpts) =>
       withClient(async (client) => {
+        if (opts.file) {
+          const ignored: string[] = [];
+          if (opts.title !== undefined) ignored.push('--title');
+          if (opts.apiVersion !== undefined) ignored.push('--api-version');
+          if (opts.description !== undefined) ignored.push('--description');
+          if (opts.server.length > 0) ignored.push('--server');
+          if (opts.serverUrl !== undefined) ignored.push('--server-url');
+          if (opts.serverDescription !== undefined) ignored.push('--server-description');
+          if (opts.securityScheme.length > 0) ignored.push('--security-scheme');
+          if (opts.globalSecurity.length > 0) ignored.push('--global-security');
+          if (opts.naming !== undefined) ignored.push('--naming');
+          warnFileClobbers(opts.file, ignored);
+        }
         const spec = opts.file
           ? (loadSpecFile(opts.file) as ConventionSpec)
           : buildConventionSpec(opts);
@@ -997,6 +1071,7 @@ export function buildProgram(): Command {
           () =>
             opts.proposed ? client.getConventionProposed(doc) : client.getConventionCurrent(doc),
           opts.proposed ? () => client.getConventionCurrent(doc) : null,
+          !opts.proposed ? () => client.getConventionProposed(doc) : undefined,
         );
         if (opts.json) emitJson(v);
         else if (opts.full) emit(`${describeConvention(v)}\n${yamlStringify(v.spec).trimEnd()}`);
@@ -1081,12 +1156,16 @@ export function buildProgram(): Command {
     .action(async (doc: string, opts: { verbose?: boolean; json?: boolean }) =>
       withClient(async (client, cfg) => {
         const me = cfg.identity;
-        const [endpoints, schemas, conventionCurrent, conventionProposed] = await Promise.all([
+        const [endpoints, schemas, conventionCurrent, conventionLatest] = await Promise.all([
           client.listEndpoints(doc),
           client.listSchemas(doc),
           client.getConventionCurrent(doc).catch(() => null),
-          client.getConventionProposed(doc).catch(() => null),
+          client.getConventionLatest(doc).catch(() => null),
         ]);
+        // `proposed` is "latest is still in flight"; `latest` may also surface a rejected/withdrawn
+        // version that current/proposed both hide.
+        const conventionProposed =
+          conventionLatest && conventionLatest.status === 'proposed' ? conventionLatest : null;
 
         type StatusRow = {
           kind: 'endpoint' | 'schema' | 'convention';
@@ -1097,9 +1176,20 @@ export function buildProgram(): Command {
           delta: string | null;
         };
 
+        type AttentionRow = {
+          kind: 'convention';
+          label: string;
+          // withdrawn is a rejected row with reason='withdrawn by proposer' (no separate status).
+          state: 'rejected' | 'withdrawn';
+          version: number;
+          by: string;
+          reason: string | null;
+        };
+
         const awaitingPeer: StatusRow[] = [];
         const awaitingMe: StatusRow[] = [];
         const accepted: StatusRow[] = [];
+        const needsAttention: AttentionRow[] = [];
 
         const classify = (
           kind: StatusRow['kind'],
@@ -1155,9 +1245,28 @@ export function buildProgram(): Command {
             conventionProposed?.status === 'proposed' ? conventionProposed.proposedBy : null;
           classify('convention', 'convention', cur, prop, propBy, null);
         }
+        // Surface a rejected/withdrawn convention as needs-attention. current/proposed both come
+        // back null in that state, so the row was previously invisible — and a stalled convention
+        // blocks every dependent (skill teaches "don't propose dependents until the convention is
+        // accepted").
+        if (
+          conventionLatest &&
+          conventionLatest.status === 'rejected' &&
+          (conventionCurrent === null || conventionLatest.version > conventionCurrent.version)
+        ) {
+          const isWithdraw = conventionLatest.rejectionReason === 'withdrawn by proposer';
+          needsAttention.push({
+            kind: 'convention',
+            label: 'convention',
+            state: isWithdraw ? 'withdrawn' : 'rejected',
+            version: conventionLatest.version,
+            by: isWithdraw ? conventionLatest.proposedBy : conventionLatest.rejectedBy,
+            reason: isWithdraw ? null : conventionLatest.rejectionReason,
+          });
+        }
 
         if (opts.json) {
-          emitJson({ identity: me, awaitingPeer, awaitingMe, accepted });
+          emitJson({ identity: me, awaitingPeer, awaitingMe, accepted, needsAttention });
           return;
         }
 
@@ -1173,10 +1282,23 @@ export function buildProgram(): Command {
             lines.push(`  ${r.kind.padEnd(10)} ${r.label.padEnd(36)} v${v}${by}${delta}`);
           }
         };
+        if (needsAttention.length > 0) {
+          lines.push('', 'needs attention (blocks dependents):');
+          for (const a of needsAttention) {
+            const verb = a.state === 'withdrawn' ? 'withdrawn' : 'rejected';
+            const tail = a.reason ? `: ${a.reason}` : '';
+            lines.push(
+              `  ${a.kind.padEnd(10)} ${a.label.padEnd(36)} v${a.version} — ${verb} by ${a.by}${tail}`,
+            );
+          }
+        }
         bucket('awaiting peer review (you proposed):', awaitingPeer);
         bucket('awaiting your review (peer proposed):', awaitingMe);
         bucket(`accepted (${accepted.length}):`, accepted);
-        if (awaitingPeer.length + awaitingMe.length + accepted.length === 0) {
+        if (
+          awaitingPeer.length + awaitingMe.length + accepted.length + needsAttention.length ===
+          0
+        ) {
           lines.push('', '(nothing yet)');
         }
         emit(lines.join('\n'));
@@ -1193,10 +1315,24 @@ export function buildProgram(): Command {
     .option('--out <path>', 'write to file instead of stdout')
     .action(async (doc: string, opts: { format: string; full?: boolean; out?: string }) =>
       withClient(async (client) => {
+        // assembleDocument falls back to a stub Info block ('Untitled', 0.0.0) when no convention
+        // has been accepted. Warn loudly so this isn't mistaken for a complete API surface.
+        const conventionLatest = await client.getConventionLatest(doc).catch(() => null);
+        const stubInfo = conventionLatest === null || conventionLatest.status !== 'accepted';
+        let banner: string | null = null;
+        if (stubInfo) {
+          const why =
+            conventionLatest === null
+              ? 'no convention has been proposed'
+              : `convention v${conventionLatest.version} is ${conventionLatest.status}, not accepted`;
+          banner = `! convention not accepted (${why}); rendered with stub Info and without any unaccepted convention fields`;
+          process.stderr.write(`warning: ${banner}\n`);
+        }
         let output: string;
         switch (opts.format) {
           case 'openapi':
             output = await client.getOpenApiYaml(doc);
+            if (banner) output = `# ${banner}\n${output}`;
             break;
           case 'json':
             output = `${JSON.stringify(await client.getOpenApiJson(doc), null, 2)}\n`;
@@ -1217,11 +1353,14 @@ export function buildProgram(): Command {
             };
             if (opts.format === 'text') {
               output = renderText({ document, rationale }, opts.full ? { full: true } : {});
+              if (banner) output = `${banner}\n\n${output}`;
             } else if (opts.format === 'markdown') {
               const ev = await client.listEvents(doc, { limit: 1000 });
               output = renderMarkdown({ document, rationale, events: ev.events });
+              if (banner) output = `> ${banner}\n\n${output}`;
             } else {
               output = renderHtml({ document, rationale }, { documentName: doc });
+              if (banner) output = output.replace(/<body>/, `<body>\n<!-- ${banner} -->`);
             }
             break;
           }
@@ -1672,6 +1811,8 @@ type ConventionProposeOpts = ConcurrencyOpts & {
   apiVersion?: string;
   description?: string;
   server: string[];
+  serverUrl?: string;
+  serverDescription?: string;
   securityScheme: string[];
   globalSecurity: string[];
   naming?: string;
@@ -1679,10 +1820,37 @@ type ConventionProposeOpts = ConcurrencyOpts & {
   json?: boolean;
 };
 
+function warnFileClobbers(filePath: string, ignored: string[]): void {
+  if (ignored.length === 0) return;
+  process.stderr.write(
+    `warning: --file ${filePath} replaces other flags; ignoring ${ignored.join(', ')}\n`,
+  );
+}
+
 function loadSpecFile(path: string): unknown {
   const raw = readFileSync(path, 'utf8');
   if (path.endsWith('.json')) return JSON.parse(raw);
   return yamlParse(raw);
+}
+
+/** Convention's top-level `security` lives in a passthrough field — extract it without an `as`. */
+function readConventionSecurity(c: ConventionArtifact): Array<Record<string, string[]>> {
+  const spec = c.spec;
+  if (typeof spec !== 'object' || spec === null) return [];
+  if (!('security' in spec)) return [];
+  const sec = spec.security;
+  if (!Array.isArray(sec)) return [];
+  const out: Array<Record<string, string[]>> = [];
+  for (const entry of sec) {
+    if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const normalized: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(entry)) {
+        normalized[k] = Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+      }
+      out.push(normalized);
+    }
+  }
+  return out;
 }
 
 function buildOperationSpec(
@@ -1744,10 +1912,13 @@ function buildOperationSpec(
 
   if (opts.security.length > 0) {
     spec.security = opts.security.map((s) => ({ [s]: [] }));
-  } else if (opts.inheritSecurity !== false && ctx.convention) {
-    // Inherit the convention's top-level `security` if it has one. Skipped on --no-inherit-security.
-    const convSec = (ctx.convention.spec as Record<string, unknown>).security;
-    if (Array.isArray(convSec) && convSec.length > 0) spec.security = convSec;
+  } else if (opts.inheritSecurity === false) {
+    // Explicit opt-out. OpenAPI's spelling for "this op has no security" is `security: []` —
+    // an absent field inherits from doc-level, so we must emit the empty array.
+    spec.security = [];
+  } else if (ctx.convention) {
+    const convSec = readConventionSecurity(ctx.convention);
+    if (convSec.length > 0) spec.security = convSec;
   }
 
   // brackish extensions — all consolidated under `x-brackish` per the skill.
@@ -1828,6 +1999,39 @@ function fieldTypeToSchema(typeStr: string, description?: string): JSONSchema {
   return { ...base, type: typeStr };
 }
 
+/**
+ * Parse the colon-delimited `--server "url:description"` form.
+ *
+ * `ambiguous: true` means the URL contains a port colon AND a description colon — the heuristic
+ * picks the first colon after the scheme, but that's likely splitting `:port` from `description`
+ * incorrectly. Caller should warn and steer toward --server-url / --server-description.
+ */
+function parseServerColonForm(s: string): {
+  url: string;
+  description?: string;
+  ambiguous: boolean;
+} {
+  const proto = s.indexOf('://');
+  if (proto < 0) {
+    // No scheme. Split at the first colon if present, treat tail as description.
+    const colon = s.indexOf(':');
+    if (colon < 0) return { url: s, ambiguous: false };
+    return { url: s.slice(0, colon), description: s.slice(colon + 1), ambiguous: false };
+  }
+  // First colon after the scheme.
+  const afterScheme = s.indexOf(':', proto + 3);
+  if (afterScheme < 0) return { url: s, ambiguous: false };
+  // Look for any *additional* colon further along; that's the ambiguity signal — the first colon
+  // might be `:port` and the second the description boundary, or the first might be the boundary
+  // and the second part of a description containing `:`. We can't tell.
+  const nextColon = s.indexOf(':', afterScheme + 1);
+  return {
+    url: s.slice(0, afterScheme),
+    description: s.slice(afterScheme + 1),
+    ambiguous: nextColon >= 0,
+  };
+}
+
 function buildConventionSpec(opts: ConventionProposeOpts): ConventionSpec {
   const info: Record<string, unknown> = {
     title: opts.title ?? 'Untitled',
@@ -1835,21 +2039,32 @@ function buildConventionSpec(opts: ConventionProposeOpts): ConventionSpec {
   };
   if (opts.description !== undefined) info.description = opts.description;
   const spec: Record<string, unknown> = { info };
-  if (opts.server.length > 0) {
-    spec.servers = opts.server.map((s) => {
-      const colon = s.indexOf(':');
-      // URLs have colons; only treat the LAST colon-separated chunk as description if it doesn't
-      // look like a URL scheme. Simpler heuristic: split into url + ":" + description after the
-      // ://. If no '://' found, treat whole thing as the URL.
-      const proto = s.indexOf('://');
-      if (proto < 0 && colon >= 0)
-        return { url: s.slice(0, colon), description: s.slice(colon + 1) };
-      // Find the colon AFTER the scheme.
-      const afterScheme = s.indexOf(':', proto + 3);
-      if (afterScheme < 0) return { url: s };
-      return { url: s.slice(0, afterScheme), description: s.slice(afterScheme + 1) };
-    });
+  const servers: Array<{ url: string; description?: string }> = [];
+  for (const s of opts.server) {
+    const parsed = parseServerColonForm(s);
+    if (parsed.ambiguous) {
+      process.stderr.write(
+        `warning: --server "${s}" is ambiguous (URL contains a port colon and a description colon).\n` +
+          `         Parsed as url="${parsed.url}", description="${parsed.description ?? ''}". ` +
+          `Prefer --server-url "${parsed.url}" --server-description "${parsed.description ?? ''}".\n`,
+      );
+    }
+    servers.push(
+      parsed.description !== undefined
+        ? { url: parsed.url, description: parsed.description }
+        : { url: parsed.url },
+    );
   }
+  if (opts.serverUrl !== undefined) {
+    servers.push(
+      opts.serverDescription !== undefined
+        ? { url: opts.serverUrl, description: opts.serverDescription }
+        : { url: opts.serverUrl },
+    );
+  } else if (opts.serverDescription !== undefined) {
+    throw new Error('--server-description requires --server-url (it describes that URL)');
+  }
+  if (servers.length > 0) spec.servers = servers;
   if (opts.securityScheme.length > 0) {
     const schemes: Record<string, Record<string, unknown>> = {};
     for (const entry of opts.securityScheme) {
@@ -1889,17 +2104,43 @@ function buildConventionSpec(opts: ConventionProposeOpts): ConventionSpec {
  * Try `primary`; if it fails with `artifact_not_found` AND a `fallback` is provided, retry the
  * fallback and emit a stderr hint. Lets `show --proposed` degrade to "showing latest accepted"
  * instead of looking like the artifact was deleted.
+ *
+ * `inverseProbe`, when provided, runs only when primary fails with no fallback: it probes for the
+ * inverse (typically `--proposed`) and, if that succeeds, decorates the error so the caller learns
+ * to add `--proposed`. The probe never returns its result to the caller; success just means "the
+ * thing the user could ask for instead exists."
  */
 async function fetchOrFallback<T>(
   primary: () => Promise<T>,
   fallback: (() => Promise<T>) | null,
+  inverseProbe?: () => Promise<unknown>,
 ): Promise<T> {
   try {
     return await primary();
   } catch (e) {
-    if (fallback && e instanceof ClientError && e.code === 'artifact_not_found') {
+    if (!(e instanceof ClientError) || e.code !== 'artifact_not_found') throw e;
+    if (fallback) {
       process.stderr.write('note: no proposed version; showing latest accepted\n');
       return fallback();
+    }
+    if (inverseProbe) {
+      let probe: unknown;
+      try {
+        probe = await inverseProbe();
+      } catch (probeError) {
+        if (probeError instanceof ClientError && probeError.code === 'artifact_not_found') throw e;
+        throw probeError;
+      }
+      let hint = 'a proposed version exists; try --proposed';
+      if (
+        probe &&
+        typeof probe === 'object' &&
+        'version' in probe &&
+        typeof probe.version === 'number'
+      ) {
+        hint = `v${probe.version} is proposed; try --proposed`;
+      }
+      throw new ClientError(e.status, e.code, `${e.message} (${hint})`);
     }
     throw e;
   }

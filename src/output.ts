@@ -22,7 +22,9 @@ const shortDate = (iso: string): string => iso.replace(/\.\d+Z$/, 'Z');
 const eventPreview = (e: Event): string => {
   switch (e.kind) {
     case 'message':
-      return trim(e.text, 80);
+      // Don't truncate chat bodies — they're the substantive payload, not row metadata.
+      // Multi-line spills are fine; the next event starts with an id column that re-anchors.
+      return e.text;
     case 'artifact_proposed': {
       const delta = e.delta ? ` ${trim(e.delta, 60)}` : '';
       return `${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;

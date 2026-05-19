@@ -174,6 +174,9 @@ export interface Store {
   ): Promise<ConventionArtifact>;
   getConventionCurrent(documentName: DocumentName): Promise<ConventionArtifact | null>;
   getConventionProposed(documentName: DocumentName): Promise<ConventionArtifact | null>;
+  /** Latest convention row regardless of status — surfaces rejected/withdrawn conventions
+   *  that the proposed/current pair would otherwise hide. */
+  getConventionLatest(documentName: DocumentName): Promise<ConventionArtifact | null>;
   getConventionByVersion(
     documentName: DocumentName,
     version: number,
