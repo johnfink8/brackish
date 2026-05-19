@@ -16,6 +16,10 @@ brackish.db-journal
 # adversarial-trial output
 trials/
 
+# negotiation-session artifacts (real-world outputs the user can keep locally)
+/openapi.yaml
+/critique-*.txt
+
 # IDE
 .vscode/
 .idea/

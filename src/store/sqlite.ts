@@ -44,7 +44,7 @@ import {
   type SchemaSummary,
 } from '../models.js';
 import type { EventNotifier } from '../notifier.js';
-import type { RationaleEntry, Store } from './index.js';
+import type { ProposeOptions, RationaleEntry, Store } from './index.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS documents (
@@ -288,6 +288,7 @@ export class SqliteStore implements Store {
     identityKey: string,
     spec: unknown,
     by: Identity,
+    opts: ProposeOptions = {},
   ): ArtifactRow {
     const document = this.db
       .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
@@ -298,7 +299,35 @@ export class SqliteStore implements Store {
     let row: ArtifactRow | undefined;
     const tx = this.db.transaction(() => {
       const prev = this.latestVersionRow(documentName, kind, identityKey);
-      const version = (prev?.version ?? 0) + 1;
+      const prevVersion = prev?.version ?? 0;
+
+      // Concurrency check. Three modes:
+      //   expectedVersion === 'new'  → must be no prior version at all.
+      //   expectedVersion === number → latest must be exactly that version (any status).
+      //   neither → default behavior, refuse if latest is in-flight (still `proposed`)
+      //             unless `force`.
+      if (opts.expectedVersion === 'new') {
+        if (prev !== undefined) {
+          throw new StoreError(
+            'version_mismatch',
+            `--expected-new failed: ${kind} "${identityKey}" already at v${prevVersion} (${prev.status} by ${prev.proposed_by}). Review it (\`brackish ${kind === 'operation' ? 'endpoint' : kind} show\`) before proposing.`,
+          );
+        }
+      } else if (typeof opts.expectedVersion === 'number') {
+        if (prevVersion !== opts.expectedVersion) {
+          throw new StoreError(
+            'version_mismatch',
+            `--expected-version ${opts.expectedVersion} failed: ${kind} "${identityKey}" latest is v${prevVersion}${prev ? ` (${prev.status} by ${prev.proposed_by})` : ' (none)'}. Re-read state and retry.`,
+          );
+        }
+      } else if (prev?.status === 'proposed' && !opts.force) {
+        throw new StoreError(
+          'version_in_flight',
+          `${kind} "${identityKey}" v${prevVersion} is still proposed by ${prev.proposed_by} and unresolved. Accept/reject it first, or pass --force to stack a counter-proposal.`,
+        );
+      }
+
+      const version = prevVersion + 1;
       const delta =
         prev !== undefined
           ? compactSummary(generatePatch(JSON.parse(prev.spec) as unknown, spec)) || '(no change)'
@@ -585,6 +614,7 @@ export class SqliteStore implements Store {
     path: string,
     spec: OperationSpec,
     by: Identity,
+    opts: ProposeOptions = {},
   ): Promise<OperationArtifact> {
     const row = this.proposeRaw(
       documentName,
@@ -592,6 +622,7 @@ export class SqliteStore implements Store {
       operationIdentityKey(method, path),
       spec,
       by,
+      opts,
     );
     return this.rowToOperationArtifact(row);
   }
@@ -704,8 +735,9 @@ export class SqliteStore implements Store {
     name: SchemaName,
     spec: JSONSchema,
     by: Identity,
+    opts: ProposeOptions = {},
   ): Promise<SchemaArtifact> {
-    return this.rowToSchemaArtifact(this.proposeRaw(documentName, 'schema', name, spec, by));
+    return this.rowToSchemaArtifact(this.proposeRaw(documentName, 'schema', name, spec, by, opts));
   }
 
   async acceptSchema(
@@ -779,9 +811,10 @@ export class SqliteStore implements Store {
     documentName: DocumentName,
     spec: ConventionSpec,
     by: Identity,
+    opts: ProposeOptions = {},
   ): Promise<ConventionArtifact> {
     return this.rowToConventionArtifact(
-      this.proposeRaw(documentName, 'convention', CONVENTION_KEY, spec, by),
+      this.proposeRaw(documentName, 'convention', CONVENTION_KEY, spec, by, opts),
     );
   }
 

@@ -6,14 +6,33 @@
 //   - stderr is for metadata + diagnostics; stdout is for the "thing"
 //   - exit 0 = success (including timed-out wait); 1 = operation error; 2 = usage/auth/connection
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { createSocket as createDgramSocket } from 'node:dgram';
+import {
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createConnection } from 'node:net';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
-import { BrackishClient, ClientError, clientOptionsFromConfig, redeemInvite } from './client.js';
 import {
+  BrackishClient,
+  ClientError,
+  clientOptionsFromConfig,
+  type ProposeOptionsWire,
+  redeemInvite,
+} from './client.js';
+import {
+  brackishHome,
   defaultClientConfigPath,
   defaultDataPath,
   defaultServerConfigPath,
@@ -21,18 +40,26 @@ import {
   ensureBrackishHome,
   loadClientConfig,
   loadServerConfig,
+  parseBindAddress,
   saveClientConfig,
   saveServerConfig,
 } from './config.js';
 import { seedChatterDemo } from './demo.js';
 import {
+  BRACKISH_PERMISSION_PATTERN,
+  claudeHome,
   defaultSkillDest,
   hookSnippet,
   inspectInstall,
   installHook,
+  installPermission,
   installSkill,
+  projectClaudeHome,
+  type Scope,
   uninstallHook,
+  uninstallPermission,
   uninstallSkill,
+  userClaudeHome,
 } from './install.js';
 import {
   type ConventionSpec,
@@ -59,7 +86,7 @@ import { renderHtml, renderJson, renderMarkdown, renderOpenAPIYaml, renderText }
 import { startServer } from './server.js';
 import type { RationaleEntry } from './store/index.js';
 
-const CLI_VERSION = '0.2.0';
+const CLI_VERSION = '0.2.1';
 
 export function buildProgram(): Command {
   const program = new Command();
@@ -131,37 +158,232 @@ export function buildProgram(): Command {
   program
     .command('serve')
     .description('start the brackish daemon (Unix socket always; --bind also opens TCP)')
-    .option('--bind <addr>', 'host:port for TCP bind (e.g. 127.0.0.1:11442, 0.0.0.0:8080)')
+    .option(
+      '--bind [addr]',
+      'enable TCP. Bare `--bind` → 0.0.0.0:11442; `--bind 0.0.0.0` → default port; `--bind 0.0.0.0:8080` → exact',
+    )
     .option('--socket <path>', 'override socket path')
     .option('--data <path>', 'override sqlite db path')
     .option('--config <path>', 'load server config from FILE instead of default')
-    .action(async (opts: { bind?: string; socket?: string; data?: string; config?: string }) => {
+    .option(
+      '--invite <identity>',
+      'after starting, mint a one-time connect token for <identity> and print the connect command (requires --bind)',
+    )
+    .option(
+      '--invite-ttl <seconds>',
+      'lifetime of the --invite token in seconds (default 3600)',
+      '3600',
+    )
+    .action(
+      async (opts: {
+        bind?: string | boolean;
+        socket?: string;
+        data?: string;
+        config?: string;
+        invite?: string;
+        inviteTtl: string;
+      }) => {
+        ensureBrackishHome();
+        const fileCfg = loadServerConfig({ explicitPath: opts.config });
+
+        let inviteTtl: number | null = null;
+        if (opts.invite !== undefined) {
+          IdentitySchema.parse(opts.invite);
+          inviteTtl = Number.parseInt(opts.inviteTtl, 10);
+          if (!Number.isFinite(inviteTtl) || inviteTtl < 1) {
+            errExit(2, 'serve --invite-ttl must be a positive integer (seconds)');
+          }
+        }
+
+        // --invite is meaningless without TCP, so it implies --bind with defaults.
+        const rawBind: string | undefined =
+          opts.bind === true
+            ? ''
+            : typeof opts.bind === 'string'
+              ? opts.bind
+              : opts.invite !== undefined
+                ? ''
+                : fileCfg.bind;
+        const bind =
+          rawBind === undefined
+            ? undefined
+            : (() => {
+                const { host, port } = parseBindAddress(rawBind);
+                return `${host}:${port}`;
+              })();
+        const cfg = {
+          socketPath: opts.socket ?? fileCfg.socketPath ?? defaultSocketPath(),
+          dataPath: opts.data ?? fileCfg.dataPath ?? defaultDataPath(),
+          ...(bind !== undefined ? { bind } : {}),
+        };
+        // Persist the server config so subsequent `brackish serve` calls remember the choice.
+        saveServerConfig(cfg, defaultServerConfigPath());
+        const server = await startServer({ config: cfg });
+        process.stderr.write(`brackish serve: socket=${server.socketPath}\n`);
+        if (server.tcpAddress) {
+          process.stderr.write(
+            `               tcp=http://${server.tcpAddress.host}:${server.tcpAddress.port}\n`,
+          );
+        }
+
+        // Self-mint via the socket. Peer-trust accepts any issuer identity; use the
+        // configured one if there is one.
+        if (opts.invite !== undefined && inviteTtl !== null && server.tcpAddress) {
+          let issuerIdentity = 'host';
+          try {
+            issuerIdentity = loadClientConfig().identity;
+          } catch {
+            /* no config yet */
+          }
+          const admin = new BrackishClient({
+            socketPath: server.socketPath,
+            identity: issuerIdentity,
+          });
+          try {
+            const inv = await admin.createInvite(opts.invite, inviteTtl);
+            const inferred = await inferReachableHost(server.tcpAddress.host);
+            const url = `http://${inferred.host}:${server.tcpAddress.port}`;
+            const lines = [
+              '',
+              `invite minted for "${opts.invite}", expires ${inv.expiresAt}`,
+              'share with peer:',
+              `  brackish connect ${url} --token ${inv.inviteToken} --identity ${opts.invite}`,
+            ];
+            if (inferred.hint) lines.push(`   ${inferred.hint}`);
+            lines.push('');
+            process.stderr.write(`${lines.join('\n')}\n`);
+          } finally {
+            await admin.close();
+          }
+        }
+
+        // PID file lets `brackish down` find this daemon. Cleaned up on graceful shutdown.
+        const pidPath = servePidPath();
+        writeFileSync(pidPath, String(process.pid));
+        const removePid = (): void => {
+          try {
+            unlinkSync(pidPath);
+          } catch {
+            /* already gone */
+          }
+        };
+        process.on('exit', removePid);
+
+        process.stderr.write('  (Ctrl-C to stop)\n');
+
+        const shutdown = async (sig: string): Promise<void> => {
+          process.stderr.write(`\nbrackish serve: shutting down (${sig})\n`);
+          await server.close();
+          removePid();
+          process.exit(0);
+        };
+        process.on('SIGINT', () => void shutdown('SIGINT'));
+        process.on('SIGTERM', () => void shutdown('SIGTERM'));
+      },
+    );
+
+  program
+    .command('up')
+    .description(
+      'start the brackish daemon in the background if not already running (idempotent); auto-writes a client config on first run',
+    )
+    .option(
+      '--bind [addr]',
+      'enable TCP on the spawned daemon; bare `--bind` defaults to 0.0.0.0:11442',
+    )
+    .option(
+      '--identity <name>',
+      'client identity to write into config.toml if no client config exists (default: hostname)',
+    )
+    .action(async (opts: { bind?: string | boolean; identity?: string }) => {
       ensureBrackishHome();
-      const fileCfg = loadServerConfig({ explicitPath: opts.config });
-      const cfg = {
-        socketPath: opts.socket ?? fileCfg.socketPath ?? defaultSocketPath(),
-        dataPath: opts.data ?? fileCfg.dataPath ?? defaultDataPath(),
-        ...((opts.bind ?? fileCfg.bind) ? { bind: opts.bind ?? fileCfg.bind } : {}),
-      };
-      // Persist the server config so subsequent `brackish serve` calls remember the choice.
-      saveServerConfig(cfg, defaultServerConfigPath());
-      const server = await startServer({ config: cfg });
-      process.stderr.write(`brackish serve: socket=${server.socketPath}\n`);
-      if (server.tcpAddress) {
+      await ensureClientConfig(opts.identity);
+
+      // TCP-mode client: there's a remote daemon; spawning a local one would just sit idle.
+      const cfg = loadClientConfig();
+      if (cfg.server !== undefined && cfg.token !== undefined) {
         process.stderr.write(
-          `               tcp=http://${server.tcpAddress.host}:${server.tcpAddress.port}\n`,
+          `brackish: client is configured for remote daemon at ${cfg.server} (no local daemon needed)\n`,
+        );
+        return;
+      }
+
+      if (await isDaemonRunning(defaultSocketPath())) {
+        process.stderr.write(`brackish: daemon already running (socket=${defaultSocketPath()})\n`);
+        return;
+      }
+
+      const serveArgs = ['serve'];
+      if (opts.bind === true) serveArgs.push('--bind');
+      else if (typeof opts.bind === 'string') serveArgs.push('--bind', opts.bind);
+
+      const logPath = join(brackishHome(), 'serve.log');
+      const logFd = openSync(logPath, 'a');
+      const selfBin = fileURLToPath(import.meta.url);
+      const child = spawn(process.execPath, [selfBin, ...serveArgs], {
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: process.env,
+      });
+      child.unref();
+
+      const ready = await waitForDaemon(defaultSocketPath(), 5000);
+      if (!ready) {
+        errExit(
+          2,
+          `daemon spawned (pid ${child.pid}) but socket didn't come up within 5s — check ${logPath}`,
         );
       }
-      process.stderr.write('  (Ctrl-C to stop)\n');
+      process.stderr.write(
+        `brackish: daemon started (pid ${child.pid}); socket=${defaultSocketPath()}; log=${logPath}\n`,
+      );
+    });
 
-      const shutdown = async (sig: string): Promise<void> => {
-        process.stderr.write(`\nbrackish serve: shutting down (${sig})\n`);
-        await server.close();
-        process.exit(0);
-      };
-      process.on('SIGINT', () => void shutdown('SIGINT'));
-      process.on('SIGTERM', () => void shutdown('SIGTERM'));
-      // Hold the event loop open indefinitely; the server's listening sockets do that for us.
+  program
+    .command('down')
+    .description('stop the running brackish daemon (SIGTERM via PID file)')
+    .action(async () => {
+      const pidPath = servePidPath();
+      if (!existsSync(pidPath)) {
+        if (!existsSync(defaultSocketPath())) {
+          process.stderr.write('brackish: no daemon running\n');
+          return;
+        }
+        errExit(
+          2,
+          `socket ${defaultSocketPath()} exists but no PID file at ${pidPath}; kill the daemon manually`,
+        );
+      }
+      const pid = Number.parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+      if (!Number.isFinite(pid)) errExit(2, `corrupt PID file at ${pidPath}`);
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ESRCH') {
+          try {
+            unlinkSync(pidPath);
+          } catch {
+            /* */
+          }
+          try {
+            unlinkSync(defaultSocketPath());
+          } catch {
+            /* */
+          }
+          process.stderr.write(`brackish: stale PID ${pid} cleaned up\n`);
+          return;
+        }
+        throw e;
+      }
+      const stopped = await waitForSocketGone(defaultSocketPath(), 3000);
+      if (!stopped) {
+        process.stderr.write(
+          `brackish: SIGTERM sent to pid ${pid} but socket persists; check ${join(brackishHome(), 'serve.log')}\n`,
+        );
+        process.exit(1);
+      }
+      process.stderr.write(`brackish: stopped (pid ${pid})\n`);
     });
 
   // --- connection bootstrap ---
@@ -186,11 +408,13 @@ export function buildProgram(): Command {
             identity: inv.identity,
             expiresAt: inv.expiresAt,
             connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
+            ...(cfg.hint ? { hint: cfg.hint } : {}),
           });
         } else {
+          const hintLine = cfg.hint ? `\n  ${cfg.hint}` : '';
           emit(
             `invite issued: identity=${identity}, expires=${inv.expiresAt}\n` +
-              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
+              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
           );
         }
       }),
@@ -249,6 +473,7 @@ export function buildProgram(): Command {
 
   program
     .command('documents')
+    .aliases(['docs'])
     .description('list documents')
     .option('--json', 'output JSON')
     .action(async (opts: { json?: boolean }) =>
@@ -396,6 +621,9 @@ export function buildProgram(): Command {
       '--file <path>',
       'load full Operation Object from YAML/JSON file (replaces other flags)',
     )
+    .option('--expected-new', 'require no prior version (refuse if anything exists)')
+    .option('--expected-version <n>', 'require latest version to be exactly N (any status)')
+    .option('--force', 'allow proposing on top of an unresolved (proposed) version')
     .option('--json', 'output JSON')
     .action(async (doc: string, methodRaw: string, path: string, opts: EndpointProposeOpts) =>
       withClient(async (client) => {
@@ -403,7 +631,7 @@ export function buildProgram(): Command {
         const spec = opts.file
           ? (loadSpecFile(opts.file) as OperationSpec)
           : buildOperationSpec(opts);
-        const v = await client.proposeEndpoint(doc, method, path, spec);
+        const v = await client.proposeEndpoint(doc, method, path, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
         else emit(`proposed ${describeOperation(v)}`);
       }),
@@ -525,16 +753,24 @@ export function buildProgram(): Command {
     .option('--field <spec>', "field: 'name:type[?][:description]' (repeatable)", collect, [])
     .option('--description <text>')
     .option('--file <path>', 'load full JSON Schema from YAML/JSON file (replaces --field)')
+    .option('--expected-new', 'require no prior version (refuse if anything exists)')
+    .option('--expected-version <n>', 'require latest version to be exactly N (any status)')
+    .option('--force', 'allow proposing on top of an unresolved (proposed) version')
     .option('--json')
     .action(
       async (
         doc: string,
         name: string,
-        opts: { field: string[]; description?: string; file?: string; json?: boolean },
+        opts: ConcurrencyOpts & {
+          field: string[];
+          description?: string;
+          file?: string;
+          json?: boolean;
+        },
       ) =>
         withClient(async (client) => {
           const spec = opts.file ? (loadSpecFile(opts.file) as JSONSchema) : buildSchemaSpec(opts);
-          const v = await client.proposeSchema(doc, name, spec);
+          const v = await client.proposeSchema(doc, name, spec, parseConcurrencyOpts(opts));
           if (opts.json) emitJson(v);
           else emit(`proposed ${describeSchema(v)}`);
         }),
@@ -642,13 +878,16 @@ export function buildProgram(): Command {
       [],
     )
     .option('--file <path>', 'load full Convention block from YAML/JSON file')
+    .option('--expected-new', 'require no prior version (refuse if anything exists)')
+    .option('--expected-version <n>', 'require latest version to be exactly N (any status)')
+    .option('--force', 'allow proposing on top of an unresolved (proposed) version')
     .option('--json')
     .action(async (doc: string, opts: ConventionProposeOpts) =>
       withClient(async (client) => {
         const spec = opts.file
           ? (loadSpecFile(opts.file) as ConventionSpec)
           : buildConventionSpec(opts);
-        const v = await client.proposeConvention(doc, spec);
+        const v = await client.proposeConvention(doc, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
         else emit(`proposed ${describeConvention(v)}`);
       }),
@@ -887,25 +1126,44 @@ export function buildProgram(): Command {
     )
     .option('--skill-only', 'install just the skill, not the hook')
     .option('--hook-only', 'install just the hook, not the skill')
-    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
-    .option('--yes', 'non-interactive: assume yes to all confirmations')
+    .option(
+      '--scope <user|project>',
+      'user → ~/.claude (global); project → ./.claude (commit-able). Interactive if omitted.',
+    )
+    .option('--global', 'shortcut for --scope user')
+    .option('--local', 'shortcut for --scope project')
+    .option(
+      '--dest <path>',
+      'override skill dest (defaults to <home>/skills/brackish for the chosen scope)',
+    )
+    .option(
+      '--permission',
+      `add an allow-rule for ${BRACKISH_PERMISSION_PATTERN} to settings.json (so Claude won't prompt before running brackish commands); default off`,
+    )
+    .option('--yes', 'non-interactive: assume yes to all confirmations (defaults scope to user)')
     .option('--force', 'overwrite existing skill dir')
     .action(
       async (opts: {
         skillOnly?: boolean;
         hookOnly?: boolean;
+        scope?: string;
+        global?: boolean;
+        local?: boolean;
         dest?: string;
+        permission?: boolean;
         yes?: boolean;
         force?: boolean;
       }) => {
         if (opts.skillOnly && opts.hookOnly) {
           errExit(2, 'install: pass at most one of --skill-only or --hook-only');
         }
-        const dest = opts.dest ?? defaultSkillDest();
-        const plan = inspectInstall({ dest });
+        const scope = await resolveScope(opts);
+        const home = claudeHome(scope);
+        const dest = opts.dest ?? defaultSkillDest(home);
+        const plan = inspectInstall({ home, dest });
 
         // Print plan to stderr.
-        process.stderr.write('brackish install — plan:\n');
+        process.stderr.write(`brackish install — plan (scope=${scope}, home=${home}):\n`);
         if (!opts.hookOnly) {
           const skillNote = plan.skill.exists
             ? opts.force
@@ -921,20 +1179,34 @@ export function buildProgram(): Command {
               `install: settings.json at ${plan.hook.settingsPath} is malformed:\n  ${plan.hook.settingsParseError}\nFix it (or move it aside) and re-run.`,
             );
           }
-          const hookNote = plan.hook.alreadyInstalled
-            ? 'already installed (no edit needed)'
-            : plan.hook.settingsExists
-              ? `merge into existing settings.json (other hooks preserved: ${plan.hook.otherHookCount})`
-              : `create settings.json`;
+          const hookNote = plan.hook.needsMigration
+            ? `migrate legacy hook entry into the matcher+hooks wrapper Claude Code requires (other hooks preserved: ${plan.hook.otherHookCount})`
+            : plan.hook.alreadyInstalled
+              ? 'already installed (no edit needed)'
+              : plan.hook.settingsExists
+                ? `merge into existing settings.json (other hooks preserved: ${plan.hook.otherHookCount})`
+                : `create settings.json`;
           process.stderr.write(`  hook: ${plan.hook.settingsPath}\n    ${hookNote}\n`);
         }
+        const permissionNote = plan.permission.alreadyInstalled
+          ? 'already present (no edit needed)'
+          : `add allow-rule ${plan.permission.pattern} (other allow entries preserved: ${plan.permission.otherAllowCount})`;
+        process.stderr.write(`  perm: ${plan.permission.settingsPath}\n    ${permissionNote}\n`);
 
-        // Per-artifact confirmation.
+        // Per-artifact confirmation. Skip the hook step only when there's truly nothing to do
+        // (correctly installed AND no legacy entry to clean up).
         const doSkill = !opts.hookOnly && (opts.yes || (await confirm('Install skill?', true)));
+        const hookSettled = plan.hook.alreadyInstalled && !plan.hook.needsMigration;
         const doHook =
-          !opts.skillOnly &&
-          !plan.hook.alreadyInstalled &&
-          (opts.yes || (await confirm('Install hook?', true)));
+          !opts.skillOnly && !hookSettled && (opts.yes || (await confirm('Install hook?', true)));
+        // --permission defaults OFF: explicit opt-in via flag, or default-no in the prompt.
+        const doPermission = plan.permission.alreadyInstalled
+          ? false
+          : opts.permission === true
+            ? true
+            : opts.yes
+              ? false
+              : await confirm(`Add ${plan.permission.pattern} to settings.json?`, false);
 
         const summary: string[] = [];
         if (doSkill) {
@@ -946,22 +1218,34 @@ export function buildProgram(): Command {
         if (doHook) {
           // After the skill is copied, the hook script is at dest/hooks/inbox-on-prompt.sh.
           const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
-          const res = installHook(scriptPath);
+          const res = installHook(scriptPath, home);
           if (res.alreadyInstalled) summary.push('  hook: already installed (skipped)');
           else
             summary.push(
               `  hook: added entry → ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`,
             );
         } else if (!opts.skillOnly) {
+          summary.push(hookSettled ? '  hook: already installed (skipped)' : '  hook: skipped');
+        }
+        if (doPermission) {
+          const res = installPermission(plan.permission.pattern, home);
+          if (res.alreadyInstalled) summary.push('  perm: already present (skipped)');
+          else
+            summary.push(
+              `  perm: added ${plan.permission.pattern} → ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`,
+            );
+        } else {
           summary.push(
-            plan.hook.alreadyInstalled ? '  hook: already installed (skipped)' : '  hook: skipped',
+            plan.permission.alreadyInstalled
+              ? '  perm: already present (skipped)'
+              : '  perm: skipped',
           );
         }
 
         process.stderr.write(`\nbrackish install — done:\n${summary.join('\n')}\n`);
-        if (doSkill || doHook) {
+        if (doSkill || doHook || doPermission) {
           process.stderr.write(
-            '\nNext: `brackish init --identity <name>` (if not already), then `brackish serve &`.\n',
+            '\nNext: `brackish up` to start the daemon (writes a default client config if needed).\n',
           );
         }
       },
@@ -972,26 +1256,49 @@ export function buildProgram(): Command {
     .description('reverse `brackish install`: remove the skill dir + our hook entry')
     .option('--skill-only', 'remove only the skill, leave the hook')
     .option('--hook-only', 'remove only the hook, leave the skill')
-    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
-    .option('--yes', 'non-interactive: assume yes to all confirmations')
+    .option(
+      '--scope <user|project>',
+      'user → ~/.claude (global); project → ./.claude. Interactive if omitted.',
+    )
+    .option('--global', 'shortcut for --scope user')
+    .option('--local', 'shortcut for --scope project')
+    .option(
+      '--dest <path>',
+      'override skill dest (defaults to <home>/skills/brackish for the chosen scope)',
+    )
+    .option('--yes', 'non-interactive: assume yes to all confirmations (defaults scope to user)')
     .action(
-      async (opts: { skillOnly?: boolean; hookOnly?: boolean; dest?: string; yes?: boolean }) => {
+      async (opts: {
+        skillOnly?: boolean;
+        hookOnly?: boolean;
+        scope?: string;
+        global?: boolean;
+        local?: boolean;
+        dest?: string;
+        yes?: boolean;
+      }) => {
         if (opts.skillOnly && opts.hookOnly) {
           errExit(2, 'uninstall: pass at most one of --skill-only or --hook-only');
         }
-        const dest = opts.dest ?? defaultSkillDest();
+        const scope = await resolveScope(opts);
+        const home = claudeHome(scope);
+        const dest = opts.dest ?? defaultSkillDest(home);
         const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
 
-        const plan = inspectInstall({ dest });
-        process.stderr.write('brackish uninstall — plan:\n');
+        const plan = inspectInstall({ home, dest });
+        process.stderr.write(`brackish uninstall — plan (scope=${scope}, home=${home}):\n`);
         if (!opts.hookOnly) {
           process.stderr.write(
             `  skill: ${plan.skill.destPath}\n    ${plan.skill.exists ? 'remove' : 'nothing to remove'}\n`,
           );
         }
+        const hasHookEntry = plan.hook.alreadyInstalled || plan.hook.needsMigration;
         if (!opts.skillOnly) {
           process.stderr.write(
-            `  hook:  ${plan.hook.settingsPath}\n    ${plan.hook.alreadyInstalled ? 'remove our entry' : 'nothing to remove'}\n`,
+            `  hook:  ${plan.hook.settingsPath}\n    ${hasHookEntry ? 'remove our entry' : 'nothing to remove'}\n`,
+          );
+          process.stderr.write(
+            `  perm:  ${plan.permission.settingsPath}\n    ${plan.permission.alreadyInstalled ? `remove allow-rule ${plan.permission.pattern}` : 'nothing to remove'}\n`,
           );
         }
 
@@ -1000,9 +1307,11 @@ export function buildProgram(): Command {
           plan.skill.exists &&
           (opts.yes || (await confirm('Uninstall skill?', true)));
         const doHook =
+          !opts.skillOnly && hasHookEntry && (opts.yes || (await confirm('Uninstall hook?', true)));
+        const doPermission =
           !opts.skillOnly &&
-          plan.hook.alreadyInstalled &&
-          (opts.yes || (await confirm('Uninstall hook?', true)));
+          plan.permission.alreadyInstalled &&
+          (opts.yes || (await confirm(`Remove ${plan.permission.pattern}?`, true)));
 
         const summary: string[] = [];
         if (doSkill) {
@@ -1014,15 +1323,25 @@ export function buildProgram(): Command {
           summary.push('  skill: nothing to remove');
         }
         if (doHook) {
-          const res = uninstallHook(scriptPath);
+          const res = uninstallHook(scriptPath, home);
           summary.push(
             res.removed
               ? `  hook: removed entry from ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`
               : '  hook: nothing to remove',
           );
         } else if (!opts.skillOnly) {
+          summary.push(hasHookEntry ? '  hook: skipped' : '  hook: nothing to remove');
+        }
+        if (doPermission) {
+          const res = uninstallPermission(plan.permission.pattern, home);
           summary.push(
-            plan.hook.alreadyInstalled ? '  hook: skipped' : '  hook: nothing to remove',
+            res.removed
+              ? `  perm: removed ${plan.permission.pattern} from ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`
+              : '  perm: nothing to remove',
+          );
+        } else if (!opts.skillOnly) {
+          summary.push(
+            plan.permission.alreadyInstalled ? '  perm: skipped' : '  perm: nothing to remove',
           );
         }
 
@@ -1033,9 +1352,14 @@ export function buildProgram(): Command {
   program
     .command('hook-snippet')
     .description('print the settings.json JSON fragment for the inbox hook (writes nothing)')
-    .option('--dest <path>', 'override skill destination (default ~/.claude/skills/brackish)')
-    .action((opts: { dest?: string }) => {
-      const dest = opts.dest ?? defaultSkillDest();
+    .option('--scope <user|project>', 'pick the home that resolves the skill dest (default user)')
+    .option('--global', 'shortcut for --scope user')
+    .option('--local', 'shortcut for --scope project')
+    .option('--dest <path>', 'override skill destination')
+    .action((opts: { scope?: string; global?: boolean; local?: boolean; dest?: string }) => {
+      const scope: Scope = opts.local ? 'project' : opts.scope === 'project' ? 'project' : 'user';
+      const home = claudeHome(scope);
+      const dest = opts.dest ?? defaultSkillDest(home);
       const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
       process.stdout.write(`${hookSnippet(scriptPath)}\n`);
     });
@@ -1050,7 +1374,13 @@ function collect(value: string, prev: string[]): string[] {
   return [...prev, value];
 }
 
-type EndpointProposeOpts = {
+type ConcurrencyOpts = {
+  expectedNew?: boolean;
+  expectedVersion?: string;
+  force?: boolean;
+};
+
+type EndpointProposeOpts = ConcurrencyOpts & {
   summary?: string;
   description?: string;
   requestContent: string[];
@@ -1065,7 +1395,33 @@ type EndpointProposeOpts = {
   json?: boolean;
 };
 
-type ConventionProposeOpts = {
+/** Validate + normalize the three concurrency flags into the wire shape. */
+function parseConcurrencyOpts(opts: ConcurrencyOpts): ProposeOptionsWire {
+  if (opts.expectedNew && opts.expectedVersion !== undefined) {
+    errExit(2, 'pass at most one of --expected-new or --expected-version');
+  }
+  const out: ProposeOptionsWire = {};
+  if (opts.expectedNew) out.expectedVersion = 'new';
+  else if (opts.expectedVersion !== undefined) {
+    const n = Number.parseInt(opts.expectedVersion, 10);
+    if (!Number.isFinite(n) || n < 1) {
+      errExit(2, `--expected-version must be a positive integer (got "${opts.expectedVersion}")`);
+    }
+    out.expectedVersion = n;
+  }
+  if (opts.force) {
+    if (out.expectedVersion !== undefined) {
+      errExit(
+        2,
+        '--force is meaningless with --expected-* (the version assertion already governs racing)',
+      );
+    }
+    out.force = true;
+  }
+  return out;
+}
+
+type ConventionProposeOpts = ConcurrencyOpts & {
   title?: string;
   apiVersion?: string;
   description?: string;
@@ -1298,8 +1654,7 @@ async function withClient(
   }
 }
 
-/** Load just enough to know what URL to print in `brackish invite`. */
-async function loadClientConfigForServeAddr(): Promise<{ tcpUrl: string }> {
+async function loadClientConfigForServeAddr(): Promise<{ tcpUrl: string; hint?: string }> {
   const fileCfg = loadServerConfig();
   if (fileCfg.bind === undefined) {
     errExit(
@@ -1307,7 +1662,12 @@ async function loadClientConfigForServeAddr(): Promise<{ tcpUrl: string }> {
       'invite: this server has no TCP bind set; invites only make sense for cross-machine use.',
     );
   }
-  return { tcpUrl: `http://${fileCfg.bind.replace(/^:/, '127.0.0.1:')}` };
+  const { host, port } = parseBindAddress(fileCfg.bind);
+  const inferred = await inferReachableHost(host);
+  return {
+    tcpUrl: `http://${inferred.host}:${port}`,
+    ...(inferred.hint ? { hint: inferred.hint } : {}),
+  };
 }
 
 function readStdin(): Promise<string> {
@@ -1339,6 +1699,148 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function servePidPath(): string {
+  return join(brackishHome(), 'serve.pid');
+}
+
+/** True iff something is listening on the unix socket right now. */
+async function isDaemonRunning(socketPath: string): Promise<boolean> {
+  if (!existsSync(socketPath)) return false;
+  return new Promise((resolve) => {
+    const sock = createConnection(socketPath);
+    const done = (val: boolean): void => {
+      sock.removeAllListeners();
+      sock.destroy();
+      resolve(val);
+    };
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+    setTimeout(() => done(false), 1000).unref();
+  });
+}
+
+async function waitForDaemon(socketPath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isDaemonRunning(socketPath)) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+async function waitForSocketGone(socketPath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!existsSync(socketPath)) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
+/** Coerce an arbitrary string into a valid IdentitySchema-shaped name. */
+function sanitizeIdentity(raw: string): string {
+  const lowered = raw.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const trimmed = lowered.replace(/^[^a-z]+/, '').slice(0, 64);
+  return trimmed || 'host';
+}
+
+/** Write a default client config (socket transport, default identity) if none exists. */
+async function ensureClientConfig(explicitIdentity?: string): Promise<void> {
+  const path = defaultClientConfigPath();
+  if (existsSync(path)) return;
+  const raw = explicitIdentity ?? process.env.BRACKISH_IDENTITY ?? sanitizeIdentity(hostname());
+  const identity = IdentitySchema.parse(sanitizeIdentity(raw));
+  saveClientConfig({ identity, socketPath: defaultSocketPath() });
+  process.stderr.write(`brackish: wrote ${path}, identity=${identity}\n`);
+}
+
+/**
+ * Discover the local IPv4 the kernel would source from for outbound traffic.
+ *
+ * UDP `connect()` stores a peer address and triggers a route-table lookup that binds
+ * the socket to a local address — no packet is sent. The destination is 192.0.2.1
+ * (TEST-NET-1, RFC 5737), IETF-reserved as unroutable.
+ */
+async function discoverOutboundIPv4(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const sock = createDgramSocket('udp4');
+    let done = false;
+    const finish = (val: string | null): void => {
+      if (done) return;
+      done = true;
+      try {
+        sock.close();
+      } catch {
+        /* already closed */
+      }
+      resolve(val);
+    };
+    sock.once('error', () => finish(null));
+    sock.connect(1, '192.0.2.1', () => {
+      try {
+        const addr = sock.address();
+        finish(addr.address && addr.address !== '0.0.0.0' ? addr.address : null);
+      } catch {
+        finish(null);
+      }
+    });
+  });
+}
+
+async function inferReachableHost(boundHost: string): Promise<{ host: string; hint?: string }> {
+  if (boundHost !== '0.0.0.0' && boundHost !== '::') return { host: boundHost };
+  const outbound = await discoverOutboundIPv4();
+  if (outbound !== null) return { host: outbound };
+  return {
+    host: boundHost,
+    hint: "couldn't infer a reachable host; replace 0.0.0.0 with this machine's address",
+  };
+}
+
+/** Determine the install scope from flags or prompt. Defaults to `user` when non-interactive. */
+async function resolveScope(opts: {
+  scope?: string;
+  global?: boolean;
+  local?: boolean;
+  yes?: boolean;
+}): Promise<Scope> {
+  if (opts.global && opts.local) {
+    errExit(2, 'install: pass at most one of --global and --local');
+  }
+  if (opts.scope !== undefined && opts.scope !== 'user' && opts.scope !== 'project') {
+    errExit(2, `install: invalid --scope ${opts.scope} (expected: user, project)`);
+  }
+  const flagged: Scope | null = opts.global
+    ? 'user'
+    : opts.local
+      ? 'project'
+      : opts.scope === 'user' || opts.scope === 'project'
+        ? opts.scope
+        : null;
+  if (flagged) return flagged;
+  if (opts.yes || !process.stdin.isTTY) return 'user';
+
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    process.stderr.write(
+      [
+        'Install scope?',
+        `  1) user    — ${userClaudeHome()}      (global; applies to every Claude session)`,
+        `  2) project — ${projectClaudeHome()}   (commit-able; applies when Claude is launched from this dir or any descendant)`,
+        '',
+      ].join('\n'),
+    );
+    while (true) {
+      const ans = (await rl.question('Choose [1/2] (default 1): ')).trim().toLowerCase();
+      if (ans === '' || ans === '1' || ans === 'user' || ans === 'u') return 'user';
+      if (ans === '2' || ans === 'project' || ans === 'p') return 'project';
+      process.stderr.write('  please answer 1 (user) or 2 (project)\n');
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
@@ -1354,7 +1856,6 @@ async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
 // --- main ---
 
 import { realpathSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 
 function isMainModule(): boolean {
   const entry = process.argv[1];

@@ -26,6 +26,18 @@ import type {
   SchemaSummary,
 } from '../models.js';
 
+/** Opt-in concurrency control on propose. */
+export type ProposeOptions = {
+  /**
+   * `'new'`  → refuse if any prior version of this identity exists.
+   * `number` → latest version of this identity must equal this exact value (any status).
+   * `undefined` → no version-position assertion.
+   */
+  expectedVersion?: number | 'new';
+  /** Allow proposing while the latest version is still in `proposed` status. Ignored when `expectedVersion` is set. */
+  force?: boolean;
+};
+
 export type RationaleEntry = {
   version: number;
   status: 'proposed' | 'accepted' | 'rejected';
@@ -59,6 +71,7 @@ export interface Store {
     path: string,
     spec: OperationSpec,
     by: Identity,
+    opts?: ProposeOptions,
   ): Promise<OperationArtifact>;
   acceptEndpoint(
     documentName: DocumentName,
@@ -99,6 +112,7 @@ export interface Store {
     name: SchemaName,
     spec: JSONSchema,
     by: Identity,
+    opts?: ProposeOptions,
   ): Promise<SchemaArtifact>;
   acceptSchema(
     documentName: DocumentName,
@@ -127,6 +141,7 @@ export interface Store {
     documentName: DocumentName,
     spec: ConventionSpec,
     by: Identity,
+    opts?: ProposeOptions,
   ): Promise<ConventionArtifact>;
   acceptConvention(
     documentName: DocumentName,

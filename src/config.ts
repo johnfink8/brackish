@@ -145,10 +145,24 @@ export function saveServerConfig(
 
 // --- bind-address parsing ---
 
-/** Parse "host:port" or ":port" or "0.0.0.0:port" into structured form. */
+/** Default TCP port used when --bind is given without one (e.g. `--bind 0.0.0.0` → 0.0.0.0:11442). */
+export const DEFAULT_BIND_PORT = 11442;
+
+/** Default `--bind` value used when the flag is passed alone (e.g. `--bind` → 0.0.0.0:11442). */
+export const DEFAULT_BIND_ADDR = `0.0.0.0:${DEFAULT_BIND_PORT}`;
+
+/**
+ * Parse a bind spec into structured form. Accepts:
+ *   "host:port"   → exact
+ *   ":port"       → 127.0.0.1:port            (loopback shortcut)
+ *   "host"        → host:DEFAULT_BIND_PORT    (default port)
+ *   ""            → DEFAULT_BIND_ADDR
+ */
 export function parseBindAddress(bind: string): { host: string; port: number } {
+  if (bind === '') return parseBindAddress(DEFAULT_BIND_ADDR);
+  if (!bind.includes(':')) return parseBindAddress(`${bind}:${DEFAULT_BIND_PORT}`);
+
   const idx = bind.lastIndexOf(':');
-  if (idx < 0) throw new Error(`invalid bind address "${bind}" (expected host:port)`);
   const host = idx === 0 ? '127.0.0.1' : bind.slice(0, idx);
   const portStr = bind.slice(idx + 1);
   const port = Number.parseInt(portStr, 10);

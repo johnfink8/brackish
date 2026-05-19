@@ -17,13 +17,7 @@ brackish install                       # interactive: drops the Claude skill + U
 Each Claude runs:
 
 ```sh
-brackish init --identity host          # identity is a self-declared label; pick whatever
-```
-
-One side starts the daemon (anyone can, exactly once on the machine):
-
-```sh
-brackish serve &
+brackish up    # idempotent: starts the daemon if needed, writes a default client config (identity = hostname)
 ```
 
 Then talk:
@@ -31,37 +25,58 @@ Then talk:
 ```sh
 # host:
 brackish doc new contracts
-brackish send contracts "Need shape of GET /users/me response."
-brackish artifact propose contracts users-api --kind openapi --file users.yaml
+brackish send contracts "Let's nail down the user endpoints."
+brackish convention propose contracts --title "Users API" --api-version 0.1.0
+brackish schema   propose contracts User --field 'id:string' --field 'email:string'
+brackish endpoint propose contracts GET /users/{id} \
+  --response '200:application/json:User:ok' \
+  --response '404:application/json:Error:not found'
 
 # peer (other Claude):
-brackish inbox                                  # see what's pending
-brackish read contracts                          # see the discussion + proposals
-brackish artifact get contracts users-api --proposed > /tmp/proposal.yaml
-brackish artifact accept contracts users-api    # or `reject <reason>`
+brackish inbox                                       # see what's pending
+brackish read contracts                              # full conversation + delta summaries
+brackish endpoint show contracts GET /users/{id} --proposed --full
+brackish endpoint accept contracts GET /users/{id}   # or `reject <reason>`
 ```
 
 ## Cross-machine
 
-```sh
-# server side (could be one of the Claudes or a third host):
-brackish serve --bind 0.0.0.0:11442 &
-brackish invite peer                            # prints a `brackish connect ...` command
+One command on the server side gives you everything the peer needs:
 
-# peer side:
-brackish connect http://1.2.3.4:11442 --token <invite> --identity peer
+```sh
+# server side:
+brackish serve --invite peer
+#   → starts the daemon (TCP on 0.0.0.0:11442), mints a one-time token, prints:
+#       /brackish connect http://<your-ip>:11442 --token <tok> --identity peer
+```
+
+The user pastes that single line into the peer Claude's session. The peer's skill recognizes `/brackish connect …` and runs:
+
+```sh
+brackish connect http://<your-ip>:11442 --token <tok> --identity peer
 # config written; subsequent commands work the same as same-machine
 ```
 
-## What's an artifact?
+## The three negotiable artifact kinds
 
-An artifact has a name (`users-api`), a kind (`openapi`/`ts-types`/`json-schema`/etc. — freeform label), and a chain of versions. Each version is `proposed` → `accepted` or `rejected`. You can't accept your own proposal; the other side does. The "current contract" is the latest accepted version.
+Every brackish document assembles into a real OpenAPI 3.1 spec. There are three kinds of artifact, each with its own propose/accept/reject lifecycle and identity key:
+
+| Kind | What it is | Identity key |
+|---|---|---|
+| `endpoint` | OpenAPI Operation Object (method + path + req/resp + security + `x-brackish`) | `<METHOD> <path>` |
+| `schema` | JSON Schema component | `<Name>` (PascalCase) |
+| `convention` | document-level `{ info, servers, securitySchemes }` | singleton per document |
+
+The chain of versions is `proposed → accepted | rejected`; you can't accept your own proposal. The "current contract" is the latest accepted version of each artifact.
 
 ```sh
-brackish artifact list <doc>                  # see all artifacts and their states
-brackish artifact get <doc> <name>            # latest accepted, content to stdout
-brackish artifact get <doc> <name> --proposed # latest in-flight
-brackish artifact get <doc> <name> --version 3
+brackish endpoint list <doc>                                       # all endpoints + state
+brackish endpoint show <doc> <METHOD> <PATH>                       # compact: status + delta
+brackish endpoint show <doc> <METHOD> <PATH> --full                # include the Operation body
+brackish endpoint show <doc> <METHOD> <PATH> --proposed            # latest in-flight, not yet accepted
+brackish endpoint diff <doc> <METHOD> <PATH> --from 1 --to 2       # RFC 6902 JSON Patch
+# Same verbs for `schema` and `convention`.
+brackish visualize <doc> --format openapi --out spec.yaml          # assembled OpenAPI 3.1 YAML
 ```
 
 ## Demo

@@ -22,11 +22,13 @@ brackish: pending negotiations for your identity. Read and respond before contin
 ${OUTPUT}
 
 Next steps:
-  brackish read <doc>            # see the full conversation
-  brackish artifact get <doc> <name>            # fetch latest accepted content
-  brackish artifact get <doc> <name> --proposed # fetch the in-flight proposal
-  brackish artifact accept|reject <doc> <name>
-  brackish send <doc> "<text>"   # chat
+  brackish read <doc>                                  # full conversation + propose events with delta summaries
+  brackish endpoint show <doc> <METHOD> <PATH>         # compact: status + version chain + latest delta
+  brackish endpoint show <doc> <METHOD> <PATH> --full  # include the Operation body
+  brackish endpoint accept|reject <doc> <METHOD> <PATH> [reason]
+  brackish schema     accept|reject <doc> <NAME>       [reason]   # same lifecycle for schemas
+  brackish convention accept|reject <doc>              [reason]   # same lifecycle for the document-level convention
+  brackish send <doc> "<text>"                         # rationale alongside an action
 </system-reminder>
 EOF
 fi

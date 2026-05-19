@@ -34,7 +34,7 @@ import { type RationaleMap, renderHtml } from './render.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.2.1';
 
 const WAIT_TIMEOUT_DEFAULT_S = 30;
 const WAIT_TIMEOUT_MIN_S = 1;
@@ -177,6 +177,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       body.path,
       body.spec,
       c.get('identity'),
+      parseProposeOptions(c.req),
     );
     return c.json(v, 201);
   });
@@ -266,7 +267,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/schemas', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeSchemaRequestSchema.parse(await c.req.json());
-    const v = await store.proposeSchema(docName, body.name, body.spec, c.get('identity'));
+    const v = await store.proposeSchema(
+      docName,
+      body.name,
+      body.spec,
+      c.get('identity'),
+      parseProposeOptions(c.req),
+    );
     return c.json(v, 201);
   });
 
@@ -352,7 +359,12 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/convention', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeConventionRequestSchema.parse(await c.req.json());
-    const v = await store.proposeConvention(docName, body.spec, c.get('identity'));
+    const v = await store.proposeConvention(
+      docName,
+      body.spec,
+      c.get('identity'),
+      parseProposeOptions(c.req),
+    );
     return c.json(v, 201);
   });
 
@@ -453,6 +465,8 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     case 'artifact_not_pending':
     case 'invite_redeemed':
     case 'invite_expired':
+    case 'version_in_flight':
+    case 'version_mismatch':
       return 409;
     case 'cannot_accept_own':
     case 'cannot_reject_own':
@@ -460,6 +474,30 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     default:
       return 400;
   }
+}
+
+/** Parse `?expected_version=` and `?force=` into the store's ProposeOptions shape. */
+function parseProposeOptions(req: { query: (k: string) => string | undefined }): {
+  expectedVersion?: number | 'new';
+  force?: boolean;
+} {
+  const opts: { expectedVersion?: number | 'new'; force?: boolean } = {};
+  const ev = req.query('expected_version');
+  if (ev !== undefined) {
+    if (ev === 'new') opts.expectedVersion = 'new';
+    else {
+      const n = Number.parseInt(ev, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        throw new StoreError(
+          'version_mismatch',
+          `invalid expected_version "${ev}" (expected positive integer or "new")`,
+        );
+      }
+      opts.expectedVersion = n;
+    }
+  }
+  if (req.query('force') === 'true') opts.force = true;
+  return opts;
 }
 
 function parseSince(raw: string | undefined): Cursor | undefined {

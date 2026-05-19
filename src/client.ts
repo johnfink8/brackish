@@ -170,11 +170,12 @@ export class BrackishClient {
     method: HttpMethod,
     path: string,
     spec: OperationSpec,
+    opts: ProposeOptionsWire = {},
   ): Promise<OperationArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/endpoints`,
       OperationArtifactSchema,
-      { method: 'POST', body: { method, path, spec } },
+      { method: 'POST', body: { method, path, spec }, query: proposeOptionsToQuery(opts) },
     );
   }
 
@@ -248,11 +249,12 @@ export class BrackishClient {
     document: DocumentName,
     name: SchemaName,
     spec: JSONSchema,
+    opts: ProposeOptionsWire = {},
   ): Promise<SchemaArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/schemas`,
       SchemaArtifactSchema,
-      { method: 'POST', body: { name, spec } },
+      { method: 'POST', body: { name, spec }, query: proposeOptionsToQuery(opts) },
     );
   }
 
@@ -314,11 +316,15 @@ export class BrackishClient {
 
   // --- convention (singleton per document) ---
 
-  proposeConvention(document: DocumentName, spec: ConventionSpec): Promise<ConventionArtifact> {
+  proposeConvention(
+    document: DocumentName,
+    spec: ConventionSpec,
+    opts: ProposeOptionsWire = {},
+  ): Promise<ConventionArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/convention`,
       ConventionArtifactSchema,
-      { method: 'POST', body: { spec } },
+      { method: 'POST', body: { spec }, query: proposeOptionsToQuery(opts) },
     );
   }
 
@@ -489,6 +495,21 @@ export async function redeemInvite(server: string, inviteToken: string): Promise
   });
   const body = await okJson(res);
   return ConnectResponseSchema.parse(body);
+}
+
+/** Optional concurrency hints on `proposeEndpoint` / `proposeSchema` / `proposeConvention`. */
+export type ProposeOptionsWire = {
+  expectedVersion?: number | 'new';
+  force?: boolean;
+};
+
+function proposeOptionsToQuery(opts: ProposeOptionsWire): Record<string, string | undefined> {
+  const q: Record<string, string | undefined> = {};
+  if (opts.expectedVersion === 'new') q.expected_version = 'new';
+  else if (typeof opts.expectedVersion === 'number')
+    q.expected_version = String(opts.expectedVersion);
+  if (opts.force) q.force = 'true';
+  return q;
 }
 
 /** Adapter from ClientConfig (CLI-facing) to BrackishClientOptions (transport-discriminated). */

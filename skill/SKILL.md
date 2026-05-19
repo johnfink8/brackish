@@ -22,9 +22,17 @@ Skip brackish if:
 - The API is already shipped and the shape is locked.
 - There's no other Claude on the other side.
 
-## Inbox first
+## Start of session: `brackish up`
 
-At the start of any session that might involve cross-component contracts:
+At the start of any session that might involve cross-component contracts, run:
+
+```
+brackish up
+```
+
+This is idempotent: it writes a client config if you don't have one yet (identity defaults to your hostname; pass `--identity <name>` to override), then starts the daemon in the background if it isn't already running. After `up`, every other brackish command can talk to the daemon. Tear down later with `brackish down`.
+
+Then check the inbox:
 
 ```
 brackish inbox
@@ -68,7 +76,7 @@ These are **OpenAPI Specification Extensions**, not HTTP headers — they live a
 ## Workflow
 
 ```
-brackish docs                    # list existing docs
+brackish documents               # list existing docs (alias: `brackish docs`)
 brackish doc new orders-api      # if you need a new one
 ```
 
@@ -98,6 +106,18 @@ brackish endpoint propose orders-api POST /users \
 `--field` syntax: `name:type[?][:description]`. Type can be `string`, `integer`, `number`, `boolean`, `null`, `string[]` (array), or a `PascalCase` name (becomes a `$ref` to another schema). The `?` after type marks the property optional.
 
 When the spec needs more than the sugar covers, pass `--file path/to/operation.yaml` (or `.json`) instead.
+
+## Avoid races: declare what version you expect
+
+Two agents can independently decide to propose the same identity at roughly the same time. brackish guards against this with three opt-in flags on every `propose`:
+
+- `--expected-new` — **use this for any first proposal.** Refuses if any version of this identity already exists (regardless of status). If it errors, it's because the other side already proposed; run `brackish endpoint show <id> --proposed` (or `schema` / `convention`) and react instead.
+- `--expected-version <N>` — **use this for revisions.** Refuses unless the latest version is exactly `N` (any status). After you've read v3, propose v4 with `--expected-version 3`; if the other side slipped in their own v4, you'll get a 409 and re-read.
+- `--force` — only meaningful without `--expected-*`. Lets you stack a counter-proposal on top of an unresolved (still-`proposed`) version. The normal recipe for a counter-proposal is to **reject first, then propose** — use `--force` only when you want both versions visible side by side.
+
+**Default behavior (no flags):** brackish refuses a new propose when the latest version is still `proposed` (i.e., neither accepted nor rejected). You'll see `version_in_flight` and a message naming the in-flight proposer. Recovery: read it, then accept / reject / or counter-propose explicitly.
+
+The 409 errors are your friend — they catch the race window. Prefer to be explicit (`--expected-new` / `--expected-version`) over relying on the default behavior; an explicit assertion gets you a clear `version_mismatch` when state has drifted.
 
 ## Responding to other-you
 
@@ -160,10 +180,43 @@ If the user hasn't run `brackish install`, the hook isn't there. Suggest it when
 - `brackish visualize ... --format openapi --out X.yaml` writes the assembled OpenAPI doc to a file.
 - Exit codes: `0` = success (incl. a timed-out `wait` with zero events); `1` = operation error (4xx); `2` = config/auth/connection error.
 
+## Bootstrap: same-machine vs cross-machine
+
+**Same machine (two Claudes, one host).** No tokens needed. Each side just runs `brackish up` (idempotent — the second one detects the daemon is already up). Both can immediately read/write the same documents over the local Unix socket. Done.
+
+**Cross-machine.** The user pairs the two sides explicitly. The skill recognizes two slash-command-style asks from the user:
+
+The slash-command verbs mirror the bash CLI: `/brackish invite NAME` means "run `brackish invite NAME` (with any setup)"; `/brackish connect URL --token T --identity N` means "run `brackish connect URL --token T --identity N` (with any setup)". One verb, one form — pass the args through.
+
+### Server side: `/brackish invite <peer-name>`
+
+When the user says something like `/brackish invite my-macbook` (or "invite my macbook" / "mint a token for the frontend Claude"):
+
+1. `brackish up --bind` — ensures the daemon is running with TCP enabled. Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind` to restart it with TCP.
+2. `brackish invite <peer-name> --json` — mint a one-time connect token. The output's `connectCommand` field is a bash string like `brackish connect URL --token T --identity NAME`.
+3. **Print a single line the user can paste verbatim into the peer Claude.** Take the `brackish connect …` string and replace the leading `brackish ` with `/brackish `. Result:
+   ```
+   /brackish connect <URL> --token <T> --identity <peer-name>
+   ```
+   That single line activates the peer's skill and supplies all the args. Print it on its own line in your final response.
+
+If `brackish serve --invite <peer-name>` is more convenient (daemon wasn't running yet), use it — the output is the same `brackish connect …` string; transform it the same way.
+
+### Client side: `/brackish connect <url> --token <t> --identity <name>`
+
+When the user pastes a line like `/brackish connect http://1.2.3.4:11442 --token … --identity my-macbook`:
+
+1. Run the bash equivalent verbatim — same args, drop the `/`: `brackish connect http://… --token … --identity …`. This writes `~/.brackish/config.toml` with the persistent token + identity + remote server URL.
+2. `brackish whoami` — confirm the identity is bound.
+3. `brackish inbox` — pick up any traffic the other side already sent.
+
+After connect, every brackish command on this side goes to the remote daemon transparently. You do **not** need to run `brackish up` on the client side — the remote daemon is what you're talking to.
+
 ## When the user says "let's negotiate the API"
 
-1. `brackish whoami` — confirm you're configured. If it fails, `brackish init --identity <name>` and tell the user.
+1. `brackish up` — daemon + client config in one idempotent step.
 2. `brackish inbox` — see what's already in flight.
-3. `brackish docs` — see what documents exist. Reuse or `brackish doc new`.
-4. Propose the convention first (`brackish convention propose`), then the schemas, then the endpoints. The other side will accept/reject.
-5. Use `brackish visualize` to see the assembled state; use `brackish endpoint/schema diff` to see what's changed.
+3. `brackish documents` — see what documents exist. Reuse or `brackish doc new <name>`.
+4. Propose the convention first (`brackish convention propose ... --expected-new`), then the schemas, then the endpoints — pass `--expected-new` so a parallel agent can't silently stomp you.
+5. When revising, pass `--expected-version <N>` (where N is the version you just read). On 409, re-read and reconcile.
+6. Use `brackish visualize` to see the assembled state; use `brackish endpoint/schema diff` to see what's changed.

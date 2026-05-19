@@ -24,16 +24,28 @@ import { fileURLToPath } from 'node:url';
 
 // --- paths ---
 
-export function claudeHome(): string {
+export type Scope = 'user' | 'project';
+
+/** User-scoped Claude home: `$CLAUDE_HOME` if set, else `~/.claude`. Applies to every Claude session. */
+export function userClaudeHome(): string {
   return process.env.CLAUDE_HOME ?? join(homedir(), '.claude');
 }
 
-export function defaultSkillDest(): string {
-  return join(claudeHome(), 'skills', 'brackish');
+/** Project-scoped Claude home: `<cwd>/.claude`. Claude Code auto-discovers this when launched from cwd or any descendant. */
+export function projectClaudeHome(cwd: string = process.cwd()): string {
+  return join(cwd, '.claude');
 }
 
-export function settingsJsonPath(): string {
-  return join(claudeHome(), 'settings.json');
+export function claudeHome(scope: Scope = 'user', cwd: string = process.cwd()): string {
+  return scope === 'project' ? projectClaudeHome(cwd) : userClaudeHome();
+}
+
+export function defaultSkillDest(home: string = claudeHome()): string {
+  return join(home, 'skills', 'brackish');
+}
+
+export function settingsJsonPath(home: string = claudeHome()): string {
+  return join(home, 'settings.json');
 }
 
 /** Locate the bundled skill/ directory. Works in dev (src/) and in an installed package (dist/). */
@@ -56,18 +68,45 @@ export type HookInspection = {
   settingsPath: string;
   settingsExists: boolean;
   settingsParseError: string | null;
+  /** A correctly-wrapped entry with our command is present. */
   alreadyInstalled: boolean;
+  /** A bare-handler entry with our command is present (older shape; needs migration). */
+  needsMigration: boolean;
   otherHookCount: number;
+};
+
+export type PermissionInspection = {
+  pattern: string;
+  settingsPath: string;
+  alreadyInstalled: boolean;
+  otherAllowCount: number;
 };
 
 export type InstallPlan = {
   skill: SkillInspection;
   hook: HookInspection;
+  permission: PermissionInspection;
 };
+
+/** The blanket permission entry: allow any `brackish` subcommand without prompting. */
+export const BRACKISH_PERMISSION_PATTERN = 'Bash(brackish *)';
+
+// settings.json shape per https://code.claude.com/docs/en/hooks. Each event maps to an array of
+// matcher groups, each group has an inner `hooks` array of actual handlers. The wrapper is
+// required even for events like UserPromptSubmit that ignore the matcher value.
+type HookHandler = { type?: string; command?: string; [k: string]: unknown };
+type HookMatcherGroup = { matcher?: string; hooks?: HookHandler[]; [k: string]: unknown };
 
 type ParsedSettings = {
   hooks?: {
-    UserPromptSubmit?: Array<{ type?: string; command?: string; [k: string]: unknown }>;
+    // Tolerate a bare-handler entry on read; only the wrapped form satisfies the schema on write.
+    UserPromptSubmit?: Array<HookMatcherGroup | HookHandler>;
+    [k: string]: unknown;
+  };
+  permissions?: {
+    allow?: string[];
+    deny?: string[];
+    ask?: string[];
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -77,26 +116,54 @@ function parseSettings(raw: string): ParsedSettings {
   return JSON.parse(raw) as ParsedSettings;
 }
 
-export function inspectInstall(opts: { dest?: string } = {}): InstallPlan {
-  const dest = opts.dest ?? defaultSkillDest();
+/** True if `e` is a matcher-group wrapper (has a `hooks` array), false if it's a bare handler. */
+function isMatcherGroup(e: HookMatcherGroup | HookHandler): e is HookMatcherGroup {
+  return Array.isArray((e as HookMatcherGroup).hooks);
+}
+
+/** Flatten the (possibly mixed-shape) entry list into the handler commands. */
+function commandsIn(entries: Array<HookMatcherGroup | HookHandler> | undefined): string[] {
+  if (!entries) return [];
+  const out: string[] = [];
+  for (const e of entries) {
+    if (isMatcherGroup(e)) {
+      for (const h of e.hooks ?? []) if (typeof h.command === 'string') out.push(h.command);
+    } else if (typeof e.command === 'string') {
+      out.push(e.command);
+    }
+  }
+  return out;
+}
+
+export function inspectInstall(opts: { home?: string; dest?: string } = {}): InstallPlan {
+  const home = opts.home ?? claudeHome();
+  const dest = opts.dest ?? defaultSkillDest(home);
   const scriptPath = join(dest, 'hooks', 'inbox-on-prompt.sh');
-  const settingsPath = settingsJsonPath();
+  const settingsPath = settingsJsonPath(home);
 
   const skill: SkillInspection = { destPath: dest, exists: existsSync(dest) };
 
   const settingsExists = existsSync(settingsPath);
   let settingsParseError: string | null = null;
   let alreadyInstalled = false;
+  let needsMigration = false;
   let otherHookCount = 0;
+  let permissionInstalled = false;
+  let otherAllowCount = 0;
 
   if (settingsExists) {
     try {
       const parsed = parseSettings(readFileSync(settingsPath, 'utf8'));
-      const hooks = Array.isArray(parsed.hooks?.UserPromptSubmit)
-        ? parsed.hooks.UserPromptSubmit
-        : [];
-      alreadyInstalled = hooks.some((h) => h.command === scriptPath);
-      otherHookCount = hooks.filter((h) => h.command !== scriptPath).length;
+      const entries = parsed.hooks?.UserPromptSubmit ?? [];
+      alreadyInstalled = entries.some(
+        (e) => isMatcherGroup(e) && (e.hooks ?? []).some((h) => h.command === scriptPath),
+      );
+      needsMigration = entries.some((e) => !isMatcherGroup(e) && e.command === scriptPath);
+      otherHookCount = commandsIn(entries).filter((c) => c !== scriptPath).length;
+
+      const allow = parsed.permissions?.allow ?? [];
+      permissionInstalled = allow.includes(BRACKISH_PERMISSION_PATTERN);
+      otherAllowCount = allow.filter((p) => p !== BRACKISH_PERMISSION_PATTERN).length;
     } catch (e) {
       settingsParseError = e instanceof Error ? e.message : String(e);
     }
@@ -110,7 +177,14 @@ export function inspectInstall(opts: { dest?: string } = {}): InstallPlan {
       settingsExists,
       settingsParseError,
       alreadyInstalled,
+      needsMigration,
       otherHookCount,
+    },
+    permission: {
+      pattern: BRACKISH_PERMISSION_PATTERN,
+      settingsPath,
+      alreadyInstalled: permissionInstalled,
+      otherAllowCount,
     },
   };
 }
@@ -145,17 +219,16 @@ export type HookInstallResult = {
   settingsPath: string;
 };
 
-/** Add `{ type: 'command', command: scriptPath }` to hooks.UserPromptSubmit[] in settings.json.
- *  Backs up the existing file first; idempotent (detects an existing entry with the same command). */
-export function installHook(scriptPath: string): HookInstallResult {
-  const settingsPath = settingsJsonPath();
+export function installHook(scriptPath: string, home: string = claudeHome()): HookInstallResult {
+  const settingsPath = settingsJsonPath(home);
   mkdirSync(dirname(settingsPath), { recursive: true });
 
   let parsed: ParsedSettings = {};
   let backupPath: string | null = null;
+  let raw = '';
 
   if (existsSync(settingsPath)) {
-    const raw = readFileSync(settingsPath, 'utf8');
+    raw = readFileSync(settingsPath, 'utf8');
     try {
       parsed = parseSettings(raw);
     } catch (e) {
@@ -163,7 +236,6 @@ export function installHook(scriptPath: string): HookInstallResult {
         `${settingsPath} is not valid JSON (${e instanceof Error ? e.message : e}); refusing to touch it`,
       );
     }
-    // Validate shape: if hooks exists, it must be an object; if UserPromptSubmit exists, it must be array.
     if (parsed.hooks !== undefined && (typeof parsed.hooks !== 'object' || parsed.hooks === null)) {
       throw new Error(`${settingsPath}: 'hooks' is not an object; refusing to edit`);
     }
@@ -175,21 +247,61 @@ export function installHook(scriptPath: string): HookInstallResult {
         `${settingsPath}: 'hooks.UserPromptSubmit' is not an array; refusing to edit`,
       );
     }
-    const hooks = (parsed.hooks?.UserPromptSubmit ?? []) as Array<{ command?: string }>;
-    if (hooks.some((h) => h.command === scriptPath)) {
-      return { backupPath: null, alreadyInstalled: true, settingsPath };
-    }
-    // We're about to modify — back up the original first.
+  }
+
+  const entries = parsed.hooks?.UserPromptSubmit;
+  const hasBare =
+    Array.isArray(entries) && entries.some((e) => !isMatcherGroup(e) && e.command === scriptPath);
+  const hasWrapped =
+    Array.isArray(entries) &&
+    entries.some((e) => isMatcherGroup(e) && (e.hooks ?? []).some((h) => h.command === scriptPath));
+
+  if (hasWrapped && !hasBare) {
+    return { backupPath: null, alreadyInstalled: true, settingsPath };
+  }
+
+  if (raw) {
     backupPath = `${settingsPath}.bak.${timestampSlug()}`;
     writeFileSync(backupPath, raw);
   }
 
+  if (hasBare) removeEntriesByCommand(parsed, scriptPath);
+
   if (!parsed.hooks) parsed.hooks = {};
   if (!Array.isArray(parsed.hooks.UserPromptSubmit)) parsed.hooks.UserPromptSubmit = [];
-  parsed.hooks.UserPromptSubmit.push({ type: 'command', command: scriptPath });
+  // matcher is ignored for UserPromptSubmit but the wrapper is mandatory.
+  parsed.hooks.UserPromptSubmit.push({
+    matcher: '',
+    hooks: [{ type: 'command', command: scriptPath }],
+  });
 
   writeFileSync(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`);
   return { backupPath, alreadyInstalled: false, settingsPath };
+}
+
+/** Strip any entry under `hooks.UserPromptSubmit` (either shape) whose command matches.
+ *  Mutates `parsed`; returns true if anything was removed. */
+function removeEntriesByCommand(parsed: ParsedSettings, scriptPath: string): boolean {
+  const entries = parsed.hooks?.UserPromptSubmit;
+  if (!Array.isArray(entries)) return false;
+  let mutated = false;
+  const keptGroups: Array<HookMatcherGroup | HookHandler> = [];
+  for (const e of entries) {
+    if (isMatcherGroup(e)) {
+      const keptHooks = (e.hooks ?? []).filter((h) => h.command !== scriptPath);
+      if (keptHooks.length !== (e.hooks ?? []).length) mutated = true;
+      if (keptHooks.length > 0) keptGroups.push({ ...e, hooks: keptHooks });
+    } else if (e.command === scriptPath) {
+      mutated = true;
+    } else {
+      keptGroups.push(e);
+    }
+  }
+  if (mutated && parsed.hooks) {
+    if (keptGroups.length === 0) delete parsed.hooks.UserPromptSubmit;
+    else parsed.hooks.UserPromptSubmit = keptGroups;
+  }
+  return mutated;
 }
 
 // --- uninstall ---
@@ -206,8 +318,11 @@ export type HookUninstallResult = {
   settingsPath: string;
 };
 
-export function uninstallHook(scriptPath: string): HookUninstallResult {
-  const settingsPath = settingsJsonPath();
+export function uninstallHook(
+  scriptPath: string,
+  home: string = claudeHome(),
+): HookUninstallResult {
+  const settingsPath = settingsJsonPath(home);
   if (!existsSync(settingsPath)) return { backupPath: null, removed: false, settingsPath };
 
   const raw = readFileSync(settingsPath, 'utf8');
@@ -219,24 +334,107 @@ export function uninstallHook(scriptPath: string): HookUninstallResult {
       `${settingsPath} is not valid JSON (${e instanceof Error ? e.message : e}); refusing to touch it`,
     );
   }
-  const hooks = parsed.hooks?.UserPromptSubmit;
-  if (!Array.isArray(hooks)) return { backupPath: null, removed: false, settingsPath };
 
-  const filtered = hooks.filter((h) => h.command !== scriptPath);
-  if (filtered.length === hooks.length) {
-    return { backupPath: null, removed: false, settingsPath };
-  }
+  const removed = removeEntriesByCommand(parsed, scriptPath);
+  if (!removed) return { backupPath: null, removed: false, settingsPath };
+
+  if (parsed.hooks && Object.keys(parsed.hooks).length === 0) delete parsed.hooks;
 
   const backupPath = `${settingsPath}.bak.${timestampSlug()}`;
   writeFileSync(backupPath, raw);
+  writeFileSync(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`);
+  return { backupPath, removed: true, settingsPath };
+}
 
-  if (filtered.length === 0 && parsed.hooks) {
-    delete parsed.hooks.UserPromptSubmit;
-    if (Object.keys(parsed.hooks).length === 0) {
-      delete parsed.hooks;
+// --- permission rule ---
+
+export type PermissionInstallResult = {
+  backupPath: string | null;
+  alreadyInstalled: boolean;
+  settingsPath: string;
+};
+
+export function installPermission(
+  pattern: string = BRACKISH_PERMISSION_PATTERN,
+  home: string = claudeHome(),
+): PermissionInstallResult {
+  const settingsPath = settingsJsonPath(home);
+  mkdirSync(dirname(settingsPath), { recursive: true });
+
+  let parsed: ParsedSettings = {};
+  let raw = '';
+  if (existsSync(settingsPath)) {
+    raw = readFileSync(settingsPath, 'utf8');
+    try {
+      parsed = parseSettings(raw);
+    } catch (e) {
+      throw new Error(
+        `${settingsPath} is not valid JSON (${e instanceof Error ? e.message : e}); refusing to touch it`,
+      );
     }
-  } else if (parsed.hooks) {
-    parsed.hooks.UserPromptSubmit = filtered;
+    if (
+      parsed.permissions !== undefined &&
+      (typeof parsed.permissions !== 'object' || parsed.permissions === null)
+    ) {
+      throw new Error(`${settingsPath}: 'permissions' is not an object; refusing to edit`);
+    }
+    if (parsed.permissions?.allow !== undefined && !Array.isArray(parsed.permissions.allow)) {
+      throw new Error(`${settingsPath}: 'permissions.allow' is not an array; refusing to edit`);
+    }
+  }
+
+  const allow = parsed.permissions?.allow ?? [];
+  if (allow.includes(pattern)) {
+    return { backupPath: null, alreadyInstalled: true, settingsPath };
+  }
+
+  let backupPath: string | null = null;
+  if (raw) {
+    backupPath = `${settingsPath}.bak.${timestampSlug()}`;
+    writeFileSync(backupPath, raw);
+  }
+  if (!parsed.permissions) parsed.permissions = {};
+  if (!Array.isArray(parsed.permissions.allow)) parsed.permissions.allow = [];
+  parsed.permissions.allow.push(pattern);
+
+  writeFileSync(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`);
+  return { backupPath, alreadyInstalled: false, settingsPath };
+}
+
+export type PermissionUninstallResult = {
+  backupPath: string | null;
+  removed: boolean;
+  settingsPath: string;
+};
+
+export function uninstallPermission(
+  pattern: string = BRACKISH_PERMISSION_PATTERN,
+  home: string = claudeHome(),
+): PermissionUninstallResult {
+  const settingsPath = settingsJsonPath(home);
+  if (!existsSync(settingsPath)) return { backupPath: null, removed: false, settingsPath };
+
+  const raw = readFileSync(settingsPath, 'utf8');
+  let parsed: ParsedSettings;
+  try {
+    parsed = parseSettings(raw);
+  } catch (e) {
+    throw new Error(
+      `${settingsPath} is not valid JSON (${e instanceof Error ? e.message : e}); refusing to touch it`,
+    );
+  }
+  const allow = parsed.permissions?.allow;
+  if (!Array.isArray(allow) || !allow.includes(pattern)) {
+    return { backupPath: null, removed: false, settingsPath };
+  }
+  const backupPath = `${settingsPath}.bak.${timestampSlug()}`;
+  writeFileSync(backupPath, raw);
+
+  const filtered = allow.filter((p) => p !== pattern);
+  if (parsed.permissions) {
+    if (filtered.length === 0) delete parsed.permissions.allow;
+    else parsed.permissions.allow = filtered;
+    if (Object.keys(parsed.permissions).length === 0) delete parsed.permissions;
   }
   writeFileSync(settingsPath, `${JSON.stringify(parsed, null, 2)}\n`);
   return { backupPath, removed: true, settingsPath };
@@ -248,7 +446,12 @@ export function hookSnippet(scriptPath: string): string {
   return JSON.stringify(
     {
       hooks: {
-        UserPromptSubmit: [{ type: 'command', command: scriptPath }],
+        UserPromptSubmit: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: scriptPath }],
+          },
+        ],
       },
     },
     null,
