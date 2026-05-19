@@ -1481,14 +1481,14 @@ export function buildProgram(): Command {
           process.stderr.write(
             [
               '',
-              'Next steps:',
-              '  1. `brackish up`                              — start the daemon (writes a default client config if needed)',
-              '  2. In Claude Code, type a `/brackish` slash command:',
-              `       /brackish invite <peer-name>             — bootstrap a cross-machine pair (server side)`,
-              `       /brackish connect <line from peer>       — redeem an invite (client side)`,
-              `     Or just say "let's negotiate the X API" and Claude picks it up from the skill.`,
+              'In Claude Code, just say what you want — the skill does the rest (starts the',
+              'daemon, writes a client config). Examples:',
               '',
-              `  Your identity will default to "${yourHostname}" — pass --identity to override.`,
+              '  /brackish invite <peer-name>             — pair with another Claude on another host',
+              '  /brackish connect <line from peer>       — redeem an invite the peer just printed',
+              "  let's negotiate the X API                — same-machine; the skill picks it up",
+              '',
+              `Your identity will default to "${yourHostname}". Override via \`brackish init --identity\` or by setting BRACKISH_IDENTITY.`,
               '',
             ].join('\n'),
           );
