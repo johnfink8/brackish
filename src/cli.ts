@@ -23,7 +23,14 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
-import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
+import { stringify as yamlStringify } from 'yaml';
+import {
+  type ArtifactKey,
+  acceptSchemas,
+  type BatchProposeResult,
+  type BatchProposeSuccess,
+  proposeBatchFromManifest,
+} from './batch.js';
 import {
   BrackishClient,
   ClientError,
@@ -62,6 +69,13 @@ import {
   userClaudeHome,
 } from './install.js';
 import {
+  type LintIssue,
+  type LintResult,
+  lintConventionSpec,
+  lintEndpointSpec,
+  lintSchemaSpec,
+} from './lint.js';
+import {
   type ConventionArtifact,
   type ConventionSpec,
   HttpMethodSchema,
@@ -80,11 +94,13 @@ import {
   formatEvents,
   formatEventsStream,
   formatInbox,
+  formatLintIssues,
   formatParties,
   formatSchemaSummaries,
 } from './output.js';
 import { renderHtml, renderJson, renderMarkdown, renderOpenAPIYaml, renderText } from './render.js';
 import { startServer } from './server.js';
+import { loadSpecFile, type ParseResult, parseSpecFile } from './specfile.js';
 import type { RationaleEntry } from './store/index.js';
 
 const CLI_VERSION = '0.3.0';
@@ -836,6 +852,25 @@ export function buildProgram(): Command {
         }),
     );
 
+  endpoint
+    .command('lint <method> <path> <file>')
+    .description(
+      'check a YAML/JSON Operation file locally before proposing: parse errors with line/col, structural validation, path placeholders ↔ parameters consistency, $ref shape',
+    )
+    .option('--json', 'output JSON')
+    .option('--strict', 'treat warnings as errors (exit 1 on warnings)')
+    .action(
+      async (
+        methodRaw: string,
+        path: string,
+        file: string,
+        opts: { json?: boolean; strict?: boolean },
+      ) => {
+        const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+        finalizeLint(parseSpecFile(file), (data) => lintEndpointSpec(method, path, data), opts);
+      },
+    );
+
   // --- schemas ---
 
   const schema = program.command('schema').description('JSON Schema component lifecycle');
@@ -919,15 +954,50 @@ export function buildProgram(): Command {
     );
 
   schema
-    .command('accept <doc> <name>')
-    .option('--version <n>')
+    .command('accept <doc> <name...>')
+    .description(
+      'accept the latest proposed version of one or more schemas. Stops on first failure; remaining names are left unaccepted.',
+    )
+    .option('--version <n>', 'pin a specific version (only valid with a single name)')
     .option('--json')
-    .action(async (doc: string, name: string, opts: { version?: string; json?: boolean }) =>
+    .action(async (doc: string, names: string[], opts: { version?: string; json?: boolean }) =>
       withClient(async (client) => {
+        if (names.length === 0) errExit(2, 'schema accept: at least one name required');
+        if (opts.version !== undefined && names.length !== 1) {
+          errExit(
+            2,
+            '--version requires exactly one name (different schemas have different version chains)',
+          );
+        }
         const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-        const v = await client.acceptSchema(doc, name, versionN);
-        if (opts.json) emitJson(v);
-        else emit(`accepted ${describeSchema(v)}`);
+
+        // Single-name form preserves the existing text/JSON shape for backwards compatibility.
+        if (names.length === 1) {
+          const n = names[0];
+          if (n === undefined) errExit(2, 'schema accept: empty name');
+          const v = await client.acceptSchema(doc, n, versionN);
+          if (opts.json) emitJson(v);
+          else emit(`accepted ${describeSchema(v)}`);
+          return;
+        }
+
+        // Multi-name form: stop-on-first-failure with an envelope/summary.
+        const result = await acceptSchemas(client, doc, names);
+        if (opts.json) {
+          emitJson(result);
+          if (result.failed) process.exit(1);
+          return;
+        }
+        for (const v of result.accepted) emit(`accepted ${describeSchema(v)}`);
+        if (result.failed) {
+          process.stderr.write(
+            `error at "${result.failed.name}": ${result.failed.code ?? 'error'} (${result.failed.message})\n` +
+              (result.remaining.length > 0
+                ? `remaining (unaccepted): ${result.remaining.join(', ')}\n`
+                : ''),
+          );
+          process.exit(1);
+        }
       }),
     );
 
@@ -992,6 +1062,17 @@ export function buildProgram(): Command {
           emitDiff(diff, opts.format);
         }),
     );
+
+  schema
+    .command('lint <name> <file>')
+    .description(
+      'check a YAML/JSON Schema file locally before proposing: parse errors with line/col, structural validation, $ref shape',
+    )
+    .option('--json', 'output JSON')
+    .option('--strict', 'treat warnings as errors (exit 1 on warnings)')
+    .action(async (name: string, file: string, opts: { json?: boolean; strict?: boolean }) => {
+      finalizeLint(parseSpecFile(file), (data) => lintSchemaSpec(name, data), opts);
+    });
 
   // --- convention ---
 
@@ -1143,6 +1224,58 @@ export function buildProgram(): Command {
           return;
         }
         emitDiff(diff, opts.format);
+      }),
+    );
+
+  convention
+    .command('lint <file>')
+    .description(
+      'check a YAML/JSON Convention file locally before proposing: parse errors with line/col, info required fields, security/securitySchemes consistency, x-brackish.naming enum',
+    )
+    .option('--json', 'output JSON')
+    .option('--strict', 'treat warnings as errors (exit 1 on warnings)')
+    .action(async (file: string, opts: { json?: boolean; strict?: boolean }) => {
+      finalizeLint(parseSpecFile(file), lintConventionSpec, opts);
+    });
+
+  // --- propose-batch ---
+
+  program
+    .command('propose-batch <doc>')
+    .description(
+      'propose every artifact in a YAML/JSON manifest (convention → schemas → endpoints). Each artifact is parsed + linted locally before sending; stops on first failure with what-succeeded + what-remains.',
+    )
+    .requiredOption(
+      '--manifest <file>',
+      'manifest path (see `brackish propose-batch --help-format`)',
+    )
+    .option('--lint-only', "lint and parse every artifact, but don't send any proposes")
+    .option('--json')
+    .action(async (doc: string, opts: { manifest: string; lintOnly?: boolean; json?: boolean }) =>
+      withClient(async (client) => {
+        const result = await proposeBatchFromManifest(client, doc, opts.manifest, {
+          ...(opts.lintOnly ? { lintOnly: true } : {}),
+        });
+        if (opts.json) {
+          emitJson(result);
+          if (result.failed) process.exit(1);
+          return;
+        }
+        for (const s of result.succeeded) {
+          const where = describeArtifactKey(s.key);
+          const vTag = opts.lintOnly ? '(lint-only)' : `v${s.version}`;
+          emit(`${opts.lintOnly ? 'linted  ' : 'proposed'} ${where.padEnd(40)} ${vTag}`);
+        }
+        if (result.failed) {
+          emitProposeBatchFailure(result);
+          process.exit(1);
+        } else {
+          const counts = countSucceededByKind(result.succeeded);
+          const verb = opts.lintOnly ? 'linted' : 'proposed';
+          emit(
+            `${verb}: ${counts.convention} convention, ${counts.schemas} schemas, ${counts.endpoints} endpoints`,
+          );
+        }
       }),
     );
 
@@ -1827,10 +1960,86 @@ function warnFileClobbers(filePath: string, ignored: string[]): void {
   );
 }
 
-function loadSpecFile(path: string): unknown {
-  const raw = readFileSync(path, 'utf8');
-  if (path.endsWith('.json')) return JSON.parse(raw);
-  return yamlParse(raw);
+function describeArtifactKey(key: ArtifactKey): string {
+  if (key.kind === 'convention') return 'convention';
+  if (key.kind === 'schema') return `schema ${key.name}`;
+  return `endpoint ${key.method.toUpperCase()} ${key.path}`;
+}
+
+function countSucceededByKind(succeeded: BatchProposeSuccess[]): {
+  convention: number;
+  schemas: number;
+  endpoints: number;
+} {
+  let convention = 0;
+  let schemas = 0;
+  let endpoints = 0;
+  for (const s of succeeded) {
+    if (s.key.kind === 'convention') convention++;
+    else if (s.key.kind === 'schema') schemas++;
+    else endpoints++;
+  }
+  return { convention, schemas, endpoints };
+}
+
+function emitProposeBatchFailure(result: BatchProposeResult): void {
+  if (!result.failed) return;
+  const f = result.failed;
+  const lines: string[] = [];
+  if (f.stage === 'manifest') {
+    lines.push(`manifest error: ${f.message}`);
+  } else if (f.stage === 'parse') {
+    lines.push(`parse error in ${describeArtifactKey(f.key)} (${f.file}): ${f.message}`);
+  } else if (f.stage === 'lint') {
+    lines.push(`lint failed for ${describeArtifactKey(f.key)} (${f.file}):`);
+    for (const issue of f.issues) {
+      lines.push(
+        `  ${issue.severity === 'error' ? 'error' : 'warn '}  ${issue.field}: ${issue.message}`,
+      );
+    }
+  } else {
+    lines.push(
+      `propose failed for ${describeArtifactKey(f.key)} (${f.file}): ${f.code ?? 'error'} (${f.message})`,
+    );
+  }
+  if (result.remaining.length > 0) {
+    lines.push(
+      `remaining (not attempted): ${result.remaining.map(describeArtifactKey).join(', ')}`,
+    );
+  }
+  process.stderr.write(`${lines.join('\n')}\n`);
+}
+
+type LintFinalizeOpts = { json?: boolean; strict?: boolean };
+function finalizeLint(
+  parsed: ParseResult,
+  doLint: (data: unknown) => LintResult,
+  opts: LintFinalizeOpts,
+): void {
+  if (!parsed.ok) {
+    if (opts.json) {
+      emitJson({
+        errors: [{ severity: 'error', field: '(file)', message: parsed.message }],
+        warnings: [],
+      });
+    } else {
+      process.stderr.write(`${parsed.message}\n`);
+    }
+    process.exit(1);
+  }
+  const result = doLint(parsed.data);
+  const effectiveErrors: LintIssue[] = opts.strict
+    ? [...result.errors, ...result.warnings]
+    : result.errors;
+  const effectiveWarnings = opts.strict ? [] : result.warnings;
+  if (opts.json) {
+    emitJson({ errors: effectiveErrors, warnings: effectiveWarnings });
+  } else {
+    const all = [...result.errors, ...result.warnings];
+    if (all.length === 0) emit('ok');
+    else emit(formatLintIssues(all));
+  }
+  if (effectiveErrors.length > 0) process.exit(1);
 }
 
 /** Convention's top-level `security` lives in a passthrough field — extract it without an `as`. */

@@ -138,6 +138,16 @@ description: |
   salience: interrupt; barge over current speech
 ```
 
+**Lint your `--file` locally before you send it.** `brackish <kind> lint` runs the same structural checks the server runs on propose, plus path-placeholder ↔ parameters consistency and a few other cheap ones. Catches things like a missing `parameters` entry for `{user_id}` or a `--global-security` referencing a scheme you forgot to declare — without burning a network round-trip:
+
+```
+brackish endpoint   lint POST /users/{user_id} ./op.yaml
+brackish schema     lint User ./User.yaml
+brackish convention lint ./convention.yaml
+```
+
+Exit 0 = clean. Exit 1 = errors (the message names the field and the fix). `--strict` promotes warnings to errors.
+
 ### Endpoints: auto-derived `parameters` and inherited security
 
 ```
@@ -162,6 +172,39 @@ brackish endpoint propose orders-api POST /orders \
 ```
 
 They land at `x-brackish: { idempotent, sideEffects, timing }` per the canonical shape.
+
+### Proposing many artifacts at once: `propose-batch --manifest`
+
+For >5 artifacts (typical opening dump for a non-trivial API), write a manifest and ship them all in one command:
+
+```yaml
+# manifest.yaml — block-style, not flow-style (the {placeholder} traps flow-mapping parsers)
+convention:
+  file: convention.yaml
+schemas:
+  - name: User
+    file: schemas/User.yaml
+  - name: Order
+    file: schemas/Order.yaml
+endpoints:
+  - method: POST
+    path: /orders
+    file: endpoints/POST-orders.yaml
+  - method: GET
+    path: /orders/{id}
+    file: endpoints/GET-orders-id.yaml
+```
+
+```
+brackish propose-batch orders-api --manifest manifest.yaml
+```
+
+What you get:
+- Order is forced: convention → schemas → endpoints regardless of how the manifest is laid out.
+- Each file is parsed and linted **locally** before sending. Parse errors surface with line/col; lint errors include the field path. Round-trip cost is paid only on real disagreements with the peer.
+- `expected: new` is the default per item. Override per-item with `expected: <N>` for revisions or `expected: force` to stack on a still-proposed version.
+- On the first propose failure: stop, print what landed, name the failing item, list what was never attempted.
+- `--lint-only` runs the whole pipeline without sending — useful for CI or for sanity-checking before a big drop.
 
 ## Avoid races: declare what version you expect
 
@@ -190,6 +233,8 @@ brackish endpoint diff orders-api POST /users --from 1 --to 2 --format rendered 
 ```
 
 Same verbs for `schema` and `convention`.
+
+**Accepting many schemas in one go:** `brackish schema accept <doc> <name...>` is variadic — `brackish schema accept orders-api User Order OrderItem Customer Address` accepts all five in order. Stops on the first failure (with a `remaining (unaccepted): …` line) so a wrong-side or already-accepted item doesn't bury under successes. `--version` is rejected with N>1 (different schemas have different version chains; accept those individually).
 
 You **can't accept your own proposal** (the server enforces it). One side proposes; the other side accepts or rejects. If you proposed something you shouldn't have (wrong path, wrong name, raced the other side), `brackish <kind> withdraw <id>` takes it back — only works on your own still-proposed versions.
 

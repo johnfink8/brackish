@@ -2,6 +2,7 @@
 // (JSON.stringify of whatever the API returns); these helpers handle the text path,
 // which we default to because it's denser in the agent's context window.
 
+import type { LintIssue } from './lint.js';
 import type {
   ConventionArtifact,
   Document,
@@ -150,4 +151,11 @@ function pad(s: string | number, width: number): string {
   const str = String(s);
   if (str.length >= width) return str;
   return str + ' '.repeat(width - str.length);
+}
+
+export function formatLintIssues(issues: LintIssue[]): string {
+  if (issues.length === 0) return '(no issues)';
+  return issues
+    .map((i) => `${i.severity === 'error' ? 'error' : 'warn '}  ${i.field}: ${i.message}`)
+    .join('\n');
 }
