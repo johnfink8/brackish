@@ -156,19 +156,12 @@ export const ThreadCreatedEventSchema = z.object({
   by: IdentitySchema,
 });
 
-export const PartyJoinedEventSchema = z.object({
-  ...eventBaseShape,
-  kind: z.literal('party_joined'),
-  identity: IdentitySchema,
-});
-
 export const EventSchema = z.discriminatedUnion('kind', [
   MessageEventSchema,
   ArtifactProposedEventSchema,
   ArtifactAcceptedEventSchema,
   ArtifactRejectedEventSchema,
   ThreadCreatedEventSchema,
-  PartyJoinedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type MessageEvent = z.infer<typeof MessageEventSchema>;
@@ -176,7 +169,6 @@ export type ArtifactProposedEvent = z.infer<typeof ArtifactProposedEventSchema>;
 export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
 export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
 export type ThreadCreatedEvent = z.infer<typeof ThreadCreatedEventSchema>;
-export type PartyJoinedEvent = z.infer<typeof PartyJoinedEventSchema>;
 
 // --- inbox summary ---
 
