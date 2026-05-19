@@ -70,12 +70,25 @@ export function makeAuthMiddleware(
       return;
     }
 
-    // TCP path: bearer token
-    const auth = c.req.header('Authorization');
-    if (!auth?.startsWith('Bearer ')) {
-      return c.json({ error: 'Authorization: Bearer <token> required for TCP transport' }, 401);
+    // TCP path: bearer token (Authorization header preferred; ?token=… query param accepted as
+    // a fallback so browsers visiting /ui/<doc> can authenticate from a URL).
+    const authHeader = c.req.header('Authorization');
+    const queryToken = c.req.query('token');
+    let token: string | undefined;
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice('Bearer '.length).trim();
+    } else if (queryToken && queryToken.length > 0) {
+      token = queryToken;
     }
-    const token = auth.slice('Bearer '.length).trim();
+    if (!token) {
+      return c.json(
+        {
+          error:
+            'Authorization: Bearer <token> required for TCP transport (or ?token=… query param for browser URLs)',
+        },
+        401,
+      );
+    }
     const identity = await store.getIdentityForToken(token);
     if (!identity) {
       return c.json({ error: 'invalid token' }, 401);

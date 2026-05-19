@@ -227,13 +227,15 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   #rationale h1 { font-size: 18px; margin-top: 0; }
   #rationale h2 { font-size: 14px; text-transform: uppercase; color: #666; border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 24px; }
   #rationale h3 { font-size: 14px; margin: 12px 0 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
-  .version { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #ddd; background: #fff; font-size: 12px; }
-  .version.accepted { border-color: #4caf50; }
-  .version.rejected { border-color: #f44336; }
-  .version.proposed { border-color: #2196f3; }
-  .who { color: #666; }
-  .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; }
-  .reason { font-style: italic; color: #c62828; }
+  /* All sidebar class selectors are scoped under #rationale so they don't clobber Swagger UI's
+     own .version / etc. classes on the left pane. */
+  #rationale .version { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #ddd; background: #fff; font-size: 12px; }
+  #rationale .version.accepted { border-color: #4caf50; }
+  #rationale .version.rejected { border-color: #f44336; }
+  #rationale .version.proposed { border-color: #2196f3; }
+  #rationale .who { color: #666; }
+  #rationale .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; }
+  #rationale .reason { font-style: italic; color: #c62828; }
 </style>
 </head>
 <body>
