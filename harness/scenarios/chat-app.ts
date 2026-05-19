@@ -48,11 +48,17 @@ Your team's mental model:
 You're NOT writing implementation code in this exercise — the deliverable is an agreed OpenAPI 3.1 contract, negotiated via the \`brackish\` tool that's installed in this project.
 `;
 
-// Starter and wake prompts are intentionally what a real human would type. The brackish
-// skill (installed via \`brackish install --local\`) handles the actual workflow.
+// Starter and wake prompts mimic what a human would type. The brackish skill (installed via
+// `brackish install --local`) handles the actual workflow.
+//
+// We pre-supply the three Step 0 scope-Q answers (scope, doc name, where) inline because
+// `claude -p` has no interactive AskUserQuestion surface — same approach validate-skill.ts
+// takes. Per the skill: "if the human's invocation already supplies an answer, paraphrase back
+// and skip that question." Real human invocations look similar ("let's negotiate the X API,
+// call it foo-api, frontend's on this machine").
 
-const STARTER_FRONTEND = `Let's negotiate the chat app API with the backend team.`;
-const STARTER_BACKEND = `Let's negotiate the chat app API with the frontend team.`;
+const STARTER_BACKEND = `Let's negotiate the chat app API with the frontend team. Call the OpenAPI document \`chat-api\`. The frontend Claude is on the same machine — no invite needed.`;
+const STARTER_FRONTEND = `Let's negotiate the chat app API with the backend team. The document is \`chat-api\` (already created by them). They're on the same machine.`;
 
 const WAKE = `The other team made some moves on the chat app API. Check brackish and respond.`;
 
