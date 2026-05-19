@@ -10,9 +10,9 @@ const nameRegex = /^[a-z][a-z0-9_-]{0,63}$/;
 export const IdentitySchema = z
   .string()
   .regex(nameRegex, 'identity must match /^[a-z][a-z0-9_-]{0,63}$/');
-export const ThreadNameSchema = z
+export const DocumentNameSchema = z
   .string()
-  .regex(nameRegex, 'thread name must match /^[a-z][a-z0-9_-]{0,63}$/');
+  .regex(nameRegex, 'document name must match /^[a-z][a-z0-9_-]{0,63}$/');
 export const ArtifactNameSchema = z
   .string()
   .regex(nameRegex, 'artifact name must match /^[a-z][a-z0-9_-]{0,63}$/');
@@ -21,20 +21,20 @@ export const CursorSchema = z.number().int().nonnegative();
 export const TokenSchema = z.string().min(16).max(256);
 
 export type Identity = z.infer<typeof IdentitySchema>;
-export type ThreadName = z.infer<typeof ThreadNameSchema>;
+export type DocumentName = z.infer<typeof DocumentNameSchema>;
 export type ArtifactName = z.infer<typeof ArtifactNameSchema>;
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 export type Cursor = z.infer<typeof CursorSchema>;
 export type Token = z.infer<typeof TokenSchema>;
 
-// --- thread ---
+// --- document ---
 
-export const ThreadSchema = z.object({
-  name: ThreadNameSchema,
+export const DocumentSchema = z.object({
+  name: DocumentNameSchema,
   createdBy: IdentitySchema,
   createdAt: z.string().datetime(),
 });
-export type Thread = z.infer<typeof ThreadSchema>;
+export type Document = z.infer<typeof DocumentSchema>;
 
 // --- party (TCP auth subject) ---
 
@@ -58,7 +58,7 @@ export type Invite = z.infer<typeof InviteSchema>;
 // --- artifact version (status-discriminated) ---
 
 const artifactBaseShape = {
-  threadName: ThreadNameSchema,
+  documentName: DocumentNameSchema,
   name: ArtifactNameSchema,
   version: z.number().int().positive(),
   kind: ArtifactKindSchema,
@@ -109,11 +109,11 @@ export const ArtifactSummarySchema = z.object({
 });
 export type ArtifactSummary = z.infer<typeof ArtifactSummarySchema>;
 
-// --- events (kind-discriminated, ordered by id within a thread) ---
+// --- events (kind-discriminated, ordered by id within a document) ---
 
 const eventBaseShape = {
   id: CursorSchema,
-  threadName: ThreadNameSchema,
+  documentName: DocumentNameSchema,
   createdAt: z.string().datetime(),
 };
 
@@ -150,9 +150,9 @@ export const ArtifactRejectedEventSchema = z.object({
   reason: z.string(),
 });
 
-export const ThreadCreatedEventSchema = z.object({
+export const DocumentCreatedEventSchema = z.object({
   ...eventBaseShape,
-  kind: z.literal('thread_created'),
+  kind: z.literal('document_created'),
   by: IdentitySchema,
 });
 
@@ -161,19 +161,19 @@ export const EventSchema = z.discriminatedUnion('kind', [
   ArtifactProposedEventSchema,
   ArtifactAcceptedEventSchema,
   ArtifactRejectedEventSchema,
-  ThreadCreatedEventSchema,
+  DocumentCreatedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
 export type MessageEvent = z.infer<typeof MessageEventSchema>;
 export type ArtifactProposedEvent = z.infer<typeof ArtifactProposedEventSchema>;
 export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
 export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
-export type ThreadCreatedEvent = z.infer<typeof ThreadCreatedEventSchema>;
+export type DocumentCreatedEvent = z.infer<typeof DocumentCreatedEventSchema>;
 
 // --- inbox summary ---
 
 export const InboxEntrySchema = z.object({
-  threadName: ThreadNameSchema,
+  documentName: DocumentNameSchema,
   newCount: z.number().int().nonnegative(),
   lastEventAt: z.string().datetime(),
   lastFrom: IdentitySchema.nullable(),
@@ -184,10 +184,10 @@ export type InboxEntry = z.infer<typeof InboxEntrySchema>;
 
 // --- wire request bodies ---
 
-export const CreateThreadRequestSchema = z.object({
-  name: ThreadNameSchema,
+export const CreateDocumentRequestSchema = z.object({
+  name: DocumentNameSchema,
 });
-export type CreateThreadRequest = z.infer<typeof CreateThreadRequestSchema>;
+export type CreateDocumentRequest = z.infer<typeof CreateDocumentRequestSchema>;
 
 export const SendMessageRequestSchema = z.object({
   text: z.string().min(1),
@@ -240,7 +240,7 @@ export type WhoamiResponse = z.infer<typeof WhoamiResponseSchema>;
 
 export const InboxResponseSchema = z.object({
   identity: IdentitySchema,
-  threads: z.array(InboxEntrySchema),
+  documents: z.array(InboxEntrySchema),
 });
 export type InboxResponse = z.infer<typeof InboxResponseSchema>;
 

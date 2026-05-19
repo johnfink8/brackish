@@ -29,27 +29,27 @@ Before deciding what to do in a cross-component-contract session, run:
 brackish inbox
 ```
 
-If there are pending events on any thread, **read those first**. Other-you may have already proposed something or asked a question that should change your next step.
+If there are pending events on any document, **read those first**. Other-you may have already proposed something or asked a question that should change your next step.
 
 ## Workflow
 
-A negotiation always has a `<thread>` (name it after the contract surface: `users-api`, `orders-schema`, `auth-flow`). For a new contract:
+A negotiation always has a `<doc>` (name it after the contract surface: `users-api`, `orders-schema`, `auth-flow`). For a new contract:
 
-1. `brackish threads` — see existing threads. Reuse one if it fits.
-2. `brackish thread new <name>` — create a thread if needed.
-3. `brackish send <thread> "<text>"` — say what you need. Plain English is fine; this is the discussion channel.
-4. `brackish artifact propose <thread> <name> --kind <kind> --file path.yaml` — when you have a concrete spec to propose. Kind is a freeform label: `openapi`, `json-schema`, `ts-types`, `proto`, `text`.
-5. `brackish wait <thread> --timeout 60` — block until the other side responds (max 60s; tune to whatever feels reasonable). Re-call if you want to keep waiting.
+1. `brackish docs` — see existing documents. Reuse one if it fits.
+2. `brackish doc new <name>` — create a document if needed.
+3. `brackish send <doc> "<text>"` — say what you need. Plain English is fine; this is the discussion channel.
+4. `brackish artifact propose <doc> <name> --kind <kind> --file path.yaml` — when you have a concrete spec to propose. Kind is a freeform label: `openapi`, `json-schema`, `ts-types`, `proto`, `text`.
+5. `brackish wait <doc> --timeout 60` — block until the other side responds (max 60s; tune to whatever feels reasonable). Re-call if you want to keep waiting.
 
 To respond to other-you:
 
-- `brackish read <thread>` — see the conversation so far.
-- `brackish artifact get <thread> <name>` — fetch the currently-accepted content (e.g. into a file: `brackish artifact get <thread> users-api > users.yaml`). Use `--proposed` for the latest still-pending version.
-- `brackish artifact accept <thread> <name>` — lock in the latest proposal (you can't accept your own).
-- `brackish artifact reject <thread> <name> "<reason>"` — push back with a reason.
-- `brackish send <thread> "<text>"` — chat.
+- `brackish read <doc>` — see the conversation so far.
+- `brackish artifact get <doc> <name>` — fetch the currently-accepted content (e.g. into a file: `brackish artifact get <doc> users-api > users.yaml`). Use `--proposed` for the latest still-pending version.
+- `brackish artifact accept <doc> <name>` — lock in the latest proposal (you can't accept your own).
+- `brackish artifact reject <doc> <name> "<reason>"` — push back with a reason.
+- `brackish send <doc> "<text>"` — chat.
 
-Once an artifact is `accepted`, that's the contract. Generate your code from it; check it in if it's a file. The next time the other side changes it, you'll get a new `artifact_proposed` event for the same name on the same thread, with a bumped version.
+Once an artifact is `accepted`, that's the contract. Generate your code from it; check it in if it's a file. The next time the other side changes it, you'll get a new `artifact_proposed` event for the same name on the same document, with a bumped version.
 
 ## The hook
 
@@ -63,7 +63,7 @@ contracts                 2 new     2026-05-19T03:00:00Z  peer        looks good
 </system-reminder>
 ```
 
-That's not magic — it's the hook calling `brackish inbox --quiet-if-empty` and surfacing the result. When you see it, treat it as a real interruption: don't continue your current task until you've looked at what the other side said. Use `brackish read <thread>` to get the full context, then respond before resuming.
+That's not magic — it's the hook calling `brackish inbox --quiet-if-empty` and surfacing the result. When you see it, treat it as a real interruption: don't continue your current task until you've looked at what the other side said. Use `brackish read <doc>` to get the full context, then respond before resuming.
 
 If you don't see this block, either the hook isn't installed (suggest `brackish install` to the user when relevant) or there are no pending events.
 

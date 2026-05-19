@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { EventNotifier } from '../src/notifier.js';
 
 describe('EventNotifier', () => {
-  it('fires a registered resolver on notify for the same thread', () => {
+  it('fires a registered resolver on notify for the same document', () => {
     const n = new EventNotifier();
     let fired = false;
     n.register('t1', () => {
@@ -12,7 +12,7 @@ describe('EventNotifier', () => {
     expect(fired).toBe(true);
   });
 
-  it('does not fire a resolver for a different thread', () => {
+  it('does not fire a resolver for a different document', () => {
     const n = new EventNotifier();
     let fired = false;
     n.register('t1', () => {
@@ -22,7 +22,7 @@ describe('EventNotifier', () => {
     expect(fired).toBe(false);
   });
 
-  it('fires all resolvers registered for a thread', () => {
+  it('fires all resolvers registered for a document', () => {
     const n = new EventNotifier();
     let count = 0;
     n.register('t1', () => {
@@ -69,7 +69,7 @@ describe('EventNotifier', () => {
     expect(fired2).toBe(true);
   });
 
-  it('size() tracks total registrations across threads', () => {
+  it('size() tracks total registrations across documents', () => {
     const n = new EventNotifier();
     expect(n.size()).toBe(0);
     const u1 = n.register('t1', () => {});
@@ -96,7 +96,7 @@ describe('EventNotifier', () => {
     expect(fired2).toBe(true);
   });
 
-  it('notify is a no-op when no resolvers are registered for the thread', () => {
+  it('notify is a no-op when no resolvers are registered for the document', () => {
     const n = new EventNotifier();
     expect(() => n.notify('never-seen')).not.toThrow();
   });

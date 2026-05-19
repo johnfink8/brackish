@@ -15,41 +15,41 @@ describe('SqliteStore', () => {
     await store.close();
   });
 
-  describe('threads', () => {
+  describe('documents', () => {
     it('create + get round-trips', async () => {
-      const t = await store.createThread('contracts', 'host');
+      const t = await store.createDocument('contracts', 'host');
       expect(t.name).toBe('contracts');
       expect(t.createdBy).toBe('host');
-      const fetched = await store.getThread('contracts');
+      const fetched = await store.getDocument('contracts');
       expect(fetched).toEqual(t);
     });
 
-    it('rejects duplicate thread names', async () => {
-      await store.createThread('contracts', 'host');
-      await expect(store.createThread('contracts', 'host')).rejects.toMatchObject({
-        code: 'thread_exists',
+    it('rejects duplicate document names', async () => {
+      await store.createDocument('contracts', 'host');
+      await expect(store.createDocument('contracts', 'host')).rejects.toMatchObject({
+        code: 'document_exists',
       });
     });
 
-    it('emits a thread_created event', async () => {
-      await store.createThread('contracts', 'host');
+    it('emits a document_created event', async () => {
+      await store.createDocument('contracts', 'host');
       const events = await store.listEvents('contracts', 0, 100);
       expect(events).toHaveLength(1);
-      expect(events[0]?.kind).toBe('thread_created');
+      expect(events[0]?.kind).toBe('document_created');
     });
 
-    it('listThreads returns in creation order', async () => {
-      await store.createThread('a', 'host');
+    it('listDocuments returns in creation order', async () => {
+      await store.createDocument('a', 'host');
       await new Promise((r) => setTimeout(r, 5)); // ensure distinct timestamps
-      await store.createThread('b', 'host');
-      const list = await store.listThreads();
+      await store.createDocument('b', 'host');
+      const list = await store.listDocuments();
       expect(list.map((t) => t.name)).toEqual(['a', 'b']);
     });
   });
 
   describe('messages and events', () => {
     beforeEach(async () => {
-      await store.createThread('t', 'host');
+      await store.createDocument('t', 'host');
     });
 
     it('appendMessage returns a typed event and notifier fires', async () => {
@@ -84,23 +84,23 @@ describe('SqliteStore', () => {
     });
 
     it('latestCursor reflects highest event id', async () => {
-      expect(await store.latestCursor('t')).toBeGreaterThan(0); // thread_created event
+      expect(await store.latestCursor('t')).toBeGreaterThan(0); // document_created event
       const before = await store.latestCursor('t');
       const m = await store.appendMessage('t', 'host', 'hi');
       expect(await store.latestCursor('t')).toBe(m.id);
       expect(m.id).toBeGreaterThan(before);
     });
 
-    it('appendMessage rejects unknown threads', async () => {
+    it('appendMessage rejects unknown documents', async () => {
       await expect(store.appendMessage('nope', 'host', 'x')).rejects.toMatchObject({
-        code: 'thread_not_found',
+        code: 'document_not_found',
       });
     });
   });
 
   describe('artifact lifecycle', () => {
     beforeEach(async () => {
-      await store.createThread('t', 'host');
+      await store.createDocument('t', 'host');
     });
 
     it('proposeArtifact creates v1 and emits artifact_proposed', async () => {
@@ -262,7 +262,7 @@ describe('SqliteStore', () => {
 
   describe('cursors', () => {
     beforeEach(async () => {
-      await store.createThread('t', 'host');
+      await store.createDocument('t', 'host');
     });
 
     it('getLastSeenCursor defaults to 0', async () => {
@@ -278,8 +278,8 @@ describe('SqliteStore', () => {
       expect(await store.getLastSeenCursor('alice', 't')).toBe(25);
     });
 
-    it('cursors are per (identity, thread)', async () => {
-      await store.createThread('u', 'host');
+    it('cursors are per (identity, document)', async () => {
+      await store.createDocument('u', 'host');
       await store.advanceCursor('alice', 't', 10);
       expect(await store.getLastSeenCursor('alice', 't')).toBe(10);
       expect(await store.getLastSeenCursor('alice', 'u')).toBe(0);
@@ -288,9 +288,9 @@ describe('SqliteStore', () => {
   });
 
   describe('inbox summary', () => {
-    it('lists only threads with events newer than identity cursor', async () => {
-      await store.createThread('a', 'host');
-      await store.createThread('b', 'host');
+    it('lists only documents with events newer than identity cursor', async () => {
+      await store.createDocument('a', 'host');
+      await store.createDocument('b', 'host');
       await store.appendMessage('a', 'host', 'first in a');
       await store.appendMessage('b', 'host', 'first in b');
       // alice has seen up to a's first event
@@ -300,28 +300,28 @@ describe('SqliteStore', () => {
       await store.advanceCursor('alice', 'a', lastA.id);
 
       const inbox = await store.inboxSummary('alice');
-      const names = inbox.map((e) => e.threadName);
+      const names = inbox.map((e) => e.documentName);
       expect(names).toContain('b');
       expect(names).not.toContain('a');
     });
 
     it('preview reflects the last event content', async () => {
-      await store.createThread('a', 'host');
+      await store.createDocument('a', 'host');
       await store.appendMessage('a', 'peer', 'hello there from peer');
       const inbox = await store.inboxSummary('alice');
-      const a = inbox.find((e) => e.threadName === 'a');
+      const a = inbox.find((e) => e.documentName === 'a');
       expect(a?.preview).toContain('hello');
       expect(a?.lastFrom).toBe('peer');
       expect(a?.lastKind).toBe('message');
     });
 
     it('newCount reflects events past the identity cursor', async () => {
-      await store.createThread('a', 'host');
+      await store.createDocument('a', 'host');
       await store.appendMessage('a', 'host', 'one');
       await store.appendMessage('a', 'host', 'two');
       await store.appendMessage('a', 'host', 'three');
       const inbox = await store.inboxSummary('alice');
-      // thread_created + 3 messages = 4 events, all past cursor 0
+      // document_created + 3 messages = 4 events, all past cursor 0
       expect(inbox[0]?.newCount).toBe(4);
     });
   });

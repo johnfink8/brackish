@@ -1,6 +1,6 @@
 // better-sqlite3 implementation of the Store interface.
 //
-// Schema philosophy: events are an append-only log; threads + artifact_versions are projections.
+// Schema philosophy: events are an append-only log; documents + artifact_versions are projections.
 // One writer (single-process Node); WAL for concurrent reads. better-sqlite3 is sync — methods
 // return Promises only because the Store interface is async to keep open a path to Postgres later.
 
@@ -12,20 +12,20 @@ import {
   type ArtifactSummary,
   type ArtifactVersion,
   type Cursor,
+  type Document,
+  type DocumentName,
   type Event,
   EventSchema,
   type Identity,
   type InboxEntry,
   type Invite,
   type Party,
-  type Thread,
-  type ThreadName,
 } from '../models.js';
 import type { EventNotifier } from '../notifier.js';
 import type { Store } from './index.js';
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS threads (
+CREATE TABLE IF NOT EXISTS documents (
   name        TEXT PRIMARY KEY,
   created_by  TEXT NOT NULL,
   created_at  TEXT NOT NULL
@@ -33,15 +33,15 @@ CREATE TABLE IF NOT EXISTS threads (
 
 CREATE TABLE IF NOT EXISTS events (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  thread_name  TEXT NOT NULL REFERENCES threads(name) ON DELETE CASCADE,
+  document_name  TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
   kind         TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   data         TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS events_thread_id_idx ON events(thread_name, id);
+CREATE INDEX IF NOT EXISTS events_document_id_idx ON events(document_name, id);
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
-  thread_name       TEXT NOT NULL REFERENCES threads(name) ON DELETE CASCADE,
+  document_name       TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
   name              TEXT NOT NULL,
   version           INTEGER NOT NULL,
   kind              TEXT NOT NULL,
@@ -54,10 +54,10 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   rejected_by       TEXT,
   rejected_at       TEXT,
   rejection_reason  TEXT,
-  PRIMARY KEY (thread_name, name, version)
+  PRIMARY KEY (document_name, name, version)
 );
 CREATE INDEX IF NOT EXISTS artifact_versions_lookup_idx
-  ON artifact_versions(thread_name, name, status, version);
+  ON artifact_versions(document_name, name, status, version);
 
 CREATE TABLE IF NOT EXISTS parties (
   identity      TEXT PRIMARY KEY,
@@ -82,22 +82,22 @@ CREATE TABLE IF NOT EXISTS invites (
 
 CREATE TABLE IF NOT EXISTS cursors (
   identity     TEXT NOT NULL,
-  thread_name  TEXT NOT NULL REFERENCES threads(name) ON DELETE CASCADE,
+  document_name  TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
   last_seen    INTEGER NOT NULL,
-  PRIMARY KEY (identity, thread_name)
+  PRIMARY KEY (identity, document_name)
 );
 `;
 
 type EventRow = {
   id: number;
-  thread_name: string;
+  document_name: string;
   kind: string;
   created_at: string;
   data: string;
 };
 
 type ArtifactRow = {
-  thread_name: string;
+  document_name: string;
   name: string;
   version: number;
   kind: string;
@@ -112,7 +112,7 @@ type ArtifactRow = {
   rejection_reason: string | null;
 };
 
-type ThreadRow = { name: string; created_by: string; created_at: string };
+type DocumentRow = { name: string; created_by: string; created_at: string };
 type PartyRow = { identity: string; created_at: string; last_seen_at: string | null };
 type InviteRow = {
   token: string;
@@ -140,14 +140,14 @@ export class SqliteStore implements Store {
 
   // --- helpers ---
 
-  private rowToThread(row: ThreadRow): Thread {
+  private rowToDocument(row: DocumentRow): Document {
     return { name: row.name, createdBy: row.created_by, createdAt: row.created_at };
   }
 
   private rowToEvent(row: EventRow): Event {
     return EventSchema.parse({
       id: row.id,
-      threadName: row.thread_name,
+      documentName: row.document_name,
       createdAt: row.created_at,
       kind: row.kind,
       ...(JSON.parse(row.data) as Record<string, unknown>),
@@ -156,7 +156,7 @@ export class SqliteStore implements Store {
 
   private rowToArtifactVersion(row: ArtifactRow): ArtifactVersion {
     const base = {
-      threadName: row.thread_name,
+      documentName: row.document_name,
       name: row.name,
       version: row.version,
       kind: row.kind,
@@ -191,113 +191,117 @@ export class SqliteStore implements Store {
   }
 
   /** Insert an event row, return the materialized Event, and notify subscribers. */
-  private insertEvent(threadName: ThreadName, kind: string, data: object): Event {
+  private insertEvent(documentName: DocumentName, kind: string, data: object): Event {
     const createdAt = now();
     const result = this.db
-      .prepare('INSERT INTO events (thread_name, kind, created_at, data) VALUES (?, ?, ?, ?)')
-      .run(threadName, kind, createdAt, JSON.stringify(data));
+      .prepare('INSERT INTO events (document_name, kind, created_at, data) VALUES (?, ?, ?, ?)')
+      .run(documentName, kind, createdAt, JSON.stringify(data));
     const id = Number(result.lastInsertRowid);
     const event = this.rowToEvent({
       id,
-      thread_name: threadName,
+      document_name: documentName,
       kind,
       created_at: createdAt,
       data: JSON.stringify(data),
     });
-    this.notifier.notify(threadName);
+    this.notifier.notify(documentName);
     return event;
   }
 
-  // --- threads ---
+  // --- documents ---
 
-  async createThread(name: ThreadName, by: Identity): Promise<Thread> {
+  async createDocument(name: DocumentName, by: Identity): Promise<Document> {
     const existing = this.db
-      .prepare<[string], ThreadRow>('SELECT * FROM threads WHERE name = ?')
+      .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
       .get(name);
     if (existing) {
-      throw new StoreError('thread_exists', `thread "${name}" already exists`);
+      throw new StoreError('document_exists', `document "${name}" already exists`);
     }
     const tx = this.db.transaction(() => {
       this.db
-        .prepare('INSERT INTO threads (name, created_by, created_at) VALUES (?, ?, ?)')
+        .prepare('INSERT INTO documents (name, created_by, created_at) VALUES (?, ?, ?)')
         .run(name, by, now());
-      this.insertEvent(name, 'thread_created', { by });
+      this.insertEvent(name, 'document_created', { by });
     });
     tx();
     const row = this.db
-      .prepare<[string], ThreadRow>('SELECT * FROM threads WHERE name = ?')
+      .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
       .get(name);
-    if (!row) throw new Error('createThread: row missing after insert');
-    return this.rowToThread(row);
+    if (!row) throw new Error('createDocument: row missing after insert');
+    return this.rowToDocument(row);
   }
 
-  async getThread(name: ThreadName): Promise<Thread | null> {
+  async getDocument(name: DocumentName): Promise<Document | null> {
     const row = this.db
-      .prepare<[string], ThreadRow>('SELECT * FROM threads WHERE name = ?')
+      .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
       .get(name);
-    return row ? this.rowToThread(row) : null;
+    return row ? this.rowToDocument(row) : null;
   }
 
-  async listThreads(): Promise<Thread[]> {
-    const rows = this.db.prepare<[], ThreadRow>('SELECT * FROM threads ORDER BY created_at').all();
-    return rows.map((r) => this.rowToThread(r));
+  async listDocuments(): Promise<Document[]> {
+    const rows = this.db
+      .prepare<[], DocumentRow>('SELECT * FROM documents ORDER BY created_at')
+      .all();
+    return rows.map((r) => this.rowToDocument(r));
   }
 
   // --- events ---
 
-  async appendMessage(threadName: ThreadName, from: Identity, text: string): Promise<Event> {
-    const thread = await this.getThread(threadName);
-    if (!thread) throw new StoreError('thread_not_found', `thread "${threadName}" not found`);
-    return this.insertEvent(threadName, 'message', { from, text });
+  async appendMessage(documentName: DocumentName, from: Identity, text: string): Promise<Event> {
+    const document = await this.getDocument(documentName);
+    if (!document)
+      throw new StoreError('document_not_found', `document "${documentName}" not found`);
+    return this.insertEvent(documentName, 'message', { from, text });
   }
 
-  async listEvents(threadName: ThreadName, since: Cursor, limit: number): Promise<Event[]> {
+  async listEvents(documentName: DocumentName, since: Cursor, limit: number): Promise<Event[]> {
     const rows = this.db
       .prepare<[string, number, number], EventRow>(
-        'SELECT * FROM events WHERE thread_name = ? AND id > ? ORDER BY id LIMIT ?',
+        'SELECT * FROM events WHERE document_name = ? AND id > ? ORDER BY id LIMIT ?',
       )
-      .all(threadName, since, limit);
+      .all(documentName, since, limit);
     return rows.map((r) => this.rowToEvent(r));
   }
 
-  async latestCursor(threadName: ThreadName): Promise<Cursor> {
+  async latestCursor(documentName: DocumentName): Promise<Cursor> {
     const row = this.db
       .prepare<[string], { max_id: number | null }>(
-        'SELECT COALESCE(MAX(id), 0) AS max_id FROM events WHERE thread_name = ?',
+        'SELECT COALESCE(MAX(id), 0) AS max_id FROM events WHERE document_name = ?',
       )
-      .get(threadName);
+      .get(documentName);
     return row?.max_id ?? 0;
   }
 
   // --- artifacts ---
 
   async proposeArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     kind: ArtifactKind,
     content: string,
     by: Identity,
   ): Promise<ArtifactVersion> {
-    const thread = await this.getThread(threadName);
-    if (!thread) throw new StoreError('thread_not_found', `thread "${threadName}" not found`);
+    const document = await this.getDocument(documentName);
+    if (!document)
+      throw new StoreError('document_not_found', `document "${documentName}" not found`);
 
     let row: ArtifactRow | undefined;
     const tx = this.db.transaction(() => {
       const maxRow = this.db
         .prepare<[string, string], { max_v: number | null }>(
-          'SELECT MAX(version) AS max_v FROM artifact_versions WHERE thread_name = ? AND name = ?',
+          'SELECT MAX(version) AS max_v FROM artifact_versions WHERE document_name = ? AND name = ?',
         )
-        .get(threadName, name);
+        .get(documentName, name);
       const version = (maxRow?.max_v ?? 0) + 1;
       const proposedAt = now();
       this.db
         .prepare(
           `INSERT INTO artifact_versions
-             (thread_name, name, version, kind, content, proposed_by, proposed_at, status)
+             (document_name, name, version, kind, content, proposed_by, proposed_at, status)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed')`,
         )
-        .run(threadName, name, version, kind, content, by, proposedAt);
-      this.insertEvent(threadName, 'artifact_proposed', {
+        .run(documentName, name, version, kind, content, by, proposedAt);
+      this.insertEvent(documentName, 'artifact_proposed', {
         from: by,
         artifactName: name,
         artifactKind: kind,
@@ -305,9 +309,9 @@ export class SqliteStore implements Store {
       });
       row = this.db
         .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
         )
-        .get(threadName, name, version);
+        .get(documentName, name, version);
     });
     tx();
     if (!row) throw new Error('proposeArtifact: row missing after insert');
@@ -315,7 +319,7 @@ export class SqliteStore implements Store {
   }
 
   async acceptArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
     by: Identity,
@@ -324,9 +328,9 @@ export class SqliteStore implements Store {
     const tx = this.db.transaction(() => {
       const existing = this.db
         .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
         )
-        .get(threadName, name, version);
+        .get(documentName, name, version);
       if (!existing) {
         throw new StoreError('artifact_not_found', `artifact ${name}@${version} not found`);
       }
@@ -347,19 +351,19 @@ export class SqliteStore implements Store {
         .prepare(
           `UPDATE artifact_versions
              SET status = 'accepted', accepted_by = ?, accepted_at = ?
-             WHERE thread_name = ? AND name = ? AND version = ?`,
+             WHERE document_name = ? AND name = ? AND version = ?`,
         )
-        .run(by, acceptedAt, threadName, name, version);
-      this.insertEvent(threadName, 'artifact_accepted', {
+        .run(by, acceptedAt, documentName, name, version);
+      this.insertEvent(documentName, 'artifact_accepted', {
         from: by,
         artifactName: name,
         version,
       });
       row = this.db
         .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
         )
-        .get(threadName, name, version);
+        .get(documentName, name, version);
     });
     tx();
     if (!row) throw new Error('acceptArtifact: row missing after update');
@@ -367,7 +371,7 @@ export class SqliteStore implements Store {
   }
 
   async rejectArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
     reason: string,
@@ -377,9 +381,9 @@ export class SqliteStore implements Store {
     const tx = this.db.transaction(() => {
       const existing = this.db
         .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
         )
-        .get(threadName, name, version);
+        .get(documentName, name, version);
       if (!existing) {
         throw new StoreError('artifact_not_found', `artifact ${name}@${version} not found`);
       }
@@ -400,10 +404,10 @@ export class SqliteStore implements Store {
         .prepare(
           `UPDATE artifact_versions
              SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_reason = ?
-             WHERE thread_name = ? AND name = ? AND version = ?`,
+             WHERE document_name = ? AND name = ? AND version = ?`,
         )
-        .run(by, rejectedAt, reason, threadName, name, version);
-      this.insertEvent(threadName, 'artifact_rejected', {
+        .run(by, rejectedAt, reason, documentName, name, version);
+      this.insertEvent(documentName, 'artifact_rejected', {
         from: by,
         artifactName: name,
         version,
@@ -411,9 +415,9 @@ export class SqliteStore implements Store {
       });
       row = this.db
         .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
         )
-        .get(threadName, name, version);
+        .get(documentName, name, version);
     });
     tx();
     if (!row) throw new Error('rejectArtifact: row missing after update');
@@ -421,52 +425,52 @@ export class SqliteStore implements Store {
   }
 
   async getArtifactCurrent(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
   ): Promise<ArtifactVersion | null> {
     const row = this.db
       .prepare<[string, string], ArtifactRow>(
         `SELECT * FROM artifact_versions
-         WHERE thread_name = ? AND name = ? AND status = 'accepted'
+         WHERE document_name = ? AND name = ? AND status = 'accepted'
          ORDER BY version DESC LIMIT 1`,
       )
-      .get(threadName, name);
+      .get(documentName, name);
     return row ? this.rowToArtifactVersion(row) : null;
   }
 
   async getArtifactProposed(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
   ): Promise<ArtifactVersion | null> {
     const row = this.db
       .prepare<[string, string], ArtifactRow>(
         `SELECT * FROM artifact_versions
-         WHERE thread_name = ? AND name = ? AND status = 'proposed'
+         WHERE document_name = ? AND name = ? AND status = 'proposed'
          ORDER BY version DESC LIMIT 1`,
       )
-      .get(threadName, name);
+      .get(documentName, name);
     return row ? this.rowToArtifactVersion(row) : null;
   }
 
   async getArtifactByVersion(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
   ): Promise<ArtifactVersion | null> {
     const row = this.db
       .prepare<[string, string, number], ArtifactRow>(
-        'SELECT * FROM artifact_versions WHERE thread_name = ? AND name = ? AND version = ?',
+        'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
       )
-      .get(threadName, name, version);
+      .get(documentName, name, version);
     return row ? this.rowToArtifactVersion(row) : null;
   }
 
-  async listArtifacts(threadName: ThreadName): Promise<ArtifactSummary[]> {
+  async listArtifacts(documentName: DocumentName): Promise<ArtifactSummary[]> {
     const rows = this.db
       .prepare<[string], ArtifactRow>(
-        'SELECT * FROM artifact_versions WHERE thread_name = ? ORDER BY name, version',
+        'SELECT * FROM artifact_versions WHERE document_name = ? ORDER BY name, version',
       )
-      .all(threadName);
+      .all(documentName);
     const byName = new Map<string, ArtifactRow[]>();
     for (const r of rows) {
       const list = byName.get(r.name);
@@ -584,48 +588,55 @@ export class SqliteStore implements Store {
 
   // --- cursors ---
 
-  async getLastSeenCursor(identity: Identity, threadName: ThreadName): Promise<Cursor> {
+  async getLastSeenCursor(identity: Identity, documentName: DocumentName): Promise<Cursor> {
     const row = this.db
       .prepare<[string, string], { last_seen: number }>(
-        'SELECT last_seen FROM cursors WHERE identity = ? AND thread_name = ?',
+        'SELECT last_seen FROM cursors WHERE identity = ? AND document_name = ?',
       )
-      .get(identity, threadName);
+      .get(identity, documentName);
     return row?.last_seen ?? 0;
   }
 
-  async advanceCursor(identity: Identity, threadName: ThreadName, cursor: Cursor): Promise<void> {
+  async advanceCursor(
+    identity: Identity,
+    documentName: DocumentName,
+    cursor: Cursor,
+  ): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO cursors (identity, thread_name, last_seen)
+        `INSERT INTO cursors (identity, document_name, last_seen)
          VALUES (?, ?, ?)
-         ON CONFLICT(identity, thread_name) DO UPDATE
+         ON CONFLICT(identity, document_name) DO UPDATE
            SET last_seen = excluded.last_seen
            WHERE excluded.last_seen > cursors.last_seen`,
       )
-      .run(identity, threadName, cursor);
+      .run(identity, documentName, cursor);
   }
 
   // --- inbox ---
 
   async inboxSummary(identity: Identity): Promise<InboxEntry[]> {
-    // Threads with at least one event newer than the identity's cursor.
+    // Documents with at least one event newer than the identity's cursor.
     const rows = this.db
-      .prepare<{ identity: string }, { thread_name: string; new_count: number; last_seen: number }>(
-        `SELECT t.name AS thread_name,
+      .prepare<
+        { identity: string },
+        { document_name: string; new_count: number; last_seen: number }
+      >(
+        `SELECT t.name AS document_name,
                 (SELECT COUNT(*) FROM events e
-                   WHERE e.thread_name = t.name
+                   WHERE e.document_name = t.name
                    AND e.id > COALESCE(
                      (SELECT last_seen FROM cursors
-                        WHERE identity = @identity AND thread_name = t.name),
+                        WHERE identity = @identity AND document_name = t.name),
                      0
                    )
                 ) AS new_count,
                 COALESCE(
                   (SELECT last_seen FROM cursors
-                     WHERE identity = @identity AND thread_name = t.name),
+                     WHERE identity = @identity AND document_name = t.name),
                   0
                 ) AS last_seen
-         FROM threads t`,
+         FROM documents t`,
       )
       .all({ identity });
     const entries: InboxEntry[] = [];
@@ -634,14 +645,14 @@ export class SqliteStore implements Store {
       const lastRow = this.db
         .prepare<[string], EventRow>(
           `SELECT * FROM events
-           WHERE thread_name = ?
+           WHERE document_name = ?
            ORDER BY id DESC LIMIT 1`,
         )
-        .get(r.thread_name);
+        .get(r.document_name);
       if (!lastRow) continue;
       const lastEvent = this.rowToEvent(lastRow);
       entries.push({
-        threadName: r.thread_name,
+        documentName: r.document_name,
         newCount: r.new_count,
         lastEventAt: lastEvent.createdAt,
         lastFrom: 'from' in lastEvent ? lastEvent.from : null,
@@ -669,8 +680,8 @@ function previewOf(e: Event): string {
       return `accepted ${e.artifactName}@${e.version}`;
     case 'artifact_rejected':
       return `rejected ${e.artifactName}@${e.version}: ${truncate(e.reason, 60)}`;
-    case 'thread_created':
-      return `thread created by ${e.by}`;
+    case 'document_created':
+      return `document created by ${e.by}`;
   }
 }
 

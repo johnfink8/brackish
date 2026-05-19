@@ -10,17 +10,17 @@ import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from './config.js';
 import {
   ArtifactNameSchema,
+  CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
-  CreateThreadRequestSchema,
   type Cursor,
+  type DocumentName,
+  DocumentNameSchema,
   type Event,
   IdentitySchema,
   ProposeArtifactRequestSchema,
   RedeemInviteRequestSchema,
   RejectArtifactRequestSchema,
   SendMessageRequestSchema,
-  type ThreadName,
-  ThreadNameSchema,
 } from './models.js';
 import { EventNotifier } from './notifier.js';
 import type { Store } from './store/index.js';
@@ -99,37 +99,38 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ ok: true });
   });
 
-  // --- threads ---
+  // --- documents ---
 
-  app.get('/threads', async (c) => {
-    const threads = await store.listThreads();
-    return c.json({ threads });
+  app.get('/documents', async (c) => {
+    const documents = await store.listDocuments();
+    return c.json({ documents });
   });
 
-  app.post('/threads', async (c) => {
-    const body = CreateThreadRequestSchema.parse(await c.req.json());
-    const thread = await store.createThread(body.name, c.get('identity'));
-    return c.json(thread, 201);
+  app.post('/documents', async (c) => {
+    const body = CreateDocumentRequestSchema.parse(await c.req.json());
+    const document = await store.createDocument(body.name, c.get('identity'));
+    return c.json(document, 201);
   });
 
-  app.get('/threads/:name', async (c) => {
-    const name = ThreadNameSchema.parse(c.req.param('name'));
-    const t = await store.getThread(name);
-    if (!t) return c.json({ error: `thread "${name}" not found`, code: 'thread_not_found' }, 404);
+  app.get('/documents/:name', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
+    const t = await store.getDocument(name);
+    if (!t)
+      return c.json({ error: `document "${name}" not found`, code: 'document_not_found' }, 404);
     return c.json(t);
   });
 
   // --- messages and events ---
 
-  app.post('/threads/:name/messages', async (c) => {
-    const name = ThreadNameSchema.parse(c.req.param('name'));
+  app.post('/documents/:name/messages', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
     const body = SendMessageRequestSchema.parse(await c.req.json());
     const event = await store.appendMessage(name, c.get('identity'), body.text);
     return c.json({ event }, 201);
   });
 
-  app.get('/threads/:name/events', async (c) => {
-    const name = ThreadNameSchema.parse(c.req.param('name'));
+  app.get('/documents/:name/events', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
     const identity = c.get('identity');
     const since = parseSince(c.req.query('since'));
     const limit = parseLimit(c.req.query('limit'));
@@ -138,8 +139,8 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ events, cursor: lastCursor });
   });
 
-  app.get('/threads/:name/wait', async (c) => {
-    const name = ThreadNameSchema.parse(c.req.param('name'));
+  app.get('/documents/:name/wait', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
     const identity = c.get('identity');
     const sinceParam = parseSince(c.req.query('since'));
     const since =
@@ -153,17 +154,17 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.get('/inbox', async (c) => {
     const identity = c.get('identity');
-    const threads = await store.inboxSummary(identity);
-    return c.json({ identity, threads });
+    const documents = await store.inboxSummary(identity);
+    return c.json({ identity, documents });
   });
 
   // --- artifacts ---
 
-  app.post('/threads/:name/artifacts', async (c) => {
-    const threadName = ThreadNameSchema.parse(c.req.param('name'));
+  app.post('/documents/:name/artifacts', async (c) => {
+    const documentName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeArtifactRequestSchema.parse(await c.req.json());
     const version = await store.proposeArtifact(
-      threadName,
+      documentName,
       body.name,
       body.kind,
       body.content,
@@ -172,14 +173,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(version, 201);
   });
 
-  app.get('/threads/:name/artifacts', async (c) => {
-    const threadName = ThreadNameSchema.parse(c.req.param('name'));
-    const artifacts = await store.listArtifacts(threadName);
+  app.get('/documents/:name/artifacts', async (c) => {
+    const documentName = DocumentNameSchema.parse(c.req.param('name'));
+    const artifacts = await store.listArtifacts(documentName);
     return c.json({ artifacts });
   });
 
-  app.get('/threads/:name/artifacts/:aname', async (c) => {
-    const threadName = ThreadNameSchema.parse(c.req.param('name'));
+  app.get('/documents/:name/artifacts/:aname', async (c) => {
+    const documentName = DocumentNameSchema.parse(c.req.param('name'));
     const aname = ArtifactNameSchema.parse(c.req.param('aname'));
     const versionStr = c.req.query('version');
     const wantProposed = c.req.query('proposed') === '1' || c.req.query('proposed') === 'true';
@@ -189,7 +190,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       if (!Number.isFinite(v) || v < 1) {
         return c.json({ error: 'invalid version' }, 400);
       }
-      const found = await store.getArtifactByVersion(threadName, aname, v);
+      const found = await store.getArtifactByVersion(documentName, aname, v);
       if (!found) {
         return c.json(
           { error: `artifact ${aname}@${v} not found`, code: 'artifact_not_found' },
@@ -199,7 +200,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       return c.json(found);
     }
     if (wantProposed) {
-      const found = await store.getArtifactProposed(threadName, aname);
+      const found = await store.getArtifactProposed(documentName, aname);
       if (!found) {
         return c.json(
           { error: `no proposed version of ${aname}`, code: 'artifact_not_found' },
@@ -208,28 +209,28 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       }
       return c.json(found);
     }
-    const found = await store.getArtifactCurrent(threadName, aname);
+    const found = await store.getArtifactCurrent(documentName, aname);
     if (!found) {
       return c.json({ error: `no accepted version of ${aname}`, code: 'artifact_not_found' }, 404);
     }
     return c.json(found);
   });
 
-  app.post('/threads/:name/artifacts/:aname/accept', async (c) => {
-    const threadName = ThreadNameSchema.parse(c.req.param('name'));
+  app.post('/documents/:name/artifacts/:aname/accept', async (c) => {
+    const documentName = DocumentNameSchema.parse(c.req.param('name'));
     const aname = ArtifactNameSchema.parse(c.req.param('aname'));
-    const version = await resolveTargetVersion(store, threadName, aname, c.req.query('version'));
-    const accepted = await store.acceptArtifact(threadName, aname, version, c.get('identity'));
+    const version = await resolveTargetVersion(store, documentName, aname, c.req.query('version'));
+    const accepted = await store.acceptArtifact(documentName, aname, version, c.get('identity'));
     return c.json(accepted);
   });
 
-  app.post('/threads/:name/artifacts/:aname/reject', async (c) => {
-    const threadName = ThreadNameSchema.parse(c.req.param('name'));
+  app.post('/documents/:name/artifacts/:aname/reject', async (c) => {
+    const documentName = DocumentNameSchema.parse(c.req.param('name'));
     const aname = ArtifactNameSchema.parse(c.req.param('aname'));
     const body = RejectArtifactRequestSchema.parse(await c.req.json());
-    const version = await resolveTargetVersion(store, threadName, aname, c.req.query('version'));
+    const version = await resolveTargetVersion(store, documentName, aname, c.req.query('version'));
     const rejected = await store.rejectArtifact(
-      threadName,
+      documentName,
       aname,
       version,
       body.reason,
@@ -245,11 +246,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
 function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
   switch (code) {
-    case 'thread_not_found':
+    case 'document_not_found':
     case 'artifact_not_found':
     case 'invite_invalid':
       return 404;
-    case 'thread_exists':
+    case 'document_exists':
     case 'artifact_not_pending':
     case 'invite_redeemed':
     case 'invite_expired':
@@ -289,7 +290,7 @@ function clampTimeoutSeconds(raw: string | undefined): number {
 
 async function resolveTargetVersion(
   store: Store,
-  threadName: ThreadName,
+  documentName: DocumentName,
   artifactName: string,
   raw: string | undefined,
 ): Promise<number> {
@@ -298,7 +299,7 @@ async function resolveTargetVersion(
     if (!Number.isFinite(v) || v < 1) throw new HttpError(400, 'invalid version');
     return v;
   }
-  const proposed = await store.getArtifactProposed(threadName, artifactName);
+  const proposed = await store.getArtifactProposed(documentName, artifactName);
   if (!proposed) {
     throw new StoreError('artifact_not_found', `no proposed version of ${artifactName} to act on`);
   }
@@ -310,7 +311,7 @@ async function resolveTargetVersion(
 function waitForEvents(
   store: Store,
   notifier: EventNotifier,
-  threadName: ThreadName,
+  documentName: DocumentName,
   since: Cursor,
   timeoutMs: number,
 ): Promise<Event[]> {
@@ -328,12 +329,12 @@ function waitForEvents(
     };
 
     const drainAndMaybeSettle = (): void => {
-      void store.listEvents(threadName, since, EVENT_PAGE_MAX).then((events) => {
+      void store.listEvents(documentName, since, EVENT_PAGE_MAX).then((events) => {
         if (events.length > 0) settle(events);
       });
     };
 
-    unregister = notifier.register(threadName, drainAndMaybeSettle);
+    unregister = notifier.register(documentName, drainAndMaybeSettle);
     timer = setTimeout(() => settle([]), timeoutMs);
     drainAndMaybeSettle(); // race-guard for events that arrived before we registered
   });
@@ -342,14 +343,14 @@ function waitForEvents(
 async function advanceCursorForRead(
   store: Store,
   identity: string,
-  threadName: ThreadName,
+  documentName: DocumentName,
   events: Event[],
   fallback: Cursor,
 ): Promise<Cursor> {
   if (events.length === 0) return fallback;
   const last = events[events.length - 1];
   if (!last) return fallback;
-  await store.advanceCursor(identity, threadName, last.id);
+  await store.advanceCursor(identity, documentName, last.id);
   return last.id;
 }
 

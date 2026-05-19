@@ -22,11 +22,11 @@ brackish: pending negotiations for your identity. Read and respond before contin
 ${OUTPUT}
 
 Next steps:
-  brackish read <thread>            # see the full conversation
-  brackish artifact get <thread> <name>            # fetch latest accepted content
-  brackish artifact get <thread> <name> --proposed # fetch the in-flight proposal
-  brackish artifact accept|reject <thread> <name>
-  brackish send <thread> "<text>"   # chat
+  brackish read <doc>            # see the full conversation
+  brackish artifact get <doc> <name>            # fetch latest accepted content
+  brackish artifact get <doc> <name> --proposed # fetch the in-flight proposal
+  brackish artifact accept|reject <doc> <name>
+  brackish send <doc> "<text>"   # chat
 </system-reminder>
 EOF
 fi

@@ -34,11 +34,11 @@ import { IdentitySchema, TokenSchema } from './models.js';
 import {
   describeArtifactVersion,
   formatArtifactSummaries,
+  formatDocuments,
   formatEvents,
   formatEventsStream,
   formatInbox,
   formatParties,
-  formatThreads,
 } from './output.js';
 import { startServer } from './server.js';
 
@@ -49,7 +49,7 @@ export function buildProgram(): Command {
   program
     .name('brackish')
     .description(
-      'Claude-to-Claude contract negotiation: thread-scoped messages + propose/accept artifacts',
+      'Claude-to-Claude contract negotiation: document-scoped messages + propose/accept artifacts',
     )
     .version(CLI_VERSION);
 
@@ -228,58 +228,58 @@ export function buildProgram(): Command {
       }),
     );
 
-  // --- threads ---
+  // --- documents ---
 
   program
-    .command('threads')
-    .description('list threads')
+    .command('documents')
+    .description('list documents')
     .option('--json', 'output JSON')
     .action(async (opts: { json?: boolean }) =>
       withClient(async (client) => {
-        const threads = await client.listThreads();
-        if (opts.json) emitJson({ threads });
-        else emit(formatThreads(threads));
+        const documents = await client.listDocuments();
+        if (opts.json) emitJson({ documents });
+        else emit(formatDocuments(documents));
       }),
     );
 
-  const thread = program.command('thread').description('thread management');
-  thread
+  const document = program.command('doc').description('document management');
+  document
     .command('new <name>')
-    .description('create a new thread')
+    .description('create a new document')
     .option('--json', 'output JSON')
     .action(async (name: string, opts: { json?: boolean }) =>
       withClient(async (client) => {
-        const t = await client.createThread(name);
+        const t = await client.createDocument(name);
         if (opts.json) emitJson(t);
-        else emit(`created thread "${t.name}" by ${t.createdBy}`);
+        else emit(`created document "${t.name}" by ${t.createdBy}`);
       }),
     );
 
   // --- messages, events, wait, inbox ---
 
   program
-    .command('send <thread> [text]')
-    .description('post a message to <thread>. Use "-" to read body from stdin.')
-    .action(async (thread: string, text: string | undefined) =>
+    .command('send <doc> [text]')
+    .description('post a message to <doc>. Use "-" to read body from stdin.')
+    .action(async (document: string, text: string | undefined) =>
       withClient(async (client) => {
         const body = text === '-' ? await readStdin() : text;
         if (!body) errExit(2, 'send: provide message text or pass "-" to read stdin');
-        const event = await client.sendMessage(thread, body);
-        emit(`sent event #${event.id} to ${thread}`);
+        const event = await client.sendMessage(document, body);
+        emit(`sent event #${event.id} to ${document}`);
       }),
     );
 
   program
-    .command('read <thread>')
-    .description("list events in <thread> since the caller's cursor (advances the cursor)")
+    .command('read <doc>')
+    .description("list events in <doc> since the caller's cursor (advances the cursor)")
     .option('--since <n>', 'override cursor (exclusive lower bound)')
     .option('--limit <n>', 'max events to return', '200')
     .option('--json', 'output JSON')
-    .action(async (thread: string, opts: { since?: string; limit: string; json?: boolean }) =>
+    .action(async (document: string, opts: { since?: string; limit: string; json?: boolean }) =>
       withClient(async (client) => {
         const sinceN = opts.since !== undefined ? Number.parseInt(opts.since, 10) : undefined;
         const limitN = Number.parseInt(opts.limit, 10);
-        const res = await client.listEvents(thread, {
+        const res = await client.listEvents(document, {
           ...(sinceN !== undefined ? { since: sinceN } : {}),
           limit: limitN,
         });
@@ -289,16 +289,16 @@ export function buildProgram(): Command {
     );
 
   program
-    .command('wait <thread>')
-    .description('long-poll <thread>: block until new events arrive or --timeout elapses')
+    .command('wait <doc>')
+    .description('long-poll <doc>: block until new events arrive or --timeout elapses')
     .option('--timeout <seconds>', 'max seconds to block (1..300)', '30')
     .option('--since <n>', 'override cursor (exclusive lower bound)')
     .option('--json', 'output JSON')
-    .action(async (thread: string, opts: { timeout: string; since?: string; json?: boolean }) =>
+    .action(async (document: string, opts: { timeout: string; since?: string; json?: boolean }) =>
       withClient(async (client) => {
         const timeoutSeconds = Number.parseFloat(opts.timeout);
         const sinceN = opts.since !== undefined ? Number.parseInt(opts.since, 10) : undefined;
-        const res = await client.wait(thread, {
+        const res = await client.wait(document, {
           timeoutSeconds,
           ...(sinceN !== undefined ? { since: sinceN } : {}),
         });
@@ -309,46 +309,46 @@ export function buildProgram(): Command {
 
   program
     .command('inbox')
-    .description('summary of all threads with new events for the current identity')
+    .description('summary of all documents with new events for the current identity')
     .option('--json', 'output JSON')
     .option('--quiet-if-empty', 'print nothing (and exit 0) if there are no new events anywhere')
     .action(async (opts: { json?: boolean; quietIfEmpty?: boolean }) =>
       withClient(async (client) => {
         const res = await client.inbox();
-        if (opts.quietIfEmpty && res.threads.length === 0) return;
+        if (opts.quietIfEmpty && res.documents.length === 0) return;
         if (opts.json) emitJson(res);
-        else emit(formatInbox(res.identity, res.threads));
+        else emit(formatInbox(res.identity, res.documents));
       }),
     );
 
   program
-    .command('watch [thread]')
-    .description('foreground live tail of events; ^C to stop. Omit <thread> to use --all.')
-    .option('--all', 'tail every thread (uses inbox + iterative wait)')
+    .command('watch [document]')
+    .description('foreground live tail of events; ^C to stop. Omit <doc> to use --all.')
+    .option('--all', 'tail every document (uses inbox + iterative wait)')
     .option('--timeout <seconds>', 'inner long-poll timeout per iteration', '60')
-    .action(async (thread: string | undefined, opts: { all?: boolean; timeout: string }) =>
+    .action(async (document: string | undefined, opts: { all?: boolean; timeout: string }) =>
       withClient(async (client) => {
         const timeoutSeconds = Number.parseFloat(opts.timeout);
-        if (thread && !opts.all) {
-          // single-thread tail
+        if (document && !opts.all) {
+          // single-document tail
           for (;;) {
-            const res = await client.wait(thread, { timeoutSeconds });
+            const res = await client.wait(document, { timeoutSeconds });
             if (res.events.length > 0) process.stdout.write(`${formatEventsStream(res.events)}\n`);
           }
         } else if (opts.all) {
-          // all-threads: poll inbox; for each thread with new events, drain via listEvents
+          // all-documents: poll inbox; for each document with new events, drain via listEvents
           for (;;) {
             const ib = await client.inbox();
-            for (const entry of ib.threads) {
-              const ev = await client.listEvents(entry.threadName);
+            for (const entry of ib.documents) {
+              const ev = await client.listEvents(entry.documentName);
               if (ev.events.length > 0) {
-                process.stdout.write(`[${entry.threadName}]\n${formatEventsStream(ev.events)}\n`);
+                process.stdout.write(`[${entry.documentName}]\n${formatEventsStream(ev.events)}\n`);
               }
             }
             await sleep(timeoutSeconds * 1000);
           }
         } else {
-          errExit(2, 'watch: pass a <thread> or --all');
+          errExit(2, 'watch: pass a <doc> or --all');
         }
       }),
     );
@@ -360,35 +360,39 @@ export function buildProgram(): Command {
     .description('contract artifact management (propose/accept/reject)');
 
   artifact
-    .command('list <thread>')
-    .description('list artifacts in <thread> with current + latest-proposed versions')
+    .command('list <doc>')
+    .description('list artifacts in <doc> with current + latest-proposed versions')
     .option('--json', 'output JSON')
-    .action(async (thread: string, opts: { json?: boolean }) =>
+    .action(async (document: string, opts: { json?: boolean }) =>
       withClient(async (client) => {
-        const artifacts = await client.listArtifacts(thread);
+        const artifacts = await client.listArtifacts(document);
         if (opts.json) emitJson({ artifacts });
         else emit(formatArtifactSummaries(artifacts));
       }),
     );
 
   artifact
-    .command('propose <thread> <name>')
+    .command('propose <doc> <name>')
     .description('propose a new version of <name>; --file or "-" supplies the content')
     .requiredOption('--kind <kind>', 'artifact kind (e.g. openapi, json-schema, ts-types, text)')
     .option('--file <path>', 'read content from file (use "-" for stdin)')
     .option('--json', 'output JSON')
     .action(
-      async (thread: string, name: string, opts: { kind: string; file?: string; json?: boolean }) =>
+      async (
+        document: string,
+        name: string,
+        opts: { kind: string; file?: string; json?: boolean },
+      ) =>
         withClient(async (client) => {
           const content = await readContent(opts.file);
-          const v = await client.proposeArtifact(thread, name, opts.kind, content);
+          const v = await client.proposeArtifact(document, name, opts.kind, content);
           if (opts.json) emitJson(v);
           else emit(`proposed ${describeArtifactVersion(v)}`);
         }),
     );
 
   artifact
-    .command('get <thread> <name>')
+    .command('get <doc> <name>')
     .description('print the artifact content (stdout); metadata to stderr. --meta to skip content.')
     .option('--version <n>', 'fetch a specific version')
     .option('--proposed', 'fetch the latest proposed version instead of the current accepted one')
@@ -396,14 +400,14 @@ export function buildProgram(): Command {
     .option('--json', 'output JSON (content is included as a string field)')
     .action(
       async (
-        thread: string,
+        document: string,
         name: string,
         opts: { version?: string; proposed?: boolean; meta?: boolean; json?: boolean },
       ) =>
         withClient(async (client) => {
           const versionN =
             opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-          const v = await client.getArtifact(thread, name, {
+          const v = await client.getArtifact(document, name, {
             ...(versionN !== undefined ? { version: versionN } : {}),
             ...(opts.proposed ? { proposed: true } : {}),
           });
@@ -420,27 +424,27 @@ export function buildProgram(): Command {
     );
 
   artifact
-    .command('accept <thread> <name>')
+    .command('accept <doc> <name>')
     .description('accept the latest proposed version (or --version N)')
     .option('--version <n>', 'accept a specific version')
     .option('--json', 'output JSON')
-    .action(async (thread: string, name: string, opts: { version?: string; json?: boolean }) =>
+    .action(async (document: string, name: string, opts: { version?: string; json?: boolean }) =>
       withClient(async (client) => {
         const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-        const v = await client.acceptArtifact(thread, name, versionN);
+        const v = await client.acceptArtifact(document, name, versionN);
         if (opts.json) emitJson(v);
         else emit(`accepted ${describeArtifactVersion(v)}`);
       }),
     );
 
   artifact
-    .command('reject <thread> <name> <reason>')
+    .command('reject <doc> <name> <reason>')
     .description('reject the latest proposed version (or --version N) with a reason')
     .option('--version <n>', 'reject a specific version')
     .option('--json', 'output JSON')
     .action(
       async (
-        thread: string,
+        document: string,
         name: string,
         reason: string,
         opts: { version?: string; json?: boolean },
@@ -448,7 +452,7 @@ export function buildProgram(): Command {
         withClient(async (client) => {
           const versionN =
             opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-          const v = await client.rejectArtifact(thread, name, reason, versionN);
+          const v = await client.rejectArtifact(document, name, reason, versionN);
           if (opts.json) emitJson(v);
           else emit(`rejected ${describeArtifactVersion(v)}`);
         }),

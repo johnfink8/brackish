@@ -5,10 +5,10 @@
 import type {
   ArtifactSummary,
   ArtifactVersion,
+  Document,
   Event,
   InboxEntry,
   Party,
-  Thread,
 } from './models.js';
 
 const trim = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
@@ -26,14 +26,14 @@ const eventPreview = (e: Event): string => {
       return `${e.artifactName}@${e.version}`;
     case 'artifact_rejected':
       return `${e.artifactName}@${e.version}: ${trim(e.reason, 60)}`;
-    case 'thread_created':
+    case 'document_created':
       return `created by ${e.by}`;
   }
 };
 
 const eventFrom = (e: Event): string => {
   if ('from' in e) return e.from;
-  if (e.kind === 'thread_created') return e.by;
+  if (e.kind === 'document_created') return e.by;
   return '-';
 };
 
@@ -56,9 +56,11 @@ export function formatEventsStream(events: Event[]): string {
     .join('\n');
 }
 
-export function formatThreads(threads: Thread[]): string {
-  if (threads.length === 0) return '(no threads)';
-  const lines = threads.map((t) => `${pad(t.name, 24)}  ${shortDate(t.createdAt)}  ${t.createdBy}`);
+export function formatDocuments(documents: Document[]): string {
+  if (documents.length === 0) return '(no documents)';
+  const lines = documents.map(
+    (t) => `${pad(t.name, 24)}  ${shortDate(t.createdAt)}  ${t.createdBy}`,
+  );
   return `${pad('NAME', 24)}  ${pad('CREATED', 21)}  BY\n${lines.join('\n')}`;
 }
 
@@ -66,9 +68,9 @@ export function formatInbox(identity: string, entries: InboxEntry[]): string {
   if (entries.length === 0) return `(inbox empty for ${identity})`;
   const lines = entries.map(
     (e) =>
-      `${pad(e.threadName, 24)}  ${pad(`${e.newCount} new`, 8)}  ${shortDate(e.lastEventAt)}  ${pad(e.lastFrom ?? '-', 10)}  ${trim(e.preview, 60)}`,
+      `${pad(e.documentName, 24)}  ${pad(`${e.newCount} new`, 8)}  ${shortDate(e.lastEventAt)}  ${pad(e.lastFrom ?? '-', 10)}  ${trim(e.preview, 60)}`,
   );
-  return `${entries.length} thread${entries.length === 1 ? '' : 's'} with new events for ${identity}:\n${lines.join('\n')}`;
+  return `${entries.length} document${entries.length === 1 ? '' : 's'} with new events for ${identity}:\n${lines.join('\n')}`;
 }
 
 export function formatArtifactSummaries(summaries: ArtifactSummary[]): string {

@@ -16,6 +16,9 @@ import {
   ArtifactVersionSchema,
   type ConnectResponse,
   ConnectResponseSchema,
+  type Document,
+  type DocumentName,
+  DocumentSchema,
   type EventListResponse,
   EventListResponseSchema,
   type Identity,
@@ -26,9 +29,6 @@ import {
   type PartiesResponse,
   PartiesResponseSchema,
   SendMessageResponseSchema,
-  type Thread,
-  type ThreadName,
-  ThreadSchema,
   type WhoamiResponse,
   WhoamiResponseSchema,
 } from './models.js';
@@ -98,28 +98,28 @@ export class BrackishClient {
     return this.fetchAndParse('/whoami', WhoamiResponseSchema);
   }
 
-  // --- threads ---
+  // --- documents ---
 
-  listThreads(): Promise<Thread[]> {
-    return this.fetchAndParseField('/threads', 'threads', ThreadSchema.array());
+  listDocuments(): Promise<Document[]> {
+    return this.fetchAndParseField('/documents', 'documents', DocumentSchema.array());
   }
 
-  createThread(name: ThreadName): Promise<Thread> {
-    return this.fetchAndParse('/threads', ThreadSchema, { method: 'POST', body: { name } });
+  createDocument(name: DocumentName): Promise<Document> {
+    return this.fetchAndParse('/documents', DocumentSchema, { method: 'POST', body: { name } });
   }
 
-  getThread(name: ThreadName): Promise<Thread> {
-    return this.fetchAndParse(`/threads/${encodeURIComponent(name)}`, ThreadSchema);
+  getDocument(name: DocumentName): Promise<Document> {
+    return this.fetchAndParse(`/documents/${encodeURIComponent(name)}`, DocumentSchema);
   }
 
   // --- messages, events, wait, inbox ---
 
   async sendMessage(
-    thread: ThreadName,
+    document: DocumentName,
     text: string,
   ): Promise<EventListResponse['events'][number]> {
     const parsed = await this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/messages`,
+      `/documents/${encodeURIComponent(document)}/messages`,
       SendMessageResponseSchema,
       { method: 'POST', body: { text } },
     );
@@ -127,22 +127,22 @@ export class BrackishClient {
   }
 
   listEvents(
-    thread: ThreadName,
+    document: DocumentName,
     opts: { since?: number; limit?: number } = {},
   ): Promise<EventListResponse> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/events`,
+      `/documents/${encodeURIComponent(document)}/events`,
       EventListResponseSchema,
       { query: { since: opts.since, limit: opts.limit } },
     );
   }
 
   wait(
-    thread: ThreadName,
+    document: DocumentName,
     opts: { since?: number; timeoutSeconds?: number } = {},
   ): Promise<EventListResponse> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/wait`,
+      `/documents/${encodeURIComponent(document)}/wait`,
       EventListResponseSchema,
       { query: { since: opts.since, timeout: opts.timeoutSeconds } },
     );
@@ -155,32 +155,32 @@ export class BrackishClient {
   // --- artifacts ---
 
   proposeArtifact(
-    thread: ThreadName,
+    document: DocumentName,
     name: ArtifactName,
     kind: ArtifactKind,
     content: string,
   ): Promise<ArtifactVersion> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/artifacts`,
+      `/documents/${encodeURIComponent(document)}/artifacts`,
       ArtifactVersionSchema,
       { method: 'POST', body: { name, kind, content } },
     );
   }
 
-  listArtifacts(thread: ThreadName): Promise<ArtifactSummary[]> {
+  listArtifacts(document: DocumentName): Promise<ArtifactSummary[]> {
     return this.fetchAndParse<ArtifactListResponse>(
-      `/threads/${encodeURIComponent(thread)}/artifacts`,
+      `/documents/${encodeURIComponent(document)}/artifacts`,
       ArtifactListResponseSchema,
     ).then((r) => r.artifacts);
   }
 
   getArtifact(
-    thread: ThreadName,
+    document: DocumentName,
     name: ArtifactName,
     opts: { version?: number; proposed?: boolean } = {},
   ): Promise<ArtifactVersion> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/artifacts/${encodeURIComponent(name)}`,
+      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}`,
       ArtifactVersionSchema,
       {
         query: {
@@ -192,25 +192,25 @@ export class BrackishClient {
   }
 
   acceptArtifact(
-    thread: ThreadName,
+    document: DocumentName,
     name: ArtifactName,
     version?: number,
   ): Promise<ArtifactVersion> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/artifacts/${encodeURIComponent(name)}/accept`,
+      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}/accept`,
       ArtifactVersionSchema,
       { method: 'POST', query: { version } },
     );
   }
 
   rejectArtifact(
-    thread: ThreadName,
+    document: DocumentName,
     name: ArtifactName,
     reason: string,
     version?: number,
   ): Promise<ArtifactVersion> {
     return this.fetchAndParse(
-      `/threads/${encodeURIComponent(thread)}/artifacts/${encodeURIComponent(name)}/reject`,
+      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}/reject`,
       ArtifactVersionSchema,
       { method: 'POST', body: { reason }, query: { version } },
     );

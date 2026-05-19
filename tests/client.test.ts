@@ -39,8 +39,8 @@ describe('BrackishClient (socket mode)', () => {
     expect(me.identity).toBe('host');
   });
 
-  it('thread + message round-trip', async () => {
-    const t = await host.createThread('contracts');
+  it('document + message round-trip', async () => {
+    const t = await host.createDocument('contracts');
     expect(t.name).toBe('contracts');
     const msg = await host.sendMessage('contracts', 'hello');
     expect(msg.kind).toBe('message');
@@ -51,7 +51,7 @@ describe('BrackishClient (socket mode)', () => {
   });
 
   it('listEvents + wait + cursor semantics', async () => {
-    await host.createThread('t');
+    await host.createDocument('t');
     await host.sendMessage('t', 'first');
 
     // wait with timeout should return immediately with at least one event
@@ -66,7 +66,7 @@ describe('BrackishClient (socket mode)', () => {
   });
 
   it('artifact propose/accept lifecycle, get current', async () => {
-    await host.createThread('t');
+    await host.createDocument('t');
     const proposed = await host.proposeArtifact('t', 'users', 'openapi', 'spec-v1');
     expect(proposed.status).toBe('proposed');
     expect(proposed.version).toBe(1);
@@ -80,7 +80,7 @@ describe('BrackishClient (socket mode)', () => {
   });
 
   it('artifact reject preserves reason', async () => {
-    await host.createThread('t');
+    await host.createDocument('t');
     await host.proposeArtifact('t', 'users', 'openapi', 'spec');
     const rejected = await peer.rejectArtifact('t', 'users', 'needs auth section');
     expect(rejected.status).toBe('rejected');
@@ -89,28 +89,28 @@ describe('BrackishClient (socket mode)', () => {
     }
   });
 
-  it('inbox surfaces threads with new events for the caller identity', async () => {
-    await host.createThread('a');
+  it('inbox surfaces documents with new events for the caller identity', async () => {
+    await host.createDocument('a');
     await host.sendMessage('a', 'hi from host');
     const peerInbox = await peer.inbox();
-    expect(peerInbox.threads.some((t) => t.threadName === 'a')).toBe(true);
+    expect(peerInbox.documents.some((t) => t.documentName === 'a')).toBe(true);
   });
 
   it('ClientError carries HTTP status + code on 4xx', async () => {
-    await expect(host.getThread('nonexistent')).rejects.toBeInstanceOf(ClientError);
+    await expect(host.getDocument('nonexistent')).rejects.toBeInstanceOf(ClientError);
     try {
-      await host.getThread('nonexistent');
+      await host.getDocument('nonexistent');
     } catch (err) {
       expect(err).toBeInstanceOf(ClientError);
       if (err instanceof ClientError) {
         expect(err.status).toBe(404);
-        expect(err.code).toBe('thread_not_found');
+        expect(err.code).toBe('document_not_found');
       }
     }
   });
 
   it('cannot_accept_own surfaces as ClientError with status 403', async () => {
-    await host.createThread('t');
+    await host.createDocument('t');
     await host.proposeArtifact('t', 'x', 'openapi', 'spec');
     await expect(host.acceptArtifact('t', 'x')).rejects.toMatchObject({
       status: 403,

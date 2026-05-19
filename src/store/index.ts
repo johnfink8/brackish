@@ -3,7 +3,7 @@
 //
 // Long-poll WAIT is NOT a method here — it's implemented at the server layer by combining
 // `listEvents` (after-the-fact catch-up) with `EventNotifier` (live fan-out). The store's only
-// obligation is to call `notifier.notify(threadName)` after a successful append.
+// obligation is to call `notifier.notify(documentName)` after a successful append.
 
 import type {
   ArtifactKind,
@@ -11,60 +11,66 @@ import type {
   ArtifactSummary,
   ArtifactVersion,
   Cursor,
+  Document,
+  DocumentName,
   Event,
   Identity,
   InboxEntry,
   Invite,
   Party,
-  Thread,
-  ThreadName,
 } from '../models.js';
 
 export interface Store {
-  // --- threads ---
-  createThread(name: ThreadName, by: Identity): Promise<Thread>;
-  getThread(name: ThreadName): Promise<Thread | null>;
-  listThreads(): Promise<Thread[]>;
+  // --- documents ---
+  createDocument(name: DocumentName, by: Identity): Promise<Document>;
+  getDocument(name: DocumentName): Promise<Document | null>;
+  listDocuments(): Promise<Document[]>;
 
   // --- events ---
   /** Append a `message` event. Returns the persisted event with its assigned id. */
-  appendMessage(threadName: ThreadName, from: Identity, text: string): Promise<Event>;
+  appendMessage(documentName: DocumentName, from: Identity, text: string): Promise<Event>;
   /** Returns events strictly greater than `since`, up to `limit`. */
-  listEvents(threadName: ThreadName, since: Cursor, limit: number): Promise<Event[]>;
-  /** Highest event id currently stored for a thread. Used to size the cursor. */
-  latestCursor(threadName: ThreadName): Promise<Cursor>;
+  listEvents(documentName: DocumentName, since: Cursor, limit: number): Promise<Event[]>;
+  /** Highest event id currently stored for a document. Used to size the cursor. */
+  latestCursor(documentName: DocumentName): Promise<Cursor>;
 
   // --- artifacts ---
   proposeArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     kind: ArtifactKind,
     content: string,
     by: Identity,
   ): Promise<ArtifactVersion>;
   acceptArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
     by: Identity,
   ): Promise<ArtifactVersion>;
   rejectArtifact(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
     reason: string,
     by: Identity,
   ): Promise<ArtifactVersion>;
   /** Latest accepted version. `null` if no version has been accepted yet. */
-  getArtifactCurrent(threadName: ThreadName, name: ArtifactName): Promise<ArtifactVersion | null>;
+  getArtifactCurrent(
+    documentName: DocumentName,
+    name: ArtifactName,
+  ): Promise<ArtifactVersion | null>;
   /** Latest proposed-but-not-yet-resolved version. */
-  getArtifactProposed(threadName: ThreadName, name: ArtifactName): Promise<ArtifactVersion | null>;
+  getArtifactProposed(
+    documentName: DocumentName,
+    name: ArtifactName,
+  ): Promise<ArtifactVersion | null>;
   getArtifactByVersion(
-    threadName: ThreadName,
+    documentName: DocumentName,
     name: ArtifactName,
     version: number,
   ): Promise<ArtifactVersion | null>;
-  listArtifacts(threadName: ThreadName): Promise<ArtifactSummary[]>;
+  listArtifacts(documentName: DocumentName): Promise<ArtifactSummary[]>;
 
   // --- parties / TCP auth ---
   /** Resolve identity from a persistent token (TCP auth path). */
@@ -80,12 +86,12 @@ export interface Store {
   /** Atomically redeem an unexpired invite; returns the (identity, persistent token) it yielded. */
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
 
-  // --- cursors (server-tracked per (identity, thread)) ---
-  getLastSeenCursor(identity: Identity, threadName: ThreadName): Promise<Cursor>;
+  // --- cursors (server-tracked per (identity, document)) ---
+  getLastSeenCursor(identity: Identity, documentName: DocumentName): Promise<Cursor>;
   /** Advance to `cursor` iff strictly greater; idempotent on stale or out-of-order calls. */
-  advanceCursor(identity: Identity, threadName: ThreadName, cursor: Cursor): Promise<void>;
+  advanceCursor(identity: Identity, documentName: DocumentName, cursor: Cursor): Promise<void>;
 
-  // --- inbox (cross-thread summary for one identity) ---
+  // --- inbox (cross-document summary for one identity) ---
   inboxSummary(identity: Identity): Promise<InboxEntry[]>;
 
   // --- lifecycle ---

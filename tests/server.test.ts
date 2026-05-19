@@ -74,53 +74,53 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
-  describe('threads', () => {
+  describe('documents', () => {
     it('create + list + get', async () => {
-      const cr = await call('POST', '/threads', { body: { name: 'contracts' } });
+      const cr = await call('POST', '/documents', { body: { name: 'contracts' } });
       expect(cr.status).toBe(201);
 
-      const list = await call('GET', '/threads');
-      const data = (await list.json()) as { threads: { name: string }[] };
-      expect(data.threads.map((t) => t.name)).toContain('contracts');
+      const list = await call('GET', '/documents');
+      const data = (await list.json()) as { documents: { name: string }[] };
+      expect(data.documents.map((t) => t.name)).toContain('contracts');
 
-      const get = await call('GET', '/threads/contracts');
+      const get = await call('GET', '/documents/contracts');
       expect(get.status).toBe(200);
     });
 
     it('duplicate create returns 409', async () => {
-      await call('POST', '/threads', { body: { name: 'dup' } });
-      const res = await call('POST', '/threads', { body: { name: 'dup' } });
+      await call('POST', '/documents', { body: { name: 'dup' } });
+      const res = await call('POST', '/documents', { body: { name: 'dup' } });
       expect(res.status).toBe(409);
     });
 
-    it('get unknown thread returns 404', async () => {
-      const res = await call('GET', '/threads/nope');
+    it('get unknown document returns 404', async () => {
+      const res = await call('GET', '/documents/nope');
       expect(res.status).toBe(404);
     });
   });
 
   describe('messages, events, cursor', () => {
     beforeEach(async () => {
-      await call('POST', '/threads', { body: { name: 't' } });
+      await call('POST', '/documents', { body: { name: 't' } });
     });
 
     it('send + list events from cursor 0', async () => {
-      await call('POST', '/threads/t/messages', { body: { text: 'hello' } });
-      const res = await call('GET', '/threads/t/events?since=0');
+      await call('POST', '/documents/t/messages', { body: { text: 'hello' } });
+      const res = await call('GET', '/documents/t/events?since=0');
       expect(res.status).toBe(200);
       const data = (await res.json()) as { events: { kind: string }[]; cursor: number };
-      expect(data.events.length).toBeGreaterThanOrEqual(2); // thread_created + message
+      expect(data.events.length).toBeGreaterThanOrEqual(2); // document_created + message
       expect(data.cursor).toBeGreaterThan(0);
     });
 
     it('list events advances server-tracked cursor', async () => {
-      await call('POST', '/threads/t/messages', { body: { text: 'one' } });
-      const r1 = (await (await call('GET', '/threads/t/events?since=0')).json()) as {
+      await call('POST', '/documents/t/messages', { body: { text: 'one' } });
+      const r1 = (await (await call('GET', '/documents/t/events?since=0')).json()) as {
         cursor: number;
       };
       // A subsequent wait with no since uses last-seen cursor; should not return the
       // already-read events as fresh.
-      const r2 = (await (await call('GET', '/threads/t/wait?timeout=1')).json()) as {
+      const r2 = (await (await call('GET', '/documents/t/wait?timeout=1')).json()) as {
         events: unknown[];
         cursor: number;
       };
@@ -129,13 +129,13 @@ describe('server (Unix-socket transport)', () => {
     });
 
     it('explicit since=N overrides server-tracked cursor', async () => {
-      await call('POST', '/threads/t/messages', { body: { text: 'one' } });
-      const r = (await (await call('GET', '/threads/t/events?since=0')).json()) as {
+      await call('POST', '/documents/t/messages', { body: { text: 'one' } });
+      const r = (await (await call('GET', '/documents/t/events?since=0')).json()) as {
         events: unknown[];
         cursor: number;
       };
       // re-read from 0 — should see them again
-      const reread = (await (await call('GET', '/threads/t/events?since=0')).json()) as {
+      const reread = (await (await call('GET', '/documents/t/events?since=0')).json()) as {
         events: unknown[];
       };
       expect(reread.events.length).toBe(r.events.length);
@@ -144,14 +144,14 @@ describe('server (Unix-socket transport)', () => {
 
   describe('long-poll wait', () => {
     beforeEach(async () => {
-      await call('POST', '/threads', { body: { name: 't' } });
-      // drain initial thread_created event for "host" identity by reading once
-      await call('GET', '/threads/t/events');
+      await call('POST', '/documents', { body: { name: 't' } });
+      // drain initial document_created event for "host" identity by reading once
+      await call('GET', '/documents/t/events');
     });
 
     it('times out cleanly when nothing arrives', async () => {
       const t0 = Date.now();
-      const res = await call('GET', '/threads/t/wait?timeout=1');
+      const res = await call('GET', '/documents/t/wait?timeout=1');
       const elapsed = Date.now() - t0;
       expect(res.status).toBe(200);
       const data = (await res.json()) as { events: unknown[]; cursor: number };
@@ -162,11 +162,11 @@ describe('server (Unix-socket transport)', () => {
 
     it('wakes the moment a new message arrives from another identity', async () => {
       const t0 = Date.now();
-      const waitPromise = call('GET', '/threads/t/wait?timeout=10');
+      const waitPromise = call('GET', '/documents/t/wait?timeout=10');
       // Send a message ~150ms later as a different identity.
       const sendPromise = (async () => {
         await new Promise((r) => setTimeout(r, 150));
-        await call('POST', '/threads/t/messages', {
+        await call('POST', '/documents/t/messages', {
           body: { text: 'wake up' },
           identity: 'peer',
         });
@@ -183,18 +183,18 @@ describe('server (Unix-socket transport)', () => {
   });
 
   describe('inbox', () => {
-    it('lists threads with new events for the caller', async () => {
-      await call('POST', '/threads', { body: { name: 'a' }, identity: 'host' });
-      await call('POST', '/threads', { body: { name: 'b' }, identity: 'host' });
-      await call('POST', '/threads/a/messages', { body: { text: 'hi' }, identity: 'host' });
+    it('lists documents with new events for the caller', async () => {
+      await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });
+      await call('POST', '/documents', { body: { name: 'b' }, identity: 'host' });
+      await call('POST', '/documents/a/messages', { body: { text: 'hi' }, identity: 'host' });
 
       const res = await call('GET', '/inbox', { identity: 'peer' });
       expect(res.status).toBe(200);
       const data = (await res.json()) as {
         identity: string;
-        threads: { threadName: string }[];
+        documents: { documentName: string }[];
       };
-      const names = data.threads.map((t) => t.threadName);
+      const names = data.documents.map((t) => t.documentName);
       expect(names).toContain('a');
       expect(names).toContain('b');
     });
@@ -202,11 +202,11 @@ describe('server (Unix-socket transport)', () => {
 
   describe('artifact lifecycle', () => {
     beforeEach(async () => {
-      await call('POST', '/threads', { body: { name: 't' } });
+      await call('POST', '/documents', { body: { name: 't' } });
     });
 
     it('propose + accept + get current', async () => {
-      const propose = await call('POST', '/threads/t/artifacts', {
+      const propose = await call('POST', '/documents/t/artifacts', {
         body: { name: 'users', kind: 'openapi', content: 'openapi: 3.0' },
       });
       expect(propose.status).toBe(201);
@@ -215,17 +215,17 @@ describe('server (Unix-socket transport)', () => {
       expect(v.status).toBe('proposed');
 
       // The proposer cannot accept their own version.
-      const ownAccept = await call('POST', '/threads/t/artifacts/users/accept');
+      const ownAccept = await call('POST', '/documents/t/artifacts/users/accept');
       expect(ownAccept.status).toBe(403);
 
       // Acceptance by a different identity succeeds.
-      const accept = await call('POST', '/threads/t/artifacts/users/accept', {
+      const accept = await call('POST', '/documents/t/artifacts/users/accept', {
         identity: 'peer',
       });
       expect(accept.status).toBe(200);
 
       // Current accepted version is now retrievable.
-      const cur = await call('GET', '/threads/t/artifacts/users');
+      const cur = await call('GET', '/documents/t/artifacts/users');
       expect(cur.status).toBe(200);
       const curData = (await cur.json()) as { status: string; content: string };
       expect(curData.status).toBe('accepted');
@@ -233,10 +233,10 @@ describe('server (Unix-socket transport)', () => {
     });
 
     it('reject by peer with reason', async () => {
-      await call('POST', '/threads/t/artifacts', {
+      await call('POST', '/documents/t/artifacts', {
         body: { name: 'users', kind: 'openapi', content: 'spec' },
       });
-      const reject = await call('POST', '/threads/t/artifacts/users/reject', {
+      const reject = await call('POST', '/documents/t/artifacts/users/reject', {
         identity: 'peer',
         body: { reason: 'needs auth section' },
       });
@@ -247,14 +247,14 @@ describe('server (Unix-socket transport)', () => {
     });
 
     it('artifact list summarizes current + latestProposed per name', async () => {
-      await call('POST', '/threads/t/artifacts', {
+      await call('POST', '/documents/t/artifacts', {
         body: { name: 'users', kind: 'openapi', content: 'v1' },
       });
-      await call('POST', '/threads/t/artifacts/users/accept', { identity: 'peer' });
-      await call('POST', '/threads/t/artifacts', {
+      await call('POST', '/documents/t/artifacts/users/accept', { identity: 'peer' });
+      await call('POST', '/documents/t/artifacts', {
         body: { name: 'users', kind: 'openapi', content: 'v2' },
       });
-      const res = await call('GET', '/threads/t/artifacts');
+      const res = await call('GET', '/documents/t/artifacts');
       const data = (await res.json()) as {
         artifacts: {
           name: string;
