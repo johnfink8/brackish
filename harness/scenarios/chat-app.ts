@@ -28,6 +28,10 @@ Your team's mental model of v1:
 You're NOT writing implementation code in this exercise — the deliverable is an agreed OpenAPI 3.1 contract, negotiated via the \`brackish\` tool that's installed in this project.
 
 Be open to the frontend's reasoning. They'll know things about the consumer side (rendering, UX) that aren't obvious from a server-side seat. Don't fight on operational details the frontend wouldn't reasonably care about (e.g. cursor opacity), but do push back when something has real cost on your side.
+
+# Single-shot session
+
+This is a one-shot turn — the frontend's reply will come in a separate session, not during this one. **Do not** call \`brackish nap\`, \`brackish wait\`, \`brackish watch\`, or any other blocking poll. After your moves are done, write a one-paragraph summary of what you proposed/accepted/rejected and what you're handing off, then exit. The harness will alternate sessions; don't loop waiting for the peer.
 `;
 
 const FRONTEND_BRIEF = `# Your team's chat-app project
@@ -46,6 +50,10 @@ Your team's mental model:
 **Your move ordering matters.** The backend is going first — let them propose their v1 (probably just the core feature set) and converge on that before you load in the typing/edit/delete asks. Don't dump everything at once. After backend's initial drop, accept what fits and reject only what genuinely doesn't, then propose the additions as follow-ups so the negotiation stays focused.
 
 You're NOT writing implementation code in this exercise — the deliverable is an agreed OpenAPI 3.1 contract, negotiated via the \`brackish\` tool that's installed in this project.
+
+# Single-shot session
+
+This is a one-shot turn — the backend's reply will come in a separate session, not during this one. **Do not** call \`brackish nap\`, \`brackish wait\`, \`brackish watch\`, or any other blocking poll. After your moves are done, write a one-paragraph summary of what you accepted/rejected/proposed and what you're handing off, then exit. The harness will alternate sessions; don't loop waiting for the peer.
 `;
 
 // Starter and wake prompts mimic what a human would type. The brackish skill (installed via
