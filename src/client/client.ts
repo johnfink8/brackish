@@ -44,8 +44,8 @@ import {
   SendMessageResponseSchema,
   type WhoamiResponse,
   WhoamiResponseSchema,
-} from './models.js';
-import { type OpenAPIDocument, OpenAPIDocumentSchema } from './openapi.js';
+} from '../lib/models.js';
+import { type OpenAPIDocument, OpenAPIDocumentSchema } from '../lib/openapi.js';
 
 export class ClientError extends Error {
   constructor(
@@ -574,7 +574,7 @@ function proposeOptionsToQuery(opts: ProposeOptionsWire): Record<string, string 
 
 /** Adapter from ClientConfig (CLI-facing) to BrackishClientOptions (transport-discriminated). */
 export function clientOptionsFromConfig(
-  cfg: import('./config.js').ClientConfig,
+  cfg: import('../io/config.js').ClientConfig,
 ): BrackishClientOptions {
   if (cfg.socketPath !== undefined) {
     return { socketPath: cfg.socketPath, identity: cfg.identity };

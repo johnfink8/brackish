@@ -49,12 +49,15 @@ export function settingsJsonPath(home: string = claudeHome()): string {
   return join(home, 'settings.json');
 }
 
-/** Locate the bundled skill/ directory. Works in dev (src/) and in an installed package (dist/). */
+/** Locate the bundled skill/ directory. Works in dev (src/io/) and in an installed package (dist/). */
 export function bundledSkillDir(): string {
-  const thisFile = fileURLToPath(import.meta.url);
-  // src/install.ts -> <root>/skill   (dev via tsx)
-  // dist/cli.js   -> <root>/skill   (installed npm package)
-  return resolve(dirname(thisFile), '..', 'skill');
+  // src/io/install.ts -> <root>/skill (dev via tsx)
+  // dist/cli.js       -> <root>/skill (installed npm package, flat bundle)
+  // Try one level up first (dist), then two (dev). Whichever exists wins.
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  const flat = resolve(thisDir, '..', 'skill');
+  if (existsSync(flat)) return flat;
+  return resolve(thisDir, '..', '..', 'skill');
 }
 
 // --- inspection ---

@@ -26,7 +26,7 @@ import {
   uninstallPermission,
   uninstallSkill,
   userClaudeHome,
-} from '../src/install.js';
+} from '../src/io/install.js';
 
 describe('install: paths', () => {
   const savedHome = process.env.CLAUDE_HOME;

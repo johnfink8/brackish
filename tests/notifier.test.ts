@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EventNotifier } from '../src/notifier.js';
+import { EventNotifier } from '../src/lib/notifier.js';
 
 describe('EventNotifier', () => {
   it('fires a registered resolver on notify for the same document', () => {

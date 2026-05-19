@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EventNotifier } from '../src/notifier.js';
-import { SqliteStore, StoreError } from '../src/store/sqlite.js';
+import { SqliteStore, StoreError } from '../src/daemon/store/sqlite.js';
+import { EventNotifier } from '../src/lib/notifier.js';
 
 describe('SqliteStore', () => {
   let store: SqliteStore;

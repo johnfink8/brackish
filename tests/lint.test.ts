@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lintConventionSpec, lintEndpointSpec, lintSchemaSpec } from '../src/lint.js';
+import { lintConventionSpec, lintEndpointSpec, lintSchemaSpec } from '../src/lib/lint.js';
 
 // Minimal valid bodies for each kind; tests start from these and mutate.
 const okOperation = {

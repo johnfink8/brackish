@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectTransport, type SocketLike } from '../src/auth.js';
+import { detectTransport, type SocketLike } from '../src/daemon/auth.js';
 
 const sock = (addr: { port: number } | Record<string, unknown> | null): SocketLike => ({
   address: () => addr,

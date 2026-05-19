@@ -16,7 +16,7 @@
 import { randomBytes } from 'node:crypto';
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { z } from 'zod';
-import { compactSummary, generatePatch } from '../diff.js';
+import { compactSummary, generatePatch } from '../../lib/diff.js';
 import {
   CONVENTION_KEY,
   type ConventionArtifact,
@@ -43,8 +43,8 @@ import {
   SchemaArtifactSchema,
   type SchemaName,
   type SchemaSummary,
-} from '../models.js';
-import type { EventNotifier } from '../notifier.js';
+} from '../../lib/models.js';
+import type { EventNotifier } from '../../lib/notifier.js';
 import type { ProposeOptions, RationaleEntry, Store } from './index.js';
 
 const SCHEMA = `

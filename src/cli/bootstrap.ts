@@ -1,15 +1,15 @@
 // Cross-machine bootstrap: invite (mint), connect (redeem), parties (list), revoke.
 
 import type { Command } from 'commander';
-import { redeemInvite } from '../client.js';
+import { redeemInvite } from '../client/client.js';
 import {
   defaultClientConfigPath,
   loadServerConfig,
   parseBindAddress,
   saveClientConfig,
-} from '../config.js';
-import { IdentitySchema } from '../models.js';
-import { formatParties } from '../output.js';
+} from '../io/config.js';
+import { IdentitySchema } from '../lib/models.js';
+import { formatParties } from '../render/output.js';
 import { emit, emitJson, errExit, inferReachableHost, withClient } from './common.js';
 
 export function register(program: Command): void {

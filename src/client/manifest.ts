@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { parse as yamlParse } from 'yaml';
 import { z } from 'zod';
-import { HttpMethodSchema, PathSchema, SchemaNameSchema } from './models.js';
+import { HttpMethodSchema, PathSchema, SchemaNameSchema } from '../lib/models.js';
 
 // "expected" controls the concurrency assertion on each propose call.
 const ExpectedSchema = z.union([z.literal('new'), z.literal('force'), z.number().int().positive()]);

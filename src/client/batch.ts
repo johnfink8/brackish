@@ -3,9 +3,12 @@
 // Both halves share the "stop on first failure, report what succeeded + what's left" semantics so
 // the CLI presentation stays uniform.
 
-import { type BrackishClient, ClientError, type ProposeOptionsWire } from './client.js';
-import { type LintIssue, lintConventionSpec, lintEndpointSpec, lintSchemaSpec } from './lint.js';
-import { type LoadedManifest, loadManifest, type ManifestExpected } from './manifest.js';
+import {
+  type LintIssue,
+  lintConventionSpec,
+  lintEndpointSpec,
+  lintSchemaSpec,
+} from '../lib/lint.js';
 import {
   ConventionSpecSchema,
   type DocumentName,
@@ -14,8 +17,10 @@ import {
   OperationSpecSchema,
   type SchemaArtifact,
   type SchemaName,
-} from './models.js';
-import { parseSpecFile } from './specfile.js';
+} from '../lib/models.js';
+import { parseSpecFile } from '../lib/specfile.js';
+import { type BrackishClient, ClientError, type ProposeOptionsWire } from './client.js';
+import { type LoadedManifest, loadManifest, type ManifestExpected } from './manifest.js';
 
 export type BatchAcceptResult = {
   accepted: SchemaArtifact[];

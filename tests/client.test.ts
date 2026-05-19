@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BrackishClient, ClientError, redeemInvite } from '../src/client.js';
-import { type RunningServer, startServer } from '../src/server.js';
+import { BrackishClient, ClientError, redeemInvite } from '../src/client/client.js';
+import { type RunningServer, startServer } from '../src/daemon/server.js';
 
 describe('BrackishClient (socket mode)', () => {
   let tmp: string;

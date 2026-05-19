@@ -11,8 +11,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { z } from 'zod';
-import { BrackishClient, redeemInvite } from '../src/client.js';
-import { startServer } from '../src/server.js';
+import { BrackishClient, redeemInvite } from '../src/client/client.js';
+import { startServer } from '../src/daemon/server.js';
 
 const TrialConfigSchema = z.object({
   documentName: z.string(),

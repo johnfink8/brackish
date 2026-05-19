@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactSummary, generatePatch } from '../src/diff.js';
+import { compactSummary, generatePatch } from '../src/lib/diff.js';
 
 describe('generatePatch', () => {
   it('returns no ops for equal values', () => {

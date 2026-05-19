@@ -3,10 +3,10 @@
 
 import type { Command } from 'commander';
 import { stringify as yamlStringify } from 'yaml';
-import { lintConventionSpec } from '../lint.js';
-import { type ConventionSpec, ConventionSpecSchema } from '../models.js';
-import { describeConvention } from '../output.js';
-import { loadSpecFile, parseSpecFile } from '../specfile.js';
+import { lintConventionSpec } from '../lib/lint.js';
+import { type ConventionSpec, ConventionSpecSchema } from '../lib/models.js';
+import { loadSpecFile, parseSpecFile } from '../lib/specfile.js';
+import { describeConvention } from '../render/output.js';
 import {
   type ConcurrencyOpts,
   collect,

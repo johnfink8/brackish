@@ -18,7 +18,7 @@ import {
   uninstallPermission,
   uninstallSkill,
   userClaudeHome,
-} from '../install.js';
+} from '../io/install.js';
 import { errExit, sanitizeIdentity } from './common.js';
 
 export function register(program: Command): void {

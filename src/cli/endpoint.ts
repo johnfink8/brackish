@@ -2,7 +2,7 @@
 
 import type { Command } from 'commander';
 import { stringify as yamlStringify } from 'yaml';
-import { lintEndpointSpec } from '../lint.js';
+import { lintEndpointSpec } from '../lib/lint.js';
 import {
   type ConventionArtifact,
   HttpMethodSchema,
@@ -10,9 +10,9 @@ import {
   JSONSchemaSchema,
   type OperationSpec,
   OperationSpecSchema,
-} from '../models.js';
-import { describeOperation, formatEndpointSummaries } from '../output.js';
-import { loadSpecFile, parseSpecFile } from '../specfile.js';
+} from '../lib/models.js';
+import { loadSpecFile, parseSpecFile } from '../lib/specfile.js';
+import { describeOperation, formatEndpointSummaries } from '../render/output.js';
 import {
   type ConcurrencyOpts,
   collect,

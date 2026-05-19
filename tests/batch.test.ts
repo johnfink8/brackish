@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { acceptSchemas } from '../src/batch.js';
-import { BrackishClient } from '../src/client.js';
-import { type RunningServer, startServer } from '../src/server.js';
+import { acceptSchemas } from '../src/client/batch.js';
+import { BrackishClient } from '../src/client/client.js';
+import { type RunningServer, startServer } from '../src/daemon/server.js';
 
 describe('acceptSchemas', () => {
   let tmp: string;

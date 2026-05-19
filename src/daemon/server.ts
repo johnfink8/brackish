@@ -7,9 +7,8 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { stringify as yamlStringify } from 'yaml';
-import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
-import { ensureBrackishHome, parseBindAddress, type ServerConfig } from './config.js';
-import { generatePatch } from './diff.js';
+import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
+import { generatePatch } from '../lib/diff.js';
 import {
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
@@ -27,10 +26,11 @@ import {
   RejectArtifactRequestSchema,
   SchemaNameSchema,
   SendMessageRequestSchema,
-} from './models.js';
-import { EventNotifier } from './notifier.js';
-import { assembleDocument } from './openapi.js';
-import { type RationaleMap, renderHtml } from './render.js';
+} from '../lib/models.js';
+import { EventNotifier } from '../lib/notifier.js';
+import { assembleDocument } from '../lib/openapi.js';
+import { type RationaleMap, renderHtml } from '../render/render.js';
+import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 

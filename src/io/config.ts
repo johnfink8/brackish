@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { z } from 'zod';
-import { IdentitySchema, TokenSchema } from './models.js';
+import { IdentitySchema, TokenSchema } from '../lib/models.js';
 
 // --- paths ---
 

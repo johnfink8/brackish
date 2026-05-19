@@ -11,7 +11,7 @@
 //
 // Use the socket transport: peer-trust lets us impersonate both identities from one process.
 
-import { BrackishClient } from './client.js';
+import { BrackishClient } from './client/client.js';
 import {
   type ConventionSpec,
   type DocumentName,
@@ -20,7 +20,7 @@ import {
   IdentitySchema,
   type JSONSchema,
   type OperationSpec,
-} from './models.js';
+} from './lib/models.js';
 
 export type SeedOptions = {
   socketPath: string;

@@ -1,7 +1,7 @@
 // Document CRUD: `documents` (alias `docs`) + `doc new`.
 
 import type { Command } from 'commander';
-import { formatDocuments } from '../output.js';
+import { formatDocuments } from '../render/output.js';
 import { emit, emitJson, withClient } from './common.js';
 
 export function register(program: Command): void {

@@ -24,7 +24,7 @@ import type {
   SchemaArtifact,
   SchemaName,
   SchemaSummary,
-} from '../models.js';
+} from '../../lib/models.js';
 
 /** Opt-in concurrency control on propose. */
 export type ProposeOptions = {

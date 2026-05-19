@@ -11,10 +11,10 @@
 // CLI calls the same functions and writes to stdout/file.
 
 import { stringify as yamlStringify } from 'yaml';
-import type { Event } from './models.js';
-import type { OpenAPIDocument } from './openapi.js';
-import { listOperations } from './openapi.js';
-import type { RationaleEntry } from './store/index.js';
+import type { RationaleEntry } from '../daemon/store/index.js';
+import type { Event } from '../lib/models.js';
+import type { OpenAPIDocument } from '../lib/openapi.js';
+import { listOperations } from '../lib/openapi.js';
 
 export type RationaleMap = {
   endpoints: Map<string, RationaleEntry[]>; // key: '<METHOD> <path>' (uppercase method)

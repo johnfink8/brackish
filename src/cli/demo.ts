@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Command } from 'commander';
-import { BrackishClient, redeemInvite } from '../client.js';
+import { BrackishClient, redeemInvite } from '../client/client.js';
+import { startServer } from '../daemon/server.js';
 import { seedChatterDemo } from '../demo.js';
-import { IdentitySchema } from '../models.js';
-import { startServer } from '../server.js';
+import { IdentitySchema } from '../lib/models.js';
 import { errExit } from './common.js';
 
 export function register(program: Command): void {

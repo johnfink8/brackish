@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { OpenAPIDocument } from '../src/openapi.js';
+import type { RationaleEntry } from '../src/daemon/store/index.js';
+import type { OpenAPIDocument } from '../src/lib/openapi.js';
 import {
   renderHtml,
   renderJson,
   renderMarkdown,
   renderOpenAPIYaml,
   renderText,
-} from '../src/render.js';
-import type { RationaleEntry } from '../src/store/index.js';
+} from '../src/render/render.js';
 
 const fixtureDoc: OpenAPIDocument = {
   openapi: '3.1.0',

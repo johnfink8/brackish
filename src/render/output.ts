@@ -2,7 +2,7 @@
 // (JSON.stringify of whatever the API returns); these helpers handle the text path,
 // which we default to because it's denser in the agent's context window.
 
-import type { LintIssue } from './lint.js';
+import type { LintIssue } from '../lib/lint.js';
 import type {
   ConventionArtifact,
   Document,
@@ -13,7 +13,7 @@ import type {
   Party,
   SchemaArtifact,
   SchemaSummary,
-} from './models.js';
+} from '../lib/models.js';
 
 const trim = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 

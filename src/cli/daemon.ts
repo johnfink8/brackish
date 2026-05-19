@@ -7,7 +7,8 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
-import { BrackishClient } from '../client.js';
+import { BrackishClient } from '../client/client.js';
+import { startServer } from '../daemon/server.js';
 import {
   brackishHome,
   defaultClientConfigPath,
@@ -20,9 +21,8 @@ import {
   parseBindAddress,
   saveClientConfig,
   saveServerConfig,
-} from '../config.js';
-import { IdentitySchema, TokenSchema } from '../models.js';
-import { startServer } from '../server.js';
+} from '../io/config.js';
+import { IdentitySchema, TokenSchema } from '../lib/models.js';
 import {
   emit,
   emitJson,

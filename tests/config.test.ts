@@ -13,7 +13,7 @@ import {
   parseBindAddress,
   saveClientConfig,
   saveServerConfig,
-} from '../src/config.js';
+} from '../src/io/config.js';
 
 describe('config paths', () => {
   let tmp: string;

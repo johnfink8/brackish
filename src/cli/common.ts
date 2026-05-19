@@ -8,12 +8,12 @@ import {
   ClientError,
   clientOptionsFromConfig,
   type ProposeOptionsWire,
-} from '../client.js';
-import { loadClientConfig } from '../config.js';
-import type { LintIssue, LintResult } from '../lint.js';
-import type { DiffResponse } from '../models.js';
-import { formatLintIssues } from '../output.js';
-import type { ParseResult } from '../specfile.js';
+} from '../client/client.js';
+import { loadClientConfig } from '../io/config.js';
+import type { LintIssue, LintResult } from '../lib/lint.js';
+import type { DiffResponse } from '../lib/models.js';
+import type { ParseResult } from '../lib/specfile.js';
+import { formatLintIssues } from '../render/output.js';
 
 // --- output helpers ---
 

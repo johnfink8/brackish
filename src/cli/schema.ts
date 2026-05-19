@@ -2,11 +2,11 @@
 
 import type { Command } from 'commander';
 import { stringify as yamlStringify } from 'yaml';
-import { acceptSchemas } from '../batch.js';
-import { lintSchemaSpec } from '../lint.js';
-import { type JSONSchema, JSONSchemaSchema } from '../models.js';
-import { describeSchema, formatSchemaSummaries } from '../output.js';
-import { loadSpecFile, parseSpecFile } from '../specfile.js';
+import { acceptSchemas } from '../client/batch.js';
+import { lintSchemaSpec } from '../lib/lint.js';
+import { type JSONSchema, JSONSchemaSchema } from '../lib/models.js';
+import { loadSpecFile, parseSpecFile } from '../lib/specfile.js';
+import { describeSchema, formatSchemaSummaries } from '../render/output.js';
 import {
   type ConcurrencyOpts,
   collect,

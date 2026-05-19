@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent, type Response as UndiciResponse, fetch as undiciFetch } from 'undici';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type RunningServer, startServer } from '../src/server.js';
+import { type RunningServer, startServer } from '../src/daemon/server.js';
 
 describe('server (Unix-socket transport)', () => {
   let tmp: string;

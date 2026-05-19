@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { proposeBatchFromManifest } from '../src/batch.js';
-import { BrackishClient } from '../src/client.js';
-import { loadManifest } from '../src/manifest.js';
-import { type RunningServer, startServer } from '../src/server.js';
+import { proposeBatchFromManifest } from '../src/client/batch.js';
+import { BrackishClient } from '../src/client/client.js';
+import { loadManifest } from '../src/client/manifest.js';
+import { type RunningServer, startServer } from '../src/daemon/server.js';
 
 function write(p: string, content: string): void {
   writeFileSync(p, content);

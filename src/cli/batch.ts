@@ -6,7 +6,7 @@ import {
   type BatchProposeResult,
   type BatchProposeSuccess,
   proposeBatchFromManifest,
-} from '../batch.js';
+} from '../client/batch.js';
 import { emit, emitJson, withClient } from './common.js';
 
 export function register(program: Command): void {

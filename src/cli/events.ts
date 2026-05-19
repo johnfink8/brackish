@@ -1,7 +1,7 @@
 // Message + event flow: send, read, wait, inbox, nap, watch.
 
 import type { Command } from 'commander';
-import { formatEvents, formatEventsStream, formatInbox } from '../output.js';
+import { formatEvents, formatEventsStream, formatInbox } from '../render/output.js';
 import { emit, emitJson, errExit, readStdin, sleep, withClient } from './common.js';
 
 export function register(program: Command): void {

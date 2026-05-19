@@ -29,7 +29,7 @@ import {
   EventListResponseSchema,
   InboxResponseSchema,
   SchemaListResponseSchema,
-} from '../src/models.js';
+} from '../src/lib/models.js';
 import { chatAppScenario } from './scenarios/chat-app.js';
 import type { DocumentSummary, Scenario, Side } from './types.js';
 

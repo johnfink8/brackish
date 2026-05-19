@@ -2,9 +2,9 @@
 
 import { writeFileSync } from 'node:fs';
 import type { Command } from 'commander';
-import type { RationaleEntryWire } from '../models.js';
-import { renderHtml, renderMarkdown, renderText } from '../render.js';
-import type { RationaleEntry } from '../store/index.js';
+import type { RationaleEntry } from '../daemon/store/index.js';
+import type { RationaleEntryWire } from '../lib/models.js';
+import { renderHtml, renderMarkdown, renderText } from '../render/render.js';
 import { errExit, withClient } from './common.js';
 
 export function register(program: Command): void {

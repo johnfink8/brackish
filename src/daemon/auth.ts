@@ -10,7 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context, MiddlewareHandler } from 'hono';
-import { type Identity, IdentitySchema } from './models.js';
+import { type Identity, IdentitySchema } from '../lib/models.js';
 import type { Store } from './store/index.js';
 
 export type Transport = 'sock' | 'tcp';
