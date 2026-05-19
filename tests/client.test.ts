@@ -65,29 +65,7 @@ describe('BrackishClient (socket mode)', () => {
     expect(empty.cursor).toBe(first.cursor);
   });
 
-  it('artifact propose/accept lifecycle, get current', async () => {
-    await host.createDocument('t');
-    const proposed = await host.proposeArtifact('t', 'users', 'openapi', 'spec-v1');
-    expect(proposed.status).toBe('proposed');
-    expect(proposed.version).toBe(1);
 
-    const accepted = await peer.acceptArtifact('t', 'users');
-    expect(accepted.status).toBe('accepted');
-
-    const cur = await peer.getArtifact('t', 'users');
-    expect(cur.status).toBe('accepted');
-    expect(cur.content).toBe('spec-v1');
-  });
-
-  it('artifact reject preserves reason', async () => {
-    await host.createDocument('t');
-    await host.proposeArtifact('t', 'users', 'openapi', 'spec');
-    const rejected = await peer.rejectArtifact('t', 'users', 'needs auth section');
-    expect(rejected.status).toBe('rejected');
-    if (rejected.status === 'rejected') {
-      expect(rejected.rejectionReason).toBe('needs auth section');
-    }
-  });
 
   it('inbox surfaces documents with new events for the caller identity', async () => {
     await host.createDocument('a');
@@ -109,14 +87,6 @@ describe('BrackishClient (socket mode)', () => {
     }
   });
 
-  it('cannot_accept_own surfaces as ClientError with status 403', async () => {
-    await host.createDocument('t');
-    await host.proposeArtifact('t', 'x', 'openapi', 'spec');
-    await expect(host.acceptArtifact('t', 'x')).rejects.toMatchObject({
-      status: 403,
-      code: 'cannot_accept_own',
-    });
-  });
 });
 
 describe('BrackishClient (TCP mode via invite/connect)', () => {

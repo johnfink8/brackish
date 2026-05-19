@@ -32,8 +32,6 @@ import {
 } from './install.js';
 import { IdentitySchema, TokenSchema } from './models.js';
 import {
-  describeArtifactVersion,
-  formatArtifactSummaries,
   formatDocuments,
   formatEvents,
   formatEventsStream,
@@ -351,111 +349,6 @@ export function buildProgram(): Command {
           errExit(2, 'watch: pass a <doc> or --all');
         }
       }),
-    );
-
-  // --- artifacts ---
-
-  const artifact = program
-    .command('artifact')
-    .description('contract artifact management (propose/accept/reject)');
-
-  artifact
-    .command('list <doc>')
-    .description('list artifacts in <doc> with current + latest-proposed versions')
-    .option('--json', 'output JSON')
-    .action(async (document: string, opts: { json?: boolean }) =>
-      withClient(async (client) => {
-        const artifacts = await client.listArtifacts(document);
-        if (opts.json) emitJson({ artifacts });
-        else emit(formatArtifactSummaries(artifacts));
-      }),
-    );
-
-  artifact
-    .command('propose <doc> <name>')
-    .description('propose a new version of <name>; --file or "-" supplies the content')
-    .requiredOption('--kind <kind>', 'artifact kind (e.g. openapi, json-schema, ts-types, text)')
-    .option('--file <path>', 'read content from file (use "-" for stdin)')
-    .option('--json', 'output JSON')
-    .action(
-      async (
-        document: string,
-        name: string,
-        opts: { kind: string; file?: string; json?: boolean },
-      ) =>
-        withClient(async (client) => {
-          const content = await readContent(opts.file);
-          const v = await client.proposeArtifact(document, name, opts.kind, content);
-          if (opts.json) emitJson(v);
-          else emit(`proposed ${describeArtifactVersion(v)}`);
-        }),
-    );
-
-  artifact
-    .command('get <doc> <name>')
-    .description('print the artifact content (stdout); metadata to stderr. --meta to skip content.')
-    .option('--version <n>', 'fetch a specific version')
-    .option('--proposed', 'fetch the latest proposed version instead of the current accepted one')
-    .option('--meta', 'metadata only (no content body)')
-    .option('--json', 'output JSON (content is included as a string field)')
-    .action(
-      async (
-        document: string,
-        name: string,
-        opts: { version?: string; proposed?: boolean; meta?: boolean; json?: boolean },
-      ) =>
-        withClient(async (client) => {
-          const versionN =
-            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-          const v = await client.getArtifact(document, name, {
-            ...(versionN !== undefined ? { version: versionN } : {}),
-            ...(opts.proposed ? { proposed: true } : {}),
-          });
-          if (opts.json) {
-            emitJson(v);
-            return;
-          }
-          if (!opts.meta) {
-            process.stdout.write(v.content);
-            if (!v.content.endsWith('\n')) process.stdout.write('\n');
-          }
-          process.stderr.write(`${describeArtifactVersion(v)}\n`);
-        }),
-    );
-
-  artifact
-    .command('accept <doc> <name>')
-    .description('accept the latest proposed version (or --version N)')
-    .option('--version <n>', 'accept a specific version')
-    .option('--json', 'output JSON')
-    .action(async (document: string, name: string, opts: { version?: string; json?: boolean }) =>
-      withClient(async (client) => {
-        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-        const v = await client.acceptArtifact(document, name, versionN);
-        if (opts.json) emitJson(v);
-        else emit(`accepted ${describeArtifactVersion(v)}`);
-      }),
-    );
-
-  artifact
-    .command('reject <doc> <name> <reason>')
-    .description('reject the latest proposed version (or --version N) with a reason')
-    .option('--version <n>', 'reject a specific version')
-    .option('--json', 'output JSON')
-    .action(
-      async (
-        document: string,
-        name: string,
-        reason: string,
-        opts: { version?: string; json?: boolean },
-      ) =>
-        withClient(async (client) => {
-          const versionN =
-            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-          const v = await client.rejectArtifact(document, name, reason, versionN);
-          if (opts.json) emitJson(v);
-          else emit(`rejected ${describeArtifactVersion(v)}`);
-        }),
     );
 
   // --- install / uninstall / hook-snippet ---

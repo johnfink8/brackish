@@ -1,28 +1,50 @@
-// better-sqlite3 implementation of the Store interface.
+// better-sqlite3 implementation of the v0.2 Store interface.
 //
 // Schema philosophy: events are an append-only log; documents + artifact_versions are projections.
 // One writer (single-process Node); WAL for concurrent reads. better-sqlite3 is sync — methods
 // return Promises only because the Store interface is async to keep open a path to Postgres later.
+//
+// Artifacts are kind-discriminated (operation / schema / convention). Identity scheme:
+//   operation:  identity_key = '<METHOD> <path>'         (e.g. 'POST /users')
+//   schema:     identity_key = '<NAME>'                  (e.g. 'User')
+//   convention: identity_key = 'convention' (singleton)
+//
+// `delta` is stored on each version v≥2 as a compact "+a; -b; ~c" summary computed via the diff
+// module against the previous version's spec. It's surfaced in event payloads + summaries so
+// callers can decide whether to fetch the full spec.
 
 import { randomBytes } from 'node:crypto';
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
+import { compactSummary, generatePatch } from '../diff.js';
 import {
-  type ArtifactKind,
-  type ArtifactName,
-  type ArtifactSummary,
-  type ArtifactVersion,
+  CONVENTION_KEY,
+  type ConventionArtifact,
+  ConventionArtifactSchema,
+  type ConventionSpec,
   type Cursor,
   type Document,
   type DocumentName,
+  type EndpointSummary,
   type Event,
   EventSchema,
+  type HttpMethod,
   type Identity,
   type InboxEntry,
   type Invite,
+  type JSONSchema,
+  type OperationArtifact,
+  OperationArtifactSchema,
+  type OperationSpec,
+  operationIdentityKey,
   type Party,
+  parseOperationIdentityKey,
+  type SchemaArtifact,
+  SchemaArtifactSchema,
+  type SchemaName,
+  type SchemaSummary,
 } from '../models.js';
 import type { EventNotifier } from '../notifier.js';
-import type { Store } from './index.js';
+import type { RationaleEntry, Store } from './index.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS documents (
@@ -32,32 +54,33 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 
 CREATE TABLE IF NOT EXISTS events (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  document_name  TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
-  kind         TEXT NOT NULL,
-  created_at   TEXT NOT NULL,
-  data         TEXT NOT NULL
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_name TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+  kind          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  data          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_document_id_idx ON events(document_name, id);
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
-  document_name       TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
-  name              TEXT NOT NULL,
-  version           INTEGER NOT NULL,
-  kind              TEXT NOT NULL,
-  content           TEXT NOT NULL,
-  proposed_by       TEXT NOT NULL,
-  proposed_at       TEXT NOT NULL,
-  status            TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected')),
-  accepted_by       TEXT,
-  accepted_at       TEXT,
-  rejected_by       TEXT,
-  rejected_at       TEXT,
-  rejection_reason  TEXT,
-  PRIMARY KEY (document_name, name, version)
+  document_name    TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+  kind             TEXT NOT NULL CHECK (kind IN ('operation','schema','convention')),
+  identity_key     TEXT NOT NULL,
+  version          INTEGER NOT NULL,
+  spec             TEXT NOT NULL,
+  status           TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected')),
+  proposed_by      TEXT NOT NULL,
+  proposed_at      TEXT NOT NULL,
+  accepted_by      TEXT,
+  accepted_at      TEXT,
+  rejected_by      TEXT,
+  rejected_at      TEXT,
+  rejection_reason TEXT,
+  delta            TEXT,
+  PRIMARY KEY (document_name, kind, identity_key, version)
 );
 CREATE INDEX IF NOT EXISTS artifact_versions_lookup_idx
-  ON artifact_versions(document_name, name, status, version);
+  ON artifact_versions(document_name, kind, identity_key, status, version);
 
 CREATE TABLE IF NOT EXISTS parties (
   identity      TEXT PRIMARY KEY,
@@ -81,9 +104,9 @@ CREATE TABLE IF NOT EXISTS invites (
 );
 
 CREATE TABLE IF NOT EXISTS cursors (
-  identity     TEXT NOT NULL,
-  document_name  TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
-  last_seen    INTEGER NOT NULL,
+  identity      TEXT NOT NULL,
+  document_name TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+  last_seen     INTEGER NOT NULL,
   PRIMARY KEY (identity, document_name)
 );
 `;
@@ -98,18 +121,19 @@ type EventRow = {
 
 type ArtifactRow = {
   document_name: string;
-  name: string;
+  kind: 'operation' | 'schema' | 'convention';
+  identity_key: string;
   version: number;
-  kind: string;
-  content: string;
+  spec: string;
+  status: 'proposed' | 'accepted' | 'rejected';
   proposed_by: string;
   proposed_at: string;
-  status: 'proposed' | 'accepted' | 'rejected';
   accepted_by: string | null;
   accepted_at: string | null;
   rejected_by: string | null;
   rejected_at: string | null;
   rejection_reason: string | null;
+  delta: string | null;
 };
 
 type DocumentRow = { name: string; created_by: string; created_at: string };
@@ -154,22 +178,17 @@ export class SqliteStore implements Store {
     });
   }
 
-  private rowToArtifactVersion(row: ArtifactRow): ArtifactVersion {
+  /** Build the status-specific fields common to all artifact-version envelopes. */
+  private statusFieldsFromRow(row: ArtifactRow): Record<string, unknown> {
     const base = {
-      documentName: row.document_name,
-      name: row.name,
       version: row.version,
-      kind: row.kind,
-      content: row.content,
       proposedBy: row.proposed_by,
       proposedAt: row.proposed_at,
     };
-    if (row.status === 'proposed') {
-      return { ...base, status: 'proposed' };
-    }
+    if (row.status === 'proposed') return { ...base, status: 'proposed' };
     if (row.status === 'accepted') {
       if (row.accepted_by === null || row.accepted_at === null) {
-        throw new Error(`accepted artifact ${row.name}@${row.version} missing accepted_by/at`);
+        throw new Error(`accepted artifact ${row.identity_key}@v${row.version} missing accepted_by/at`);
       }
       return {
         ...base,
@@ -179,7 +198,7 @@ export class SqliteStore implements Store {
       };
     }
     if (row.rejected_by === null || row.rejected_at === null || row.rejection_reason === null) {
-      throw new Error(`rejected artifact ${row.name}@${row.version} missing rejected_by/at/reason`);
+      throw new Error(`rejected artifact ${row.identity_key}@v${row.version} missing rejected_by/at/reason`);
     }
     return {
       ...base,
@@ -188,6 +207,40 @@ export class SqliteStore implements Store {
       rejectedAt: row.rejected_at,
       rejectionReason: row.rejection_reason,
     };
+  }
+
+  private rowToOperationArtifact(row: ArtifactRow): OperationArtifact {
+    if (row.kind !== 'operation') throw new Error(`expected operation, got ${row.kind}`);
+    const { method, path } = parseOperationIdentityKey(row.identity_key);
+    return OperationArtifactSchema.parse({
+      kind: 'operation',
+      documentName: row.document_name,
+      method,
+      path,
+      spec: JSON.parse(row.spec) as unknown,
+      ...this.statusFieldsFromRow(row),
+    });
+  }
+
+  private rowToSchemaArtifact(row: ArtifactRow): SchemaArtifact {
+    if (row.kind !== 'schema') throw new Error(`expected schema, got ${row.kind}`);
+    return SchemaArtifactSchema.parse({
+      kind: 'schema',
+      documentName: row.document_name,
+      name: row.identity_key,
+      spec: JSON.parse(row.spec) as unknown,
+      ...this.statusFieldsFromRow(row),
+    });
+  }
+
+  private rowToConventionArtifact(row: ArtifactRow): ConventionArtifact {
+    if (row.kind !== 'convention') throw new Error(`expected convention, got ${row.kind}`);
+    return ConventionArtifactSchema.parse({
+      kind: 'convention',
+      documentName: row.document_name,
+      spec: JSON.parse(row.spec) as unknown,
+      ...this.statusFieldsFromRow(row),
+    });
   }
 
   /** Insert an event row, return the materialized Event, and notify subscribers. */
@@ -206,6 +259,253 @@ export class SqliteStore implements Store {
     });
     this.notifier.notify(documentName);
     return event;
+  }
+
+  /** Fetch the latest version row for (document, kind, identity_key) regardless of status — used
+   *  to compute the delta when a new proposal lands. */
+  private latestVersionRow(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+  ): ArtifactRow | undefined {
+    return this.db
+      .prepare<[string, string, string], ArtifactRow>(
+        `SELECT * FROM artifact_versions
+         WHERE document_name = ? AND kind = ? AND identity_key = ?
+         ORDER BY version DESC LIMIT 1`,
+      )
+      .get(documentName, kind, identityKey);
+  }
+
+  /** Generic propose for any kind. Computes the delta vs previous version (any status). */
+  private proposeRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    spec: unknown,
+    by: Identity,
+  ): ArtifactRow {
+    const document = this.db
+      .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
+      .get(documentName);
+    if (!document) {
+      throw new StoreError('document_not_found', `document "${documentName}" not found`);
+    }
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const prev = this.latestVersionRow(documentName, kind, identityKey);
+      const version = (prev?.version ?? 0) + 1;
+      const delta =
+        prev !== undefined
+          ? compactSummary(generatePatch(JSON.parse(prev.spec) as unknown, spec)) || '(no change)'
+          : null;
+      const proposedAt = now();
+      this.db
+        .prepare(
+          `INSERT INTO artifact_versions
+             (document_name, kind, identity_key, version, spec, status, proposed_by, proposed_at, delta)
+           VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?)`,
+        )
+        .run(documentName, kind, identityKey, version, JSON.stringify(spec), by, proposedAt, delta);
+      this.insertEvent(documentName, 'artifact_proposed', {
+        from: by,
+        artifactKind: kind,
+        identityKey,
+        version,
+        delta,
+      });
+      row = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+    });
+    tx();
+    if (!row) throw new Error('proposeRaw: row missing after insert');
+    return row;
+  }
+
+  /** Generic accept for any kind. */
+  private acceptRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    version: number,
+    by: Identity,
+  ): ArtifactRow {
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+      if (!existing) {
+        throw new StoreError(
+          'artifact_not_found',
+          `${kind} ${identityKey}@v${version} not found`,
+        );
+      }
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `${kind} ${identityKey}@v${version} is ${existing.status}, not proposed`,
+        );
+      }
+      if (existing.proposed_by === by) {
+        throw new StoreError(
+          'cannot_accept_own',
+          `${by} cannot accept their own proposal of ${kind} ${identityKey}@v${version}`,
+        );
+      }
+      const acceptedAt = now();
+      this.db
+        .prepare(
+          `UPDATE artifact_versions
+             SET status = 'accepted', accepted_by = ?, accepted_at = ?
+             WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?`,
+        )
+        .run(by, acceptedAt, documentName, kind, identityKey, version);
+      this.insertEvent(documentName, 'artifact_accepted', {
+        from: by,
+        artifactKind: kind,
+        identityKey,
+        version,
+      });
+      row = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+    });
+    tx();
+    if (!row) throw new Error('acceptRaw: row missing after update');
+    return row;
+  }
+
+  /** Generic reject for any kind. */
+  private rejectRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    version: number,
+    reason: string,
+    by: Identity,
+  ): ArtifactRow {
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+      if (!existing) {
+        throw new StoreError(
+          'artifact_not_found',
+          `${kind} ${identityKey}@v${version} not found`,
+        );
+      }
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `${kind} ${identityKey}@v${version} is ${existing.status}, not proposed`,
+        );
+      }
+      if (existing.proposed_by === by) {
+        throw new StoreError(
+          'cannot_reject_own',
+          `${by} cannot reject their own proposal of ${kind} ${identityKey}@v${version}`,
+        );
+      }
+      const rejectedAt = now();
+      this.db
+        .prepare(
+          `UPDATE artifact_versions
+             SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_reason = ?
+             WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?`,
+        )
+        .run(by, rejectedAt, reason, documentName, kind, identityKey, version);
+      this.insertEvent(documentName, 'artifact_rejected', {
+        from: by,
+        artifactKind: kind,
+        identityKey,
+        version,
+        reason,
+      });
+      row = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+    });
+    tx();
+    if (!row) throw new Error('rejectRaw: row missing after update');
+    return row;
+  }
+
+  private getRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    selector: { version?: number; status?: 'accepted' | 'proposed' },
+  ): ArtifactRow | undefined {
+    if (selector.version !== undefined) {
+      return this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, selector.version);
+    }
+    const status = selector.status ?? 'accepted';
+    return this.db
+      .prepare<[string, string, string, string], ArtifactRow>(
+        `SELECT * FROM artifact_versions
+         WHERE document_name = ? AND kind = ? AND identity_key = ? AND status = ?
+         ORDER BY version DESC LIMIT 1`,
+      )
+      .get(documentName, kind, identityKey, status);
+  }
+
+  /** Build a summary (current/proposed/delta) from the version rows for one identity key. */
+  private buildSummary(rows: ArtifactRow[]): {
+    currentVersion: number | null;
+    currentAcceptedAt: string | null;
+    latestProposedVersion: number | null;
+    latestProposedBy: Identity | null;
+    latestProposedAt: string | null;
+    latestDelta: string | null;
+  } {
+    const accepted = [...rows].reverse().find((r) => r.status === 'accepted');
+    const proposed = [...rows].reverse().find((r) => r.status === 'proposed');
+    return {
+      currentVersion: accepted ? accepted.version : null,
+      currentAcceptedAt: accepted?.accepted_at ?? null,
+      latestProposedVersion: proposed ? proposed.version : null,
+      latestProposedBy: proposed ? proposed.proposed_by : null,
+      latestProposedAt: proposed ? proposed.proposed_at : null,
+      latestDelta: proposed?.delta ?? null,
+    };
+  }
+
+  private buildRationale(rows: ArtifactRow[]): RationaleEntry[] {
+    return rows
+      .slice()
+      .sort((a, b) => a.version - b.version)
+      .map((r) => {
+        const entry: RationaleEntry = {
+          version: r.version,
+          status: r.status,
+          proposedBy: r.proposed_by,
+          proposedAt: r.proposed_at,
+          delta: r.delta,
+        };
+        if (r.accepted_by) entry.acceptedBy = r.accepted_by;
+        if (r.accepted_at) entry.acceptedAt = r.accepted_at;
+        if (r.rejected_by) entry.rejectedBy = r.rejected_by;
+        if (r.rejected_at) entry.rejectedAt = r.rejected_at;
+        if (r.rejection_reason) entry.rejectionReason = r.rejection_reason;
+        return entry;
+      });
   }
 
   // --- documents ---
@@ -272,228 +572,287 @@ export class SqliteStore implements Store {
     return row?.max_id ?? 0;
   }
 
-  // --- artifacts ---
+  // --- endpoint artifacts ---
 
-  async proposeArtifact(
+  async proposeEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
-    kind: ArtifactKind,
-    content: string,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
     by: Identity,
-  ): Promise<ArtifactVersion> {
-    const document = await this.getDocument(documentName);
-    if (!document)
-      throw new StoreError('document_not_found', `document "${documentName}" not found`);
-
-    let row: ArtifactRow | undefined;
-    const tx = this.db.transaction(() => {
-      const maxRow = this.db
-        .prepare<[string, string], { max_v: number | null }>(
-          'SELECT MAX(version) AS max_v FROM artifact_versions WHERE document_name = ? AND name = ?',
-        )
-        .get(documentName, name);
-      const version = (maxRow?.max_v ?? 0) + 1;
-      const proposedAt = now();
-      this.db
-        .prepare(
-          `INSERT INTO artifact_versions
-             (document_name, name, version, kind, content, proposed_by, proposed_at, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed')`,
-        )
-        .run(documentName, name, version, kind, content, by, proposedAt);
-      this.insertEvent(documentName, 'artifact_proposed', {
-        from: by,
-        artifactName: name,
-        artifactKind: kind,
-        version,
-      });
-      row = this.db
-        .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-        )
-        .get(documentName, name, version);
-    });
-    tx();
-    if (!row) throw new Error('proposeArtifact: row missing after insert');
-    return this.rowToArtifactVersion(row);
+  ): Promise<OperationArtifact> {
+    const row = this.proposeRaw(
+      documentName,
+      'operation',
+      operationIdentityKey(method, path),
+      spec,
+      by,
+    );
+    return this.rowToOperationArtifact(row);
   }
 
-  async acceptArtifact(
+  async acceptEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
     by: Identity,
-  ): Promise<ArtifactVersion> {
-    let row: ArtifactRow | undefined;
-    const tx = this.db.transaction(() => {
-      const existing = this.db
-        .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-        )
-        .get(documentName, name, version);
-      if (!existing) {
-        throw new StoreError('artifact_not_found', `artifact ${name}@${version} not found`);
-      }
-      if (existing.status !== 'proposed') {
-        throw new StoreError(
-          'artifact_not_pending',
-          `artifact ${name}@${version} is ${existing.status}, not proposed`,
-        );
-      }
-      if (existing.proposed_by === by) {
-        throw new StoreError(
-          'cannot_accept_own',
-          `${by} cannot accept their own proposal of ${name}@${version}`,
-        );
-      }
-      const acceptedAt = now();
-      this.db
-        .prepare(
-          `UPDATE artifact_versions
-             SET status = 'accepted', accepted_by = ?, accepted_at = ?
-             WHERE document_name = ? AND name = ? AND version = ?`,
-        )
-        .run(by, acceptedAt, documentName, name, version);
-      this.insertEvent(documentName, 'artifact_accepted', {
-        from: by,
-        artifactName: name,
-        version,
-      });
-      row = this.db
-        .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-        )
-        .get(documentName, name, version);
-    });
-    tx();
-    if (!row) throw new Error('acceptArtifact: row missing after update');
-    return this.rowToArtifactVersion(row);
+  ): Promise<OperationArtifact> {
+    return this.rowToOperationArtifact(
+      this.acceptRaw(documentName, 'operation', operationIdentityKey(method, path), version, by),
+    );
   }
 
-  async rejectArtifact(
+  async rejectEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
     reason: string,
     by: Identity,
-  ): Promise<ArtifactVersion> {
-    let row: ArtifactRow | undefined;
-    const tx = this.db.transaction(() => {
-      const existing = this.db
-        .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-        )
-        .get(documentName, name, version);
-      if (!existing) {
-        throw new StoreError('artifact_not_found', `artifact ${name}@${version} not found`);
-      }
-      if (existing.status !== 'proposed') {
-        throw new StoreError(
-          'artifact_not_pending',
-          `artifact ${name}@${version} is ${existing.status}, not proposed`,
-        );
-      }
-      if (existing.proposed_by === by) {
-        throw new StoreError(
-          'cannot_reject_own',
-          `${by} cannot reject their own proposal of ${name}@${version}`,
-        );
-      }
-      const rejectedAt = now();
-      this.db
-        .prepare(
-          `UPDATE artifact_versions
-             SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_reason = ?
-             WHERE document_name = ? AND name = ? AND version = ?`,
-        )
-        .run(by, rejectedAt, reason, documentName, name, version);
-      this.insertEvent(documentName, 'artifact_rejected', {
-        from: by,
-        artifactName: name,
+  ): Promise<OperationArtifact> {
+    return this.rowToOperationArtifact(
+      this.rejectRaw(
+        documentName,
+        'operation',
+        operationIdentityKey(method, path),
         version,
         reason,
-      });
-      row = this.db
-        .prepare<[string, string, number], ArtifactRow>(
-          'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-        )
-        .get(documentName, name, version);
+        by,
+      ),
+    );
+  }
+
+  async getEndpointCurrent(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+  ): Promise<OperationArtifact | null> {
+    const row = this.getRaw(documentName, 'operation', operationIdentityKey(method, path), {
+      status: 'accepted',
     });
-    tx();
-    if (!row) throw new Error('rejectArtifact: row missing after update');
-    return this.rowToArtifactVersion(row);
+    return row ? this.rowToOperationArtifact(row) : null;
   }
 
-  async getArtifactCurrent(
+  async getEndpointProposed(
     documentName: DocumentName,
-    name: ArtifactName,
-  ): Promise<ArtifactVersion | null> {
-    const row = this.db
-      .prepare<[string, string], ArtifactRow>(
-        `SELECT * FROM artifact_versions
-         WHERE document_name = ? AND name = ? AND status = 'accepted'
-         ORDER BY version DESC LIMIT 1`,
-      )
-      .get(documentName, name);
-    return row ? this.rowToArtifactVersion(row) : null;
+    method: HttpMethod,
+    path: string,
+  ): Promise<OperationArtifact | null> {
+    const row = this.getRaw(documentName, 'operation', operationIdentityKey(method, path), {
+      status: 'proposed',
+    });
+    return row ? this.rowToOperationArtifact(row) : null;
   }
 
-  async getArtifactProposed(
+  async getEndpointByVersion(
     documentName: DocumentName,
-    name: ArtifactName,
-  ): Promise<ArtifactVersion | null> {
-    const row = this.db
-      .prepare<[string, string], ArtifactRow>(
-        `SELECT * FROM artifact_versions
-         WHERE document_name = ? AND name = ? AND status = 'proposed'
-         ORDER BY version DESC LIMIT 1`,
-      )
-      .get(documentName, name);
-    return row ? this.rowToArtifactVersion(row) : null;
-  }
-
-  async getArtifactByVersion(
-    documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
-  ): Promise<ArtifactVersion | null> {
-    const row = this.db
-      .prepare<[string, string, number], ArtifactRow>(
-        'SELECT * FROM artifact_versions WHERE document_name = ? AND name = ? AND version = ?',
-      )
-      .get(documentName, name, version);
-    return row ? this.rowToArtifactVersion(row) : null;
+  ): Promise<OperationArtifact | null> {
+    const row = this.getRaw(documentName, 'operation', operationIdentityKey(method, path), {
+      version,
+    });
+    return row ? this.rowToOperationArtifact(row) : null;
   }
 
-  async listArtifacts(documentName: DocumentName): Promise<ArtifactSummary[]> {
+  async listEndpoints(documentName: DocumentName): Promise<EndpointSummary[]> {
     const rows = this.db
       .prepare<[string], ArtifactRow>(
-        'SELECT * FROM artifact_versions WHERE document_name = ? ORDER BY name, version',
+        "SELECT * FROM artifact_versions WHERE document_name = ? AND kind = 'operation' ORDER BY identity_key, version",
       )
       .all(documentName);
-    const byName = new Map<string, ArtifactRow[]>();
+    const byKey = new Map<string, ArtifactRow[]>();
     for (const r of rows) {
-      const list = byName.get(r.name);
+      const list = byKey.get(r.identity_key);
       if (list) list.push(r);
-      else byName.set(r.name, [r]);
+      else byKey.set(r.identity_key, [r]);
     }
-    const summaries: ArtifactSummary[] = [];
-    for (const [name, versions] of byName) {
-      const accepted = [...versions].reverse().find((v) => v.status === 'accepted');
-      const proposed = [...versions].reverse().find((v) => v.status === 'proposed');
-      const latest = versions[versions.length - 1];
-      if (!latest) continue;
-      summaries.push({
-        name,
-        kind: latest.kind,
-        currentVersion: accepted ? accepted.version : null,
-        currentAcceptedAt: accepted?.accepted_at ?? null,
-        latestProposedVersion: proposed ? proposed.version : null,
-        latestProposedBy: proposed ? proposed.proposed_by : null,
-        latestProposedAt: proposed ? proposed.proposed_at : null,
+    const out: EndpointSummary[] = [];
+    for (const [key, versions] of byKey) {
+      const { method, path } = parseOperationIdentityKey(key);
+      const accepted = [...versions].reverse().find((r) => r.status === 'accepted');
+      let summary: string | null = null;
+      if (accepted) {
+        try {
+          const spec = JSON.parse(accepted.spec) as { summary?: unknown };
+          if (typeof spec.summary === 'string') summary = spec.summary;
+        } catch {
+          /* ignore */
+        }
+      }
+      out.push({
+        method,
+        path,
+        summary,
+        ...this.buildSummary(versions),
       });
     }
-    return summaries;
+    return out;
+  }
+
+  // --- schema artifacts ---
+
+  async proposeSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    by: Identity,
+  ): Promise<SchemaArtifact> {
+    return this.rowToSchemaArtifact(this.proposeRaw(documentName, 'schema', name, spec, by));
+  }
+
+  async acceptSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    by: Identity,
+  ): Promise<SchemaArtifact> {
+    return this.rowToSchemaArtifact(this.acceptRaw(documentName, 'schema', name, version, by));
+  }
+
+  async rejectSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    reason: string,
+    by: Identity,
+  ): Promise<SchemaArtifact> {
+    return this.rowToSchemaArtifact(
+      this.rejectRaw(documentName, 'schema', name, version, reason, by),
+    );
+  }
+
+  async getSchemaCurrent(
+    documentName: DocumentName,
+    name: SchemaName,
+  ): Promise<SchemaArtifact | null> {
+    const row = this.getRaw(documentName, 'schema', name, { status: 'accepted' });
+    return row ? this.rowToSchemaArtifact(row) : null;
+  }
+
+  async getSchemaProposed(
+    documentName: DocumentName,
+    name: SchemaName,
+  ): Promise<SchemaArtifact | null> {
+    const row = this.getRaw(documentName, 'schema', name, { status: 'proposed' });
+    return row ? this.rowToSchemaArtifact(row) : null;
+  }
+
+  async getSchemaByVersion(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+  ): Promise<SchemaArtifact | null> {
+    const row = this.getRaw(documentName, 'schema', name, { version });
+    return row ? this.rowToSchemaArtifact(row) : null;
+  }
+
+  async listSchemas(documentName: DocumentName): Promise<SchemaSummary[]> {
+    const rows = this.db
+      .prepare<[string], ArtifactRow>(
+        "SELECT * FROM artifact_versions WHERE document_name = ? AND kind = 'schema' ORDER BY identity_key, version",
+      )
+      .all(documentName);
+    const byKey = new Map<string, ArtifactRow[]>();
+    for (const r of rows) {
+      const list = byKey.get(r.identity_key);
+      if (list) list.push(r);
+      else byKey.set(r.identity_key, [r]);
+    }
+    const out: SchemaSummary[] = [];
+    for (const [name, versions] of byKey) {
+      out.push({ name, ...this.buildSummary(versions) });
+    }
+    return out;
+  }
+
+  // --- convention artifact (singleton per document) ---
+
+  async proposeConvention(
+    documentName: DocumentName,
+    spec: ConventionSpec,
+    by: Identity,
+  ): Promise<ConventionArtifact> {
+    return this.rowToConventionArtifact(
+      this.proposeRaw(documentName, 'convention', CONVENTION_KEY, spec, by),
+    );
+  }
+
+  async acceptConvention(
+    documentName: DocumentName,
+    version: number,
+    by: Identity,
+  ): Promise<ConventionArtifact> {
+    return this.rowToConventionArtifact(
+      this.acceptRaw(documentName, 'convention', CONVENTION_KEY, version, by),
+    );
+  }
+
+  async rejectConvention(
+    documentName: DocumentName,
+    version: number,
+    reason: string,
+    by: Identity,
+  ): Promise<ConventionArtifact> {
+    return this.rowToConventionArtifact(
+      this.rejectRaw(documentName, 'convention', CONVENTION_KEY, version, reason, by),
+    );
+  }
+
+  async getConventionCurrent(documentName: DocumentName): Promise<ConventionArtifact | null> {
+    const row = this.getRaw(documentName, 'convention', CONVENTION_KEY, { status: 'accepted' });
+    return row ? this.rowToConventionArtifact(row) : null;
+  }
+
+  async getConventionProposed(documentName: DocumentName): Promise<ConventionArtifact | null> {
+    const row = this.getRaw(documentName, 'convention', CONVENTION_KEY, { status: 'proposed' });
+    return row ? this.rowToConventionArtifact(row) : null;
+  }
+
+  async getConventionByVersion(
+    documentName: DocumentName,
+    version: number,
+  ): Promise<ConventionArtifact | null> {
+    const row = this.getRaw(documentName, 'convention', CONVENTION_KEY, { version });
+    return row ? this.rowToConventionArtifact(row) : null;
+  }
+
+  // --- rationale ---
+
+  async rationaleForEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+  ): Promise<RationaleEntry[]> {
+    return this.rationaleRaw(documentName, 'operation', operationIdentityKey(method, path));
+  }
+
+  async rationaleForSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+  ): Promise<RationaleEntry[]> {
+    return this.rationaleRaw(documentName, 'schema', name);
+  }
+
+  async rationaleForConvention(documentName: DocumentName): Promise<RationaleEntry[]> {
+    return this.rationaleRaw(documentName, 'convention', CONVENTION_KEY);
+  }
+
+  private rationaleRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+  ): RationaleEntry[] {
+    const rows = this.db
+      .prepare<[string, string, string], ArtifactRow>(
+        `SELECT * FROM artifact_versions
+         WHERE document_name = ? AND kind = ? AND identity_key = ?
+         ORDER BY version`,
+      )
+      .all(documentName, kind, identityKey);
+    return this.buildRationale(rows);
   }
 
   // --- parties / TCP auth ---
@@ -534,7 +893,6 @@ export class SqliteStore implements Store {
   }
 
   async revokeParty(identity: Identity): Promise<void> {
-    // CASCADE deletes party_tokens and cursors automatically.
     this.db.prepare('DELETE FROM parties WHERE identity = ?').run(identity);
   }
 
@@ -616,7 +974,6 @@ export class SqliteStore implements Store {
   // --- inbox ---
 
   async inboxSummary(identity: Identity): Promise<InboxEntry[]> {
-    // Documents with at least one event newer than the identity's cursor.
     const rows = this.db
       .prepare<
         { identity: string },
@@ -644,9 +1001,7 @@ export class SqliteStore implements Store {
       if (r.new_count <= 0) continue;
       const lastRow = this.db
         .prepare<[string], EventRow>(
-          `SELECT * FROM events
-           WHERE document_name = ?
-           ORDER BY id DESC LIMIT 1`,
+          'SELECT * FROM events WHERE document_name = ? ORDER BY id DESC LIMIT 1',
         )
         .get(r.document_name);
       if (!lastRow) continue;
@@ -674,12 +1029,14 @@ function previewOf(e: Event): string {
   switch (e.kind) {
     case 'message':
       return truncate(e.text, 80);
-    case 'artifact_proposed':
-      return `proposed ${e.artifactName}@${e.version} (${e.artifactKind})`;
+    case 'artifact_proposed': {
+      const delta = e.delta ? ` (${truncate(e.delta, 50)})` : '';
+      return `proposed ${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;
+    }
     case 'artifact_accepted':
-      return `accepted ${e.artifactName}@${e.version}`;
+      return `accepted ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
-      return `rejected ${e.artifactName}@${e.version}: ${truncate(e.reason, 60)}`;
+      return `rejected ${e.artifactKind} ${e.identityKey} v${e.version}: ${truncate(e.reason, 50)}`;
     case 'document_created':
       return `document created by ${e.by}`;
   }

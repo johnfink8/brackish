@@ -3,12 +3,15 @@
 // which we default to because it's denser in the agent's context window.
 
 import type {
-  ArtifactSummary,
-  ArtifactVersion,
+  ConventionArtifact,
   Document,
+  EndpointSummary,
   Event,
   InboxEntry,
+  OperationArtifact,
   Party,
+  SchemaArtifact,
+  SchemaSummary,
 } from './models.js';
 
 const trim = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
@@ -20,12 +23,14 @@ const eventPreview = (e: Event): string => {
   switch (e.kind) {
     case 'message':
       return trim(e.text, 80);
-    case 'artifact_proposed':
-      return `${e.artifactName}@${e.version} (${e.artifactKind})`;
+    case 'artifact_proposed': {
+      const delta = e.delta ? ` ${trim(e.delta, 60)}` : '';
+      return `${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;
+    }
     case 'artifact_accepted':
-      return `${e.artifactName}@${e.version}`;
+      return `${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
-      return `${e.artifactName}@${e.version}: ${trim(e.reason, 60)}`;
+      return `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`;
     case 'document_created':
       return `created by ${e.by}`;
   }
@@ -73,15 +78,6 @@ export function formatInbox(identity: string, entries: InboxEntry[]): string {
   return `${entries.length} document${entries.length === 1 ? '' : 's'} with new events for ${identity}:\n${lines.join('\n')}`;
 }
 
-export function formatArtifactSummaries(summaries: ArtifactSummary[]): string {
-  if (summaries.length === 0) return '(no artifacts)';
-  const lines = summaries.map(
-    (a) =>
-      `${pad(a.name, 20)}  ${pad(a.kind, 12)}  ${pad(a.currentVersion ? `v${a.currentVersion}` : '—', 8)}  ${pad(a.latestProposedVersion ? `v${a.latestProposedVersion}` : '—', 10)}  ${pad(a.latestProposedBy ?? '—', 10)}  ${a.latestProposedAt ? shortDate(a.latestProposedAt) : '—'}`,
-  );
-  return `${pad('NAME', 20)}  ${pad('KIND', 12)}  ${pad('CURRENT', 8)}  ${pad('PROPOSED', 10)}  ${pad('BY', 10)}  AT\n${lines.join('\n')}`;
-}
-
 export function formatParties(parties: Party[]): string {
   if (parties.length === 0) return '(no parties)';
   const lines = parties.map(
@@ -91,8 +87,51 @@ export function formatParties(parties: Party[]): string {
   return `${pad('IDENTITY', 16)}  ${pad('CREATED', 21)}  LAST_SEEN\n${lines.join('\n')}`;
 }
 
-export function describeArtifactVersion(v: ArtifactVersion): string {
-  const base = `${v.name}@${v.version} (${v.kind}) — ${v.status}, proposed by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
+// --- artifact summaries (kind-aware) ---
+
+export function formatEndpointSummaries(summaries: EndpointSummary[]): string {
+  if (summaries.length === 0) return '(no endpoints)';
+  const lines = summaries.map(
+    (a) =>
+      `${pad(a.method.toUpperCase(), 6)} ${pad(a.path, 28)}  ${pad(versionPair(a.currentVersion, a.latestProposedVersion), 10)}  ${pad(a.latestProposedBy ?? '—', 10)}  ${trim(a.summary ?? a.latestDelta ?? '', 60)}`,
+  );
+  return `${pad('METHOD', 6)} ${pad('PATH', 28)}  ${pad('CUR/PROP', 10)}  ${pad('LAST_BY', 10)}  NOTE\n${lines.join('\n')}`;
+}
+
+export function formatSchemaSummaries(summaries: SchemaSummary[]): string {
+  if (summaries.length === 0) return '(no schemas)';
+  const lines = summaries.map(
+    (a) =>
+      `${pad(a.name, 24)}  ${pad(versionPair(a.currentVersion, a.latestProposedVersion), 10)}  ${pad(a.latestProposedBy ?? '—', 10)}  ${trim(a.latestDelta ?? '', 60)}`,
+  );
+  return `${pad('NAME', 24)}  ${pad('CUR/PROP', 10)}  ${pad('LAST_BY', 10)}  DELTA\n${lines.join('\n')}`;
+}
+
+function versionPair(current: number | null, latestProposed: number | null): string {
+  const c = current === null ? '—' : `v${current}`;
+  const p = latestProposed === null ? '—' : `v${latestProposed}`;
+  return `${c} / ${p}`;
+}
+
+export function describeOperation(v: OperationArtifact): string {
+  const base = `${v.method.toUpperCase()} ${v.path} v${v.version} — ${v.status}, proposed by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
+  return decorateStatus(base, v);
+}
+
+export function describeSchema(v: SchemaArtifact): string {
+  const base = `${v.name} v${v.version} — ${v.status}, proposed by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
+  return decorateStatus(base, v);
+}
+
+export function describeConvention(v: ConventionArtifact): string {
+  const base = `convention v${v.version} — ${v.status}, proposed by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
+  return decorateStatus(base, v);
+}
+
+function decorateStatus(
+  base: string,
+  v: OperationArtifact | SchemaArtifact | ConventionArtifact,
+): string {
   switch (v.status) {
     case 'proposed':
       return base;

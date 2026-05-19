@@ -9,7 +9,6 @@ import { Hono } from 'hono';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from './config.js';
 import {
-  ArtifactNameSchema,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
@@ -17,9 +16,7 @@ import {
   DocumentNameSchema,
   type Event,
   IdentitySchema,
-  ProposeArtifactRequestSchema,
   RedeemInviteRequestSchema,
-  RejectArtifactRequestSchema,
   SendMessageRequestSchema,
 } from './models.js';
 import { EventNotifier } from './notifier.js';
@@ -158,87 +155,6 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, documents });
   });
 
-  // --- artifacts ---
-
-  app.post('/documents/:name/artifacts', async (c) => {
-    const documentName = DocumentNameSchema.parse(c.req.param('name'));
-    const body = ProposeArtifactRequestSchema.parse(await c.req.json());
-    const version = await store.proposeArtifact(
-      documentName,
-      body.name,
-      body.kind,
-      body.content,
-      c.get('identity'),
-    );
-    return c.json(version, 201);
-  });
-
-  app.get('/documents/:name/artifacts', async (c) => {
-    const documentName = DocumentNameSchema.parse(c.req.param('name'));
-    const artifacts = await store.listArtifacts(documentName);
-    return c.json({ artifacts });
-  });
-
-  app.get('/documents/:name/artifacts/:aname', async (c) => {
-    const documentName = DocumentNameSchema.parse(c.req.param('name'));
-    const aname = ArtifactNameSchema.parse(c.req.param('aname'));
-    const versionStr = c.req.query('version');
-    const wantProposed = c.req.query('proposed') === '1' || c.req.query('proposed') === 'true';
-
-    if (versionStr !== undefined) {
-      const v = Number.parseInt(versionStr, 10);
-      if (!Number.isFinite(v) || v < 1) {
-        return c.json({ error: 'invalid version' }, 400);
-      }
-      const found = await store.getArtifactByVersion(documentName, aname, v);
-      if (!found) {
-        return c.json(
-          { error: `artifact ${aname}@${v} not found`, code: 'artifact_not_found' },
-          404,
-        );
-      }
-      return c.json(found);
-    }
-    if (wantProposed) {
-      const found = await store.getArtifactProposed(documentName, aname);
-      if (!found) {
-        return c.json(
-          { error: `no proposed version of ${aname}`, code: 'artifact_not_found' },
-          404,
-        );
-      }
-      return c.json(found);
-    }
-    const found = await store.getArtifactCurrent(documentName, aname);
-    if (!found) {
-      return c.json({ error: `no accepted version of ${aname}`, code: 'artifact_not_found' }, 404);
-    }
-    return c.json(found);
-  });
-
-  app.post('/documents/:name/artifacts/:aname/accept', async (c) => {
-    const documentName = DocumentNameSchema.parse(c.req.param('name'));
-    const aname = ArtifactNameSchema.parse(c.req.param('aname'));
-    const version = await resolveTargetVersion(store, documentName, aname, c.req.query('version'));
-    const accepted = await store.acceptArtifact(documentName, aname, version, c.get('identity'));
-    return c.json(accepted);
-  });
-
-  app.post('/documents/:name/artifacts/:aname/reject', async (c) => {
-    const documentName = DocumentNameSchema.parse(c.req.param('name'));
-    const aname = ArtifactNameSchema.parse(c.req.param('aname'));
-    const body = RejectArtifactRequestSchema.parse(await c.req.json());
-    const version = await resolveTargetVersion(store, documentName, aname, c.req.query('version'));
-    const rejected = await store.rejectArtifact(
-      documentName,
-      aname,
-      version,
-      body.reason,
-      c.get('identity'),
-    );
-    return c.json(rejected);
-  });
-
   return app;
 }
 
@@ -288,23 +204,6 @@ function clampTimeoutSeconds(raw: string | undefined): number {
   return Math.min(Math.max(n, WAIT_TIMEOUT_MIN_S), WAIT_TIMEOUT_MAX_S);
 }
 
-async function resolveTargetVersion(
-  store: Store,
-  documentName: DocumentName,
-  artifactName: string,
-  raw: string | undefined,
-): Promise<number> {
-  if (raw !== undefined) {
-    const v = Number.parseInt(raw, 10);
-    if (!Number.isFinite(v) || v < 1) throw new HttpError(400, 'invalid version');
-    return v;
-  }
-  const proposed = await store.getArtifactProposed(documentName, artifactName);
-  if (!proposed) {
-    throw new StoreError('artifact_not_found', `no proposed version of ${artifactName} to act on`);
-  }
-  return proposed.version;
-}
 
 /** Long-poll wait: register a notifier resolver, race against timeout, race-guard against
  *  events that landed between the caller calling `since` and our register. */

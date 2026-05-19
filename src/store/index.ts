@@ -6,19 +6,38 @@
 // obligation is to call `notifier.notify(documentName)` after a successful append.
 
 import type {
-  ArtifactKind,
-  ArtifactName,
-  ArtifactSummary,
-  ArtifactVersion,
+  ConventionArtifact,
+  ConventionSpec,
   Cursor,
   Document,
   DocumentName,
+  EndpointSummary,
   Event,
+  HttpMethod,
   Identity,
   InboxEntry,
   Invite,
+  JSONSchema,
+  OperationArtifact,
+  OperationSpec,
   Party,
+  SchemaArtifact,
+  SchemaName,
+  SchemaSummary,
 } from '../models.js';
+
+export type RationaleEntry = {
+  version: number;
+  status: 'proposed' | 'accepted' | 'rejected';
+  proposedBy: Identity;
+  proposedAt: string;
+  acceptedBy?: Identity;
+  acceptedAt?: string;
+  rejectedBy?: Identity;
+  rejectedAt?: string;
+  rejectionReason?: string;
+  delta: string | null;
+};
 
 export interface Store {
   // --- documents ---
@@ -27,55 +46,115 @@ export interface Store {
   listDocuments(): Promise<Document[]>;
 
   // --- events ---
-  /** Append a `message` event. Returns the persisted event with its assigned id. */
   appendMessage(documentName: DocumentName, from: Identity, text: string): Promise<Event>;
-  /** Returns events strictly greater than `since`, up to `limit`. */
   listEvents(documentName: DocumentName, since: Cursor, limit: number): Promise<Event[]>;
-  /** Highest event id currently stored for a document. Used to size the cursor. */
   latestCursor(documentName: DocumentName): Promise<Cursor>;
 
-  // --- artifacts ---
-  proposeArtifact(
+  // --- endpoint artifacts (OpenAPI Operation Objects) ---
+  proposeEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
-    kind: ArtifactKind,
-    content: string,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
     by: Identity,
-  ): Promise<ArtifactVersion>;
-  acceptArtifact(
+  ): Promise<OperationArtifact>;
+  acceptEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
     by: Identity,
-  ): Promise<ArtifactVersion>;
-  rejectArtifact(
+  ): Promise<OperationArtifact>;
+  rejectEndpoint(
     documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
     reason: string,
     by: Identity,
-  ): Promise<ArtifactVersion>;
-  /** Latest accepted version. `null` if no version has been accepted yet. */
-  getArtifactCurrent(
+  ): Promise<OperationArtifact>;
+  getEndpointCurrent(
     documentName: DocumentName,
-    name: ArtifactName,
-  ): Promise<ArtifactVersion | null>;
-  /** Latest proposed-but-not-yet-resolved version. */
-  getArtifactProposed(
+    method: HttpMethod,
+    path: string,
+  ): Promise<OperationArtifact | null>;
+  getEndpointProposed(
     documentName: DocumentName,
-    name: ArtifactName,
-  ): Promise<ArtifactVersion | null>;
-  getArtifactByVersion(
+    method: HttpMethod,
+    path: string,
+  ): Promise<OperationArtifact | null>;
+  getEndpointByVersion(
     documentName: DocumentName,
-    name: ArtifactName,
+    method: HttpMethod,
+    path: string,
     version: number,
-  ): Promise<ArtifactVersion | null>;
-  listArtifacts(documentName: DocumentName): Promise<ArtifactSummary[]>;
+  ): Promise<OperationArtifact | null>;
+  listEndpoints(documentName: DocumentName): Promise<EndpointSummary[]>;
+
+  // --- schema artifacts (JSON Schema component schemas) ---
+  proposeSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    by: Identity,
+  ): Promise<SchemaArtifact>;
+  acceptSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    by: Identity,
+  ): Promise<SchemaArtifact>;
+  rejectSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+    reason: string,
+    by: Identity,
+  ): Promise<SchemaArtifact>;
+  getSchemaCurrent(documentName: DocumentName, name: SchemaName): Promise<SchemaArtifact | null>;
+  getSchemaProposed(documentName: DocumentName, name: SchemaName): Promise<SchemaArtifact | null>;
+  getSchemaByVersion(
+    documentName: DocumentName,
+    name: SchemaName,
+    version: number,
+  ): Promise<SchemaArtifact | null>;
+  listSchemas(documentName: DocumentName): Promise<SchemaSummary[]>;
+
+  // --- convention artifact (singleton per document; info/servers/securitySchemes) ---
+  proposeConvention(
+    documentName: DocumentName,
+    spec: ConventionSpec,
+    by: Identity,
+  ): Promise<ConventionArtifact>;
+  acceptConvention(
+    documentName: DocumentName,
+    version: number,
+    by: Identity,
+  ): Promise<ConventionArtifact>;
+  rejectConvention(
+    documentName: DocumentName,
+    version: number,
+    reason: string,
+    by: Identity,
+  ): Promise<ConventionArtifact>;
+  getConventionCurrent(documentName: DocumentName): Promise<ConventionArtifact | null>;
+  getConventionProposed(documentName: DocumentName): Promise<ConventionArtifact | null>;
+  getConventionByVersion(
+    documentName: DocumentName,
+    version: number,
+  ): Promise<ConventionArtifact | null>;
+
+  // --- rationale (per identity key: full version chain with who/when/why) ---
+  rationaleForEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+  ): Promise<RationaleEntry[]>;
+  rationaleForSchema(documentName: DocumentName, name: SchemaName): Promise<RationaleEntry[]>;
+  rationaleForConvention(documentName: DocumentName): Promise<RationaleEntry[]>;
 
   // --- parties / TCP auth ---
-  /** Resolve identity from a persistent token (TCP auth path). */
   getIdentityForToken(token: string): Promise<Identity | null>;
-  /** Ensure a party row exists; used by socket peer-trust to lazily register identities. */
   ensureParty(identity: Identity): Promise<Party>;
   listParties(): Promise<Party[]>;
   revokeParty(identity: Identity): Promise<void>;
@@ -83,12 +162,10 @@ export interface Store {
 
   // --- invites ---
   createInvite(identity: Identity, ttlSeconds: number): Promise<Invite>;
-  /** Atomically redeem an unexpired invite; returns the (identity, persistent token) it yielded. */
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
 
   // --- cursors (server-tracked per (identity, document)) ---
   getLastSeenCursor(identity: Identity, documentName: DocumentName): Promise<Cursor>;
-  /** Advance to `cursor` iff strictly greater; idempotent on stale or out-of-order calls. */
   advanceCursor(identity: Identity, documentName: DocumentName, cursor: Cursor): Promise<void>;
 
   // --- inbox (cross-document summary for one identity) ---

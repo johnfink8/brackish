@@ -7,13 +7,6 @@
 import { Agent, type Response as UndiciResponse, fetch as undiciFetch } from 'undici';
 import type { z } from 'zod';
 import {
-  type ArtifactKind,
-  type ArtifactListResponse,
-  ArtifactListResponseSchema,
-  type ArtifactName,
-  type ArtifactSummary,
-  type ArtifactVersion,
-  ArtifactVersionSchema,
   type ConnectResponse,
   ConnectResponseSchema,
   type Document,
@@ -150,70 +143,6 @@ export class BrackishClient {
 
   inbox(): Promise<InboxResponse> {
     return this.fetchAndParse('/inbox', InboxResponseSchema);
-  }
-
-  // --- artifacts ---
-
-  proposeArtifact(
-    document: DocumentName,
-    name: ArtifactName,
-    kind: ArtifactKind,
-    content: string,
-  ): Promise<ArtifactVersion> {
-    return this.fetchAndParse(
-      `/documents/${encodeURIComponent(document)}/artifacts`,
-      ArtifactVersionSchema,
-      { method: 'POST', body: { name, kind, content } },
-    );
-  }
-
-  listArtifacts(document: DocumentName): Promise<ArtifactSummary[]> {
-    return this.fetchAndParse<ArtifactListResponse>(
-      `/documents/${encodeURIComponent(document)}/artifacts`,
-      ArtifactListResponseSchema,
-    ).then((r) => r.artifacts);
-  }
-
-  getArtifact(
-    document: DocumentName,
-    name: ArtifactName,
-    opts: { version?: number; proposed?: boolean } = {},
-  ): Promise<ArtifactVersion> {
-    return this.fetchAndParse(
-      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}`,
-      ArtifactVersionSchema,
-      {
-        query: {
-          version: opts.version,
-          proposed: opts.proposed ? '1' : undefined,
-        },
-      },
-    );
-  }
-
-  acceptArtifact(
-    document: DocumentName,
-    name: ArtifactName,
-    version?: number,
-  ): Promise<ArtifactVersion> {
-    return this.fetchAndParse(
-      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}/accept`,
-      ArtifactVersionSchema,
-      { method: 'POST', query: { version } },
-    );
-  }
-
-  rejectArtifact(
-    document: DocumentName,
-    name: ArtifactName,
-    reason: string,
-    version?: number,
-  ): Promise<ArtifactVersion> {
-    return this.fetchAndParse(
-      `/documents/${encodeURIComponent(document)}/artifacts/${encodeURIComponent(name)}/reject`,
-      ArtifactVersionSchema,
-      { method: 'POST', body: { reason }, query: { version } },
-    );
   }
 
   // --- parties, invites, connect ---
