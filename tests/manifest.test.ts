@@ -143,7 +143,7 @@ endpoints:
     expect(result.succeeded.every((s) => s.version === 1)).toBe(true);
   });
 
-  it('stops at a lint failure, leaving remaining items unproposed', async () => {
+  it('stops at a lint failure, with nothing proposed (atomic batch semantics)', async () => {
     // Endpoint with a path placeholder but no matching parameters entry → lint error.
     write(
       join(manifestDir, 'endpoints', 'GET-users-id.yaml'),
@@ -169,8 +169,8 @@ endpoints:
     if (result.failed && result.failed.stage === 'lint') {
       expect(result.failed.issues.length).toBeGreaterThan(0);
     }
-    expect(result.succeeded.map((s) => s.key.kind)).toEqual(['schema']);
-    expect(result.remaining).toEqual([]);
+    // Atomic batch: lint failure means we don't submit any propose. No partial success.
+    expect(result.succeeded).toEqual([]);
   });
 
   it('reports a parse error with a file path', async () => {
@@ -200,5 +200,23 @@ endpoints:
     write(manifestPath, `schemas:\n  - wrong: field\n`);
     const result = await proposeBatchFromManifest(host, 'd', manifestPath);
     expect(result.failed?.stage).toBe('manifest');
+  });
+
+  it('the OpenAPI meta-schema catches a bearer-no-scheme convention at the server (propose stage)', async () => {
+    // Convention with `securitySchemes.bearerAuth = { type: http }` — missing the required
+    // `scheme: bearer` field. The meta-schema check runs server-side against the assembled
+    // doc, so the local lint passes but the server rejects with spec_invalid at propose.
+    write(
+      join(manifestDir, 'convention.yaml'),
+      `info: { title: Orders API, version: 1.0.0 }\nsecuritySchemes:\n  bearerAuth:\n    type: http\n`,
+    );
+    const manifestPath = join(manifestDir, 'manifest.yaml');
+    write(manifestPath, `convention:\n  file: convention.yaml\n`);
+    const result = await proposeBatchFromManifest(host, 'd', manifestPath);
+    expect(result.failed?.stage).toBe('propose');
+    if (result.failed && result.failed.stage === 'propose') {
+      expect(result.failed.code).toBe('spec_invalid');
+    }
+    expect(result.succeeded).toEqual([]);
   });
 });

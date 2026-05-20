@@ -34,6 +34,9 @@ import {
   operationIdentityKey,
   type PartiesResponse,
   PartiesResponseSchema,
+  type ProposeBatchRequest,
+  type ProposeBatchResponse,
+  ProposeBatchResponseSchema,
   type RationaleResponse,
   RationaleResponseSchema,
   type SchemaArtifact,
@@ -47,11 +50,14 @@ import {
 } from '../lib/models.js';
 import { type OpenAPIDocument, OpenAPIDocumentSchema } from '../lib/openapi.js';
 
+export type SpecIssue = { severity: 'error' | 'warn'; field: string; message: string };
+
 export class ClientError extends Error {
   constructor(
     readonly status: number,
     readonly code: string | null,
     message: string,
+    readonly issues: SpecIssue[] = [],
   ) {
     super(message);
     this.name = 'ClientError';
@@ -163,6 +169,16 @@ export class BrackishClient {
 
   inbox(): Promise<InboxResponse> {
     return this.fetchAndParse('/inbox', InboxResponseSchema);
+  }
+
+  // --- propose-batch (atomic multi-artifact propose) ---
+
+  proposeBatch(document: DocumentName, body: ProposeBatchRequest): Promise<ProposeBatchResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/propose-batch`,
+      ProposeBatchResponseSchema,
+      { method: 'POST', body },
+    );
   }
 
   // --- endpoints (operation artifacts) ---
@@ -430,7 +446,12 @@ export class BrackishClient {
     const res = await this.request(`/documents/${encodeURIComponent(document)}/openapi.yaml`);
     if (!res.ok) {
       const body = ErrorBodySchema.parse(await res.json());
-      throw new ClientError(res.status, body.code ?? null, body.error ?? `HTTP ${res.status}`);
+      throw new ClientError(
+        res.status,
+        body.code ?? null,
+        body.error ?? `HTTP ${res.status}`,
+        body.issues ?? [],
+      );
     }
     return res.text();
   }
@@ -528,10 +549,17 @@ function jsonHeaders(extra: Record<string, string>, body: unknown): Record<strin
   return h;
 }
 
+const SpecIssueSchema = z.object({
+  severity: z.enum(['error', 'warn']),
+  field: z.string(),
+  message: z.string(),
+});
+
 const ErrorBodySchema = z
   .object({
     error: z.string().optional(),
     code: z.string().optional(),
+    issues: z.array(SpecIssueSchema).optional(),
   })
   .passthrough();
 
@@ -539,7 +567,12 @@ async function okJson(res: UndiciResponse): Promise<unknown> {
   const body: unknown = await res.json();
   if (!res.ok) {
     const e = ErrorBodySchema.parse(body);
-    throw new ClientError(res.status, e.code ?? null, e.error ?? `HTTP ${res.status}`);
+    throw new ClientError(
+      res.status,
+      e.code ?? null,
+      e.error ?? `HTTP ${res.status}`,
+      e.issues ?? [],
+    );
   }
   return body;
 }

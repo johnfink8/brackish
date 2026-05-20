@@ -345,7 +345,11 @@ export function register(program: Command): void {
         opts: { json?: boolean; strict?: boolean },
       ) => {
         const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
-        finalizeLint(parseSpecFile(file), (data) => lintEndpointSpec(method, path, data), opts);
+        await finalizeLint(
+          parseSpecFile(file),
+          (data) => lintEndpointSpec(method, path, data),
+          opts,
+        );
       },
     );
 }

@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-20
+
+### Added
+
+- Authoritative OpenAPI 3.1 meta-schema validation on every propose and accept. The server runs `@seriousme/openapi-schema-validator` against the projected assembled doc and refuses to enter a state where it would be invalid: dangling `$ref`s, missing required fields (e.g. `info.version`, `securityScheme.scheme` on `type: http`), malformed parameter / response / requestBody shapes are rejected at the moment of writing instead of surfacing later as codegen failures.
+- Atomic batch endpoint `POST /documents/:name/propose-batch`. Accepts a coordinated set of artifacts (convention + schemas + endpoints), assembles them into the projected wide doc, validates once, commits all-or-nothing. Mutual references and out-of-order forward refs work in a single request — order within a batch no longer matters.
+- `spec_invalid` error code carrying a structured `issues` array (severity / field / message). Surfaced through the client recovery hint and CLI rendering so Claude knows exactly what to propose first when a ref doesn't resolve.
+- Releases publish via GitHub Actions trusted publishing (OIDC). Published artifacts carry an npm Provenance badge linking back to the workflow run that built them; no long-lived `NPM_TOKEN` lives on the laptop or in GitHub secrets.
+
+### Changed
+
+- **Breaking**: propose-time and accept-time semantics. Each per-artifact propose validates the projected wide doc (accepted + currently-proposed + this propose); each per-artifact accept validates the projected accepted doc (accepted-only + this accept applied). Specs that 0.4.x accepted — e.g. an `http`-typed `securityScheme` missing the required `scheme` field, or a schema referencing another schema not yet in the doc — now return 400 `spec_invalid`. Pre-flight with `brackish <kind> lint <file>` to catch local shape mistakes; the cross-artifact ref check requires doc context and runs on the server.
+- `proposeBatchFromManifest` now POSTs the whole manifest as a single atomic request rather than looping individual proposes. Failure semantics are stricter: a parse or lint error means *no* propose is sent (no partial success up to the failing item).
+- `brackish visualize` and the accept-time validator share one assembly code path (`projectDocument(..., 'accepted')`). The doc rendered for downstream codegen and the doc the arbitrator validates against are structurally identical — no drift.
+- `brackish <kind> lint` now runs zod parse + brackish-specific cross-field checks only (path placeholders ↔ parameters, security refs within a convention, `x-brackish.naming` enum). Full meta-schema validation moved to the server since it needs doc context for ref resolution. The lint output is best-effort pre-flight; the server is the arbitrator.
+
+### Fixed
+
+- The validator's `errors` field can be `ErrorObject[]` or `string` (the latter for unresolved-ref failures). The string path was being silently dropped to an empty array, so invalid specs with dangling refs slipped through. Both shapes now surface.
+- The daemon's `/healthz` and `/whoami` endpoints reported a stale hardcoded version (`0.3.0`) regardless of the running package version. Same shape as 0.4.2's `CLI_VERSION` fix; now read from `package.json` at build time via the static JSON import so the two can't drift.
+
 ## [0.4.2] - 2026-05-19
 
 ### Fixed

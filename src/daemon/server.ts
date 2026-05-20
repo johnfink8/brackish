@@ -7,9 +7,11 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { stringify as yamlStringify } from 'yaml';
+import pkg from '../../package.json' with { type: 'json' };
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
 import { generatePatch } from '../lib/diff.js';
 import {
+  type ConventionSpec,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
@@ -18,6 +20,10 @@ import {
   type Event,
   type HttpMethod,
   IdentitySchema,
+  type JSONSchema,
+  type OperationSpec,
+  ProposeBatchRequestSchema,
+  type ProposeBatchResponse,
   ProposeConventionRequestSchema,
   ProposeEndpointRequestSchema,
   ProposeSchemaRequestSchema,
@@ -28,13 +34,17 @@ import {
   SendMessageRequestSchema,
 } from '../lib/models.js';
 import { EventNotifier } from '../lib/notifier.js';
-import { assembleDocument } from '../lib/openapi.js';
+import type { assembleDocument } from '../lib/openapi.js';
+import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
+import { operationKey, projectDocument } from './projection.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
-const SERVER_VERSION = '0.3.0';
+// Inlined by esbuild at build time from package.json. Same trick as src/cli.ts's CLI_VERSION;
+// keeps the version reported by /healthz and /whoami in sync with the published package.
+const SERVER_VERSION = pkg.version;
 
 const WAIT_TIMEOUT_DEFAULT_S = 30;
 const WAIT_TIMEOUT_MIN_S = 1;
@@ -166,11 +176,125 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, documents });
   });
 
+  // --- atomic propose-batch ---
+  //
+  // The arbitrator's bulk-insert path. Accepts a coordinated set of artifacts (convention +
+  // schemas + endpoints), assembles them all into the projected wide doc at once, runs the
+  // meta-schema validator on the whole assembled doc, and commits all-or-nothing.
+  //
+  // Why atomic: per-artifact propose requires the dependency to be already in the doc, so
+  // proposing `MessageList` (refs `Message`) before proposing `Message` would fail. In a batch,
+  // the user expressed a coordinated set; order within the batch shouldn't matter. The batch
+  // handler simulates all items into the wide doc before validating, so mutual / forward-ref
+  // patterns work as long as every ref resolves somewhere within the assembled doc.
+  app.post('/documents/:name/propose-batch', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = ProposeBatchRequestSchema.parse(await c.req.json());
+
+    const overlay: {
+      convention?: ConventionSpec | null;
+      schemas?: Map<string, JSONSchema>;
+      operations?: Map<string, { method: HttpMethod; path: string; spec: OperationSpec }>;
+    } = {};
+    if (body.convention) overlay.convention = body.convention.spec;
+    if (body.schemas && body.schemas.length > 0) {
+      overlay.schemas = new Map();
+      for (const s of body.schemas) overlay.schemas.set(s.name, s.spec);
+    }
+    if (body.endpoints && body.endpoints.length > 0) {
+      overlay.operations = new Map();
+      for (const e of body.endpoints) {
+        overlay.operations.set(operationKey(e.method, e.path), {
+          method: e.method,
+          path: e.path,
+          spec: e.spec,
+        });
+      }
+    }
+
+    const projected = await projectDocument(store, docName, 'wide', overlay);
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        { error: 'invalid OpenAPI 3.1 spec', code: 'spec_invalid', issues: invalid.errors },
+        400,
+      );
+    }
+
+    // All-or-nothing commit. The store doesn't have a transaction primitive exposed across
+    // artifact kinds, so we issue the proposes sequentially in convention → schemas →
+    // endpoints order. Since the doc is already meta-schema-valid as a whole, individual
+    // proposes can land in any order without ref errors.
+    const identity = c.get('identity');
+    const succeeded: ProposeBatchResponse['succeeded'] = [];
+    try {
+      if (body.convention) {
+        const env = await store.proposeConvention(
+          docName,
+          body.convention.spec,
+          identity,
+          toProposeOptions(body.convention.options),
+        );
+        succeeded.push({ kind: 'convention', envelope: env });
+      }
+      if (body.schemas) {
+        for (const s of body.schemas) {
+          const env = await store.proposeSchema(
+            docName,
+            s.name,
+            s.spec,
+            identity,
+            toProposeOptions(s.options),
+          );
+          succeeded.push({ kind: 'schema', name: s.name, envelope: env });
+        }
+      }
+      if (body.endpoints) {
+        for (const e of body.endpoints) {
+          const env = await store.proposeEndpoint(
+            docName,
+            e.method,
+            e.path,
+            e.spec,
+            identity,
+            toProposeOptions(e.options),
+          );
+          succeeded.push({ kind: 'endpoint', method: e.method, path: e.path, envelope: env });
+        }
+      }
+    } catch (err) {
+      // A propose mid-batch failed (almost always a concurrency conflict: another peer raced
+      // a write between our validation pass and this commit). Surface what we did write so the
+      // caller can reconcile, plus the failure shape that mirrors the per-propose error
+      // envelope.
+      const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
+      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof StoreError ? err.code : null;
+      return c.json({ error: message, code, succeeded }, status);
+    }
+    return c.json({ succeeded }, 201);
+  });
+
   // --- endpoints (operation artifacts) ---
 
   app.post('/documents/:name/endpoints', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeEndpointRequestSchema.parse(await c.req.json());
+    const projected = await projectDocument(store, docName, 'wide', {
+      operations: new Map([
+        [
+          operationKey(body.method, body.path),
+          { method: body.method, path: body.path, spec: body.spec },
+        ],
+      ]),
+    });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        { error: 'invalid OpenAPI 3.1 spec', code: 'spec_invalid', issues: invalid.errors },
+        400,
+      );
+    }
     const v = await store.proposeEndpoint(
       docName,
       body.method,
@@ -225,6 +349,24 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       path,
       c.req.query('version'),
     );
+    const candidate = await store.getEndpointByVersion(docName, method, path, version);
+    if (!candidate) {
+      return c.json({ error: 'no such version', code: 'artifact_not_found' }, 404);
+    }
+    const projected = await projectDocument(store, docName, 'accepted', {
+      operations: new Map([[operationKey(method, path), { method, path, spec: candidate.spec }]]),
+    });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'accepting would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
     const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'));
     return c.json(v);
   });
@@ -281,6 +423,16 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/schemas', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeSchemaRequestSchema.parse(await c.req.json());
+    const projected = await projectDocument(store, docName, 'wide', {
+      schemas: new Map([[body.name, body.spec]]),
+    });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        { error: 'invalid OpenAPI 3.1 spec', code: 'spec_invalid', issues: invalid.errors },
+        400,
+      );
+    }
     const v = await store.proposeSchema(
       docName,
       body.name,
@@ -333,6 +485,24 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       schemaName,
       c.req.query('version'),
     );
+    const candidate = await store.getSchemaByVersion(docName, schemaName, version);
+    if (!candidate) {
+      return c.json({ error: 'no such version', code: 'artifact_not_found' }, 404);
+    }
+    const projected = await projectDocument(store, docName, 'accepted', {
+      schemas: new Map([[schemaName, candidate.spec]]),
+    });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'accepting would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
     const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'));
     return c.json(v);
   });
@@ -386,6 +556,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/convention', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeConventionRequestSchema.parse(await c.req.json());
+    const projected = await projectDocument(store, docName, 'wide', { convention: body.spec });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        { error: 'invalid OpenAPI 3.1 spec', code: 'spec_invalid', issues: invalid.errors },
+        400,
+      );
+    }
     const v = await store.proposeConvention(
       docName,
       body.spec,
@@ -433,6 +611,24 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.post('/documents/:name/convention/accept', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const version = await resolveConventionTargetVersion(store, docName, c.req.query('version'));
+    const candidate = await store.getConventionByVersion(docName, version);
+    if (!candidate) {
+      return c.json({ error: 'no such version', code: 'artifact_not_found' }, 404);
+    }
+    const projected = await projectDocument(store, docName, 'accepted', {
+      convention: candidate.spec,
+    });
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'accepting would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
     const v = await store.acceptConvention(docName, version, c.get('identity'));
     return c.json(v);
   });
@@ -530,6 +726,18 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     default:
       return 400;
   }
+}
+
+/** Strip undefined values from a batch-item options object before handing to the store
+ *  (whose ProposeOptions uses exactOptionalPropertyTypes). */
+function toProposeOptions(
+  opts: { expectedVersion?: number | 'new' | undefined; force?: boolean | undefined } | undefined,
+): import('./store/index.js').ProposeOptions {
+  const out: { expectedVersion?: number | 'new'; force?: boolean } = {};
+  if (!opts) return out;
+  if (opts.expectedVersion !== undefined) out.expectedVersion = opts.expectedVersion;
+  if (opts.force !== undefined) out.force = opts.force;
+  return out;
 }
 
 /** Parse `?expected_version=` and `?force=` into the store's ProposeOptions shape. */
@@ -678,44 +886,13 @@ async function resolveDiffRange<T extends VersionedSpec | null>(
   };
 }
 
+/** The doc that `brackish visualize` renders is the same doc the propose/accept validation
+ *  runs against (with `view='accepted'` and no overlay) — single code path, no drift. */
 async function buildOpenAPI(
   store: Store,
   docName: DocumentName,
 ): Promise<ReturnType<typeof assembleDocument>> {
-  const [endpoints, schemas, convention] = await Promise.all([
-    collectAcceptedEndpoints(store, docName),
-    collectAcceptedSchemas(store, docName),
-    store.getConventionCurrent(docName),
-  ]);
-  return assembleDocument({ operations: endpoints, schemas, convention });
-}
-
-async function collectAcceptedEndpoints(
-  store: Store,
-  docName: DocumentName,
-): Promise<Array<NonNullable<Awaited<ReturnType<Store['getEndpointCurrent']>>>>> {
-  const summaries = await store.listEndpoints(docName);
-  const result: Array<NonNullable<Awaited<ReturnType<Store['getEndpointCurrent']>>>> = [];
-  for (const s of summaries) {
-    if (s.currentVersion === null) continue;
-    const v = await store.getEndpointCurrent(docName, s.method, s.path);
-    if (v) result.push(v);
-  }
-  return result;
-}
-
-async function collectAcceptedSchemas(
-  store: Store,
-  docName: DocumentName,
-): Promise<Array<NonNullable<Awaited<ReturnType<Store['getSchemaCurrent']>>>>> {
-  const summaries = await store.listSchemas(docName);
-  const result: Array<NonNullable<Awaited<ReturnType<Store['getSchemaCurrent']>>>> = [];
-  for (const s of summaries) {
-    if (s.currentVersion === null) continue;
-    const v = await store.getSchemaCurrent(docName, s.name);
-    if (v) result.push(v);
-  }
-  return result;
+  return projectDocument(store, docName, 'accepted');
 }
 
 async function buildRationaleMap(store: Store, docName: DocumentName): Promise<RationaleMap> {

@@ -16,6 +16,7 @@ import {
   type JSONSchema,
   JSONSchemaSchema,
   type OperationArtifact,
+  type OperationSpec,
   OperationSpecSchema,
   type SchemaArtifact,
 } from './models.js';
@@ -72,9 +73,33 @@ export type AssembleInput = {
 /** Build the OpenAPI document. Missing convention → a placeholder info block so downstream
  *  tools still accept the result. */
 export function assembleDocument(input: AssembleInput): OpenAPIDocument {
-  const conventionSpec: ConventionSpec | null =
-    input.convention && input.convention.status === 'accepted' ? input.convention.spec : null;
+  return assembleFromSpecs({
+    convention: input.convention?.status === 'accepted' ? input.convention.spec : null,
+    schemas: input.schemas
+      .filter((s) => s.status === 'accepted')
+      .map((s) => ({ name: s.name, spec: s.spec })),
+    operations: input.operations
+      .filter((op) => op.status === 'accepted')
+      .map((op) => ({ method: op.method, path: op.path, spec: op.spec })),
+  });
+}
 
+export type AssembleFromSpecsInput = {
+  convention: ConventionSpec | null;
+  schemas: Array<{ name: string; spec: JSONSchema }>;
+  operations: Array<{ method: HttpMethod; path: string; spec: OperationSpec }>;
+};
+
+/** Assemble an OpenAPI document from pre-resolved spec values (no artifact envelopes / no
+ *  status filtering). Used by the propose/accept handlers' projection step: build the
+ *  doc-after-this-operation-applied from a slice of the store's current state, then run
+ *  validateDocument on the result.
+ *
+ *  Operation specs are zod-typed (OperationSpec) but written in via passthrough; same shape
+ *  as artifact.spec. This is intentionally permissive — the meta-schema validator catches
+ *  shape issues; here we just assemble. */
+export function assembleFromSpecs(input: AssembleFromSpecsInput): OpenAPIDocument {
+  const conventionSpec = input.convention;
   const info = conventionSpec?.info ?? { title: 'Untitled', version: '0.0.0' };
   const doc: OpenAPIDocument = {
     openapi: '3.1.0',
@@ -89,8 +114,6 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
     doc.components = { ...(doc.components ?? {}), securitySchemes };
   }
 
-  // Hoist any extension fields the convention carries (`security`, `x-brackish`, etc.) to the
-  // document root so codegen tools see them where OpenAPI specifies they live.
   if (conventionSpec) {
     if (conventionSpec.security && conventionSpec.security.length > 0) {
       doc.security = conventionSpec.security;
@@ -101,7 +124,6 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
   }
 
   for (const op of input.operations) {
-    if (op.status !== 'accepted') continue;
     const path = op.path;
     if (!doc.paths[path]) doc.paths[path] = {};
     doc.paths[path][op.method] = op.spec;
@@ -109,10 +131,7 @@ export function assembleDocument(input: AssembleInput): OpenAPIDocument {
 
   if (input.schemas.length > 0) {
     const schemaMap: Record<string, JSONSchema> = {};
-    for (const s of input.schemas) {
-      if (s.status !== 'accepted') continue;
-      schemaMap[s.name] = s.spec;
-    }
+    for (const s of input.schemas) schemaMap[s.name] = s.spec;
     if (Object.keys(schemaMap).length > 0) {
       doc.components = { ...(doc.components ?? {}), schemas: schemaMap };
     }

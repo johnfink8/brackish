@@ -282,6 +282,229 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('spec validation on propose', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'v' } });
+    });
+
+    it('rejects a convention with an http-typed securityScheme missing `scheme` (the bearer-no-scheme case)', async () => {
+      const res = await call('POST', '/documents/v/convention', {
+        body: {
+          spec: {
+            info: { title: 'X', version: '1.0.0' },
+            securitySchemes: { bearerAuth: { type: 'http' } },
+          },
+        },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as {
+        code: string;
+        issues?: { field: string; message: string }[];
+      };
+      expect(body.code).toBe('spec_invalid');
+      expect(body.issues?.length ?? 0).toBeGreaterThan(0);
+      // Field paths are assembled-doc-relative (the validator runs on the projected doc):
+      // securitySchemes land under `components.securitySchemes.X` in OpenAPI.
+      expect(
+        body.issues?.some(
+          (i) =>
+            i.field.startsWith('components.securitySchemes.bearerAuth') &&
+            /scheme/i.test(i.message),
+        ),
+      ).toBe(true);
+    });
+
+    it('rejects an endpoint propose with a non-Header-object response header', async () => {
+      // `headers` is passthrough at the zod layer (record<string,unknown>); the meta-schema
+      // requires each header value to be a Header Object, not a string. This is squarely the
+      // validator's territory.
+      const res = await call('POST', '/documents/v/endpoints', {
+        body: {
+          method: 'post',
+          path: '/users',
+          spec: {
+            responses: {
+              '200': { description: 'ok', headers: { 'X-Foo': 'just a string' } },
+            },
+          },
+        },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; issues?: unknown[] };
+      expect(body.code).toBe('spec_invalid');
+      expect(body.issues?.length ?? 0).toBeGreaterThan(0);
+    });
+
+    it('accepts a propose with a valid spec (sanity)', async () => {
+      const res = await call('POST', '/documents/v/convention', {
+        body: {
+          spec: {
+            info: { title: 'X', version: '1.0.0' },
+            securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } },
+          },
+        },
+      });
+      expect(res.status).toBe(201);
+    });
+
+    it('rejects a schema propose referencing a schema that is not yet in the doc (dangling ref)', async () => {
+      // Missing-ref case: MessageList references Message before Message is in the doc.
+      const res = await call('POST', '/documents/v/schemas', {
+        body: {
+          name: 'MessageList',
+          spec: {
+            type: 'object',
+            properties: {
+              messages: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/Message' },
+              },
+            },
+          },
+        },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; issues?: { message: string }[] };
+      expect(body.code).toBe('spec_invalid');
+      expect(body.issues?.some((i) => i.message.includes('Message'))).toBe(true);
+    });
+
+    it('accepts a schema propose whose ref target was proposed first', async () => {
+      // Propose the dependency first
+      const dep = await call('POST', '/documents/v/schemas', {
+        body: { name: 'Message', spec: { type: 'object' } },
+      });
+      expect(dep.status).toBe(201);
+      // Now the dependent ref resolves
+      const res = await call('POST', '/documents/v/schemas', {
+        body: {
+          name: 'MessageList',
+          spec: {
+            type: 'object',
+            properties: {
+              messages: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/Message' },
+              },
+            },
+          },
+        },
+      });
+      expect(res.status).toBe(201);
+    });
+
+    it('rejects an accept that would leave the assembled-accepted doc with a dangling ref', async () => {
+      // Propose Message + MessageList; reject Message; try to accept MessageList.
+      await call('POST', '/documents/v/schemas', {
+        body: { name: 'Message', spec: { type: 'object' } },
+        identity: 'host',
+      });
+      await call('POST', '/documents/v/schemas', {
+        body: {
+          name: 'MessageList',
+          spec: {
+            type: 'object',
+            properties: {
+              messages: { type: 'array', items: { $ref: '#/components/schemas/Message' } },
+            },
+          },
+        },
+        identity: 'host',
+      });
+      // Peer rejects Message
+      const rej = await call('POST', '/documents/v/schemas/Message/reject', {
+        body: { reason: 'wrong shape' },
+        identity: 'peer',
+      });
+      expect(rej.status).toBe(200);
+      // Peer tries to accept MessageList — should fail because Message isn't accepted
+      const acc = await call('POST', '/documents/v/schemas/MessageList/accept', {
+        identity: 'peer',
+      });
+      expect(acc.status).toBe(400);
+      const body = (await acc.json()) as { code: string };
+      expect(body.code).toBe('spec_invalid');
+    });
+  });
+
+  describe('atomic propose-batch', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'b' } });
+    });
+
+    it('accepts mutually-referencing schemas in a single batch', async () => {
+      // Person refs Address, Address refs Person — neither could be proposed first via
+      // the per-propose endpoint. The atomic batch assembles both into the wide doc and
+      // validates once, so mutual refs resolve.
+      const res = await call('POST', '/documents/b/propose-batch', {
+        body: {
+          schemas: [
+            {
+              name: 'Person',
+              spec: {
+                type: 'object',
+                properties: { address: { $ref: '#/components/schemas/Address' } },
+              },
+            },
+            {
+              name: 'Address',
+              spec: {
+                type: 'object',
+                properties: { resident: { $ref: '#/components/schemas/Person' } },
+              },
+            },
+          ],
+        },
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        succeeded: Array<{ kind: string; name?: string }>;
+      };
+      const names = body.succeeded.filter((s) => s.kind === 'schema').map((s) => s.name);
+      expect(names).toEqual(['Person', 'Address']);
+    });
+
+    it('rejects the whole batch on a meta-schema failure, with no writes', async () => {
+      const res = await call('POST', '/documents/b/propose-batch', {
+        body: {
+          convention: {
+            spec: {
+              info: { title: 'X', version: '1.0.0' },
+              // bearer with no scheme — meta-schema failure
+              securitySchemes: { bearerAuth: { type: 'http' } },
+            },
+          },
+          schemas: [{ name: 'User', spec: { type: 'object' } }],
+        },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('spec_invalid');
+      // Confirm User wasn't written: GET it as proposed returns 404
+      const userCheck = await call('GET', '/documents/b/schemas/User?proposed=true', {});
+      expect(userCheck.status).toBe(404);
+    });
+
+    it('order within a batch does not matter for forward refs', async () => {
+      // Reply listed before Message in the batch; should still validate atomically.
+      const res = await call('POST', '/documents/b/propose-batch', {
+        body: {
+          schemas: [
+            {
+              name: 'Reply',
+              spec: {
+                type: 'object',
+                properties: { parent: { $ref: '#/components/schemas/Message' } },
+              },
+            },
+            { name: 'Message', spec: { type: 'object' } },
+          ],
+        },
+      });
+      expect(res.status).toBe(201);
+    });
+  });
+
   describe('inbox', () => {
     it('lists documents with new events for the caller', async () => {
       await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });

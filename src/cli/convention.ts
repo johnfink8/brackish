@@ -201,7 +201,7 @@ export function register(program: Command): void {
     .option('--json', 'output JSON')
     .option('--strict', 'treat warnings as errors (exit 1 on warnings)')
     .action(async (file: string, opts: { json?: boolean; strict?: boolean }) => {
-      finalizeLint(parseSpecFile(file), lintConventionSpec, opts);
+      await finalizeLint(parseSpecFile(file), lintConventionSpec, opts);
     });
 }
 

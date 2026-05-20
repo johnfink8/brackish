@@ -186,11 +186,11 @@ export function emitRenderedDiff(from: unknown, to: unknown, fromV: number, toV:
 
 export type LintFinalizeOpts = { json?: boolean; strict?: boolean };
 
-export function finalizeLint(
+export async function finalizeLint(
   parsed: ParseResult,
-  doLint: (data: unknown) => LintResult,
+  doLint: (data: unknown) => Promise<LintResult> | LintResult,
   opts: LintFinalizeOpts,
-): void {
+): Promise<void> {
   if (!parsed.ok) {
     if (opts.json) {
       emitJson({
@@ -202,7 +202,7 @@ export function finalizeLint(
     }
     process.exit(1);
   }
-  const result = doLint(parsed.data);
+  const result = await doLint(parsed.data);
   const effectiveErrors: LintIssue[] = opts.strict
     ? [...result.errors, ...result.warnings]
     : result.errors;
@@ -238,7 +238,9 @@ export async function withClient(
       const code = err.status >= 500 ? 2 : 1;
       const hint = recoveryHint(err.code);
       const head = `${err.code ?? `HTTP ${err.status}`}: ${err.message}`;
-      errExit(code, hint ? `${head}\n  → ${hint}` : head);
+      const issuesBlock = err.issues.length > 0 ? `\n${formatLintIssues(err.issues)}` : '';
+      const lines = [head, issuesBlock, hint ? `  → ${hint}` : ''].filter((s) => s.length > 0);
+      errExit(code, lines.join('\n'));
     }
     if (err instanceof Error) errExit(2, err.message);
     errExit(2, String(err));
@@ -274,6 +276,8 @@ function recoveryHint(code: string | null): string | null {
     case 'invite_redeemed':
     case 'invite_expired':
       return 'ask the inviter for a fresh `/brackish connect …` line';
+    case 'spec_invalid':
+      return 'the proposed spec does not validate as OpenAPI 3.1. Pre-flight locally with `brackish <kind> lint <args> <file>` to surface the field-paths before sending';
     default:
       return null;
   }

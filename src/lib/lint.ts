@@ -1,10 +1,17 @@
 // Local pre-flight checks for OpenAPI artifact specs before proposing.
 //
-// Pure: no I/O, no client. Three exports — one per artifact kind. Each runs the kind's zod
-// schema (loose passthrough; same one the server parses on propose) and then a small set of
-// cross-field checks that catch the rejections we observed in real negotiations.
+// Best-effort client-side checks: zod-parses (structural reject) and a small set of
+// brackish-specific cross-field checks (path↔params, security ref consistency within a
+// convention, x-brackish.naming enum).
+//
+// What this does NOT do: full OpenAPI 3.1 meta-schema validation, or cross-artifact
+// $ref resolution. Both require doc context (other artifacts in the doc) so they live
+// on the server (validateDocument runs the meta-schema on the assembled doc, catching
+// shape errors AND dangling refs). Local lint is "did I make a syntax mistake in this
+// file?" — the server is the arbitrator.
 
 import type { z } from 'zod';
+import type { LintIssue, LintResult } from './lint-types.js';
 import {
   ConventionSpecSchema,
   type HttpMethod,
@@ -12,16 +19,7 @@ import {
   OperationSpecSchema,
 } from './models.js';
 
-export type LintIssue = {
-  severity: 'error' | 'warn';
-  field: string;
-  message: string;
-};
-
-export type LintResult = {
-  errors: LintIssue[];
-  warnings: LintIssue[];
-};
+export type { LintIssue, LintResult } from './lint-types.js';
 
 const empty = (): LintResult => ({ errors: [], warnings: [] });
 
@@ -96,9 +94,8 @@ export function lintEndpointSpec(method: HttpMethod, path: string, spec: unknown
   return out;
 }
 
-/** Lint a JSON Schema component. The model's zod schema is intentionally loose (`.passthrough()`);
- *  Level-2 cross-field checks on schemas are minimal because schema-internal mistakes (bad enum
- *  values, missing required fields) tend to surface at codegen time anyway. */
+/** Lint a JSON Schema component. zod's `.passthrough()` accepts anything; full meta-schema
+ *  validation happens server-side as part of the assembled-doc validation. */
 export function lintSchemaSpec(name: string, spec: unknown): LintResult {
   const out = empty();
   void name;

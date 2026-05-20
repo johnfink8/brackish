@@ -418,6 +418,74 @@ export const ProposeConventionRequestSchema = z.object({
 });
 export type ProposeConventionRequest = z.infer<typeof ProposeConventionRequestSchema>;
 
+// Per-item options inside a propose-batch request. Matches the per-propose query-string flags
+// (`?expected_version=N|new`, `?force=true`) but as a structured field on each batch item so
+// each artifact can carry its own concurrency intent.
+export const BatchItemOptionsSchema = z
+  .object({
+    expectedVersion: z.union([z.literal('new'), z.number().int().positive()]).optional(),
+    force: z.boolean().optional(),
+  })
+  .strict();
+export type BatchItemOptions = z.infer<typeof BatchItemOptionsSchema>;
+
+export const ProposeBatchRequestSchema = z
+  .object({
+    convention: z
+      .object({ spec: ConventionSpecSchema, options: BatchItemOptionsSchema.optional() })
+      .optional(),
+    schemas: z
+      .array(
+        z.object({
+          name: SchemaNameSchema,
+          spec: JSONSchemaSchema,
+          options: BatchItemOptionsSchema.optional(),
+        }),
+      )
+      .optional(),
+    endpoints: z
+      .array(
+        z.object({
+          method: HttpMethodSchema,
+          path: PathSchema,
+          spec: OperationSpecSchema,
+          options: BatchItemOptionsSchema.optional(),
+        }),
+      )
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      b.convention !== undefined ||
+      (b.schemas !== undefined && b.schemas.length > 0) ||
+      (b.endpoints !== undefined && b.endpoints.length > 0),
+    {
+      message: 'propose-batch request must include at least one of: convention, schemas, endpoints',
+    },
+  );
+export type ProposeBatchRequest = z.infer<typeof ProposeBatchRequestSchema>;
+
+export const ProposeBatchResponseSchema = z.object({
+  succeeded: z.array(
+    z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('convention'), envelope: ConventionArtifactSchema }),
+      z.object({
+        kind: z.literal('schema'),
+        name: SchemaNameSchema,
+        envelope: SchemaArtifactSchema,
+      }),
+      z.object({
+        kind: z.literal('endpoint'),
+        method: HttpMethodSchema,
+        path: PathSchema,
+        envelope: OperationArtifactSchema,
+      }),
+    ]),
+  ),
+});
+export type ProposeBatchResponse = z.infer<typeof ProposeBatchResponseSchema>;
+
 export const RejectArtifactRequestSchema = z.object({
   reason: z.string().min(1),
 });

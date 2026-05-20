@@ -1,6 +1,7 @@
 # brackish
 
 [![npm version](https://img.shields.io/npm/v/brackish-cli.svg)](https://www.npmjs.com/package/brackish-cli)
+[![downloads](https://img.shields.io/npm/dm/brackish-cli.svg)](https://www.npmjs.com/package/brackish-cli)
 [![node](https://img.shields.io/node/v/brackish-cli.svg)](https://nodejs.org/)
 [![license](https://img.shields.io/npm/l/brackish-cli.svg)](./LICENSE)
 
@@ -8,7 +9,7 @@ Two [Claude Code](https://claude.ai/code) instances co-developing a contract —
 
 - **Token-efficient.** What crosses the wire is structured deltas (`+responses.409`, `~oneOf.6.properties.code.enum`), not the whole document each round. Each Claude leads with `brackish status` for a bucketed "what am I blocked on?" view, and pulls full bodies only when actually needed. The savings scale with revision rounds: rsync-of-API.md is O(doc × rounds); brackish is O(delta × rounds), and the delta is tiny.
 
-- **A firm, machine-checkable spec.** The output is real OpenAPI 3.1, not free-text — feeds straight into `openapi-typescript`, `oapi-codegen`, `fastapi-codegen`. Each artifact has an immutable propose/accept/reject lifecycle with explicit version-pin assertions (`--expected-version 3`), so when the peer changes something, you get a compact delta and a 409 if your view was stale. Drift between sides is mechanically detectable, not a Slack thread three weeks later.
+- **A firm, machine-checkable spec.** The output is real, validated OpenAPI 3.1 — feeds straight into `openapi-typescript`, `oapi-codegen`, `fastapi-codegen`. brackish is the arbitrator: every propose and accept is validated against the official 3.1 meta-schema before it lands, including cross-artifact `$ref` resolution. The server refuses to enter a state where the assembled doc would be invalid — dangling refs, missing required fields, malformed security schemes are rejected at the moment of writing, not 30 minutes later when codegen blows up. The doc both Claudes work against is guaranteed parseable by anything that reads OpenAPI 3.1. Each artifact has an immutable propose/accept/reject lifecycle with explicit version-pin assertions (`--expected-version 3`), so when the peer changes something, you get a compact delta and a 409 if your view was stale. Drift between sides is mechanically detectable, not a Slack thread three weeks later.
 
 - **Separate concerns, on purpose.** Each Claude keeps its own context: one has the FastAPI source loaded, the other has the React source. Neither has to understand both halves. They negotiate as semi-adversaries — the backend pushes `snake_case` because FastAPI emits it, the frontend pushes `camelCase` because TS reads it, and the dispute surfaces as a rejected convention with a written reason instead of each Claude silently picking different defaults. Domain knowledge wins per side: the frontend Claude knows SSE is the right answer because it understands `EventSource`; the backend Claude knows it needs a deploy-note about disabling proxy buffering. Neither has to know both halves.
 
@@ -168,6 +169,7 @@ brackish uninstall
 - **CLI + daemon = one Node binary.** `brackish serve` is just a subcommand.
 - **Storage:** append-only events table; documents + artifact state are projections. SQLite via `better-sqlite3`.
 - **Transport detection:** the server is dual-bound (Unix socket + optional TCP) and picks auth by inspecting the underlying connection — `X-Brackish-Identity` for socket peers, `Authorization: Bearer <token>` for TCP.
-- **Stack:** Node 22+, Hono, better-sqlite3, zod, commander, undici, smol-toml.
-- **Source layout:** `src/cli/` (per-command modules), `src/daemon/` (server + auth + store), `src/client/` (HTTP client + batch + manifest), `src/lib/` (pure: models + diff + lint + openapi + specfile + notifier), `src/io/` (config + install), `src/render/` (markdown/html/text renderers + terminal formatters).
-- **Tests:** vitest, 206 unit + integration across store, server, client, lint, batch, manifest, install.
+- **Validation:** every propose builds the projected wide doc (accepted + currently-proposed + this propose) and runs it through `@seriousme/openapi-schema-validator` against the official 3.1 meta-schema. Every accept projects the accepted-only doc with this accept applied and validates that. The doc that `brackish visualize` renders and the doc the validator runs against are produced by the same code path — no drift.
+- **Stack:** Node 22+, Hono, better-sqlite3, zod, commander, undici, smol-toml, @seriousme/openapi-schema-validator.
+- **Source layout:** `src/cli/` (per-command modules), `src/daemon/` (server + auth + store + projection), `src/client/` (HTTP client + batch + manifest), `src/lib/` (pure: models + diff + lint + validate + openapi + specfile + notifier), `src/io/` (config + install), `src/render/` (markdown/html/text renderers + terminal formatters).
+- **Tests:** vitest, 231 unit + integration + e2e across store, server, client, lint, validate, batch, manifest, install.

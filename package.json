@@ -1,6 +1,6 @@
 {
   "name": "brackish-cli",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Claude-to-Claude contract negotiation: OpenAPI 3.1 propose/accept lifecycle (endpoints + schemas + convention), JSON-Patch diffs, browser UI via Swagger UI. For two Claude Code instances co-developing paired components.",
   "type": "module",
   "bin": {
@@ -45,6 +45,7 @@
   ],
   "dependencies": {
     "@hono/node-server": "^2.0.3",
+    "@seriousme/openapi-schema-validator": "^2.9.0",
     "better-sqlite3": "^12.10.0",
     "commander": "^14.0.3",
     "hono": "^4.12.19",

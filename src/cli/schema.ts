@@ -228,7 +228,7 @@ export function register(program: Command): void {
     .option('--json', 'output JSON')
     .option('--strict', 'treat warnings as errors (exit 1 on warnings)')
     .action(async (name: string, file: string, opts: { json?: boolean; strict?: boolean }) => {
-      finalizeLint(parseSpecFile(file), (data) => lintSchemaSpec(name, data), opts);
+      await finalizeLint(parseSpecFile(file), (data) => lintSchemaSpec(name, data), opts);
     });
 }
 
