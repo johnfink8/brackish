@@ -11,7 +11,8 @@
     "skill",
     "scripts/check-node.cjs",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22"
