@@ -37,7 +37,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm ci
+      - run: npm install
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
@@ -55,7 +55,7 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
+      - run: npm install
 
       # Refuse to publish if the tag doesn't match package.json. Same class of mistake as
       # last release's stale CLI_VERSION; cheap to gate against here.
