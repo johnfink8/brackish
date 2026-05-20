@@ -53,16 +53,13 @@ function isoStamp(): string {
 }
 
 function ensureBrackishBuilt(): string {
-  const distEntry = join(REPO_ROOT, 'dist', 'cli.js');
-  if (!existsSync(distEntry)) {
-    console.error('harness: dist/cli.js missing, running `npm run build`...');
-    const r = spawnSync('npm', ['run', 'build'], {
-      cwd: REPO_ROOT,
-      stdio: 'inherit',
-    });
-    if (r.status !== 0) throw new Error('npm run build failed');
-  }
-  return distEntry;
+  // Always rebuild — `dist/cli.js` existing isn't enough, it might predate uncommitted edits.
+  // A half-fresh run (new skill text + stale CLI) silently invalidates the trial. Build is
+  // cheap (~20ms with tsup cache); the false-positive risk is not.
+  console.error('harness: running `npm run build`...');
+  const r = spawnSync('npm', ['run', 'build'], { cwd: REPO_ROOT, stdio: 'inherit' });
+  if (r.status !== 0) throw new Error('npm run build failed');
+  return join(REPO_ROOT, 'dist', 'cli.js');
 }
 
 function writeWrapperBin(binDir: string, brackishEntry: string): string {
