@@ -12,6 +12,36 @@ Every brackish document assembles into a real OpenAPI 3.1 spec. Three kinds of n
 | `schema` | JSON Schema (under `components.schemas[name]`) | `<Name>` | Reusable shapes (`User`, `OrderCreate`) |
 | `convention` | `{ info, servers, securitySchemes, security, x-brackish }` (doc-level header) | singleton | One per document |
 
+## Pick the right verb up front
+
+Two propose surfaces; the right one depends on how many artifacts you're about to drop:
+
+- **1–2 artifacts** → per-kind: `brackish convention propose <doc>`, `brackish schema propose <doc> <name>`, `brackish endpoint propose <doc> <METHOD> <PATH>`. Sections below.
+- **3 or more artifacts in one go** → **`brackish propose-batch <doc> --manifest <file>`**. Author a tiny manifest, run one command. Each artifact gets parsed + linted locally before *any* network call; on first failure you stop with a clear "what landed / what's left" summary. This is the single biggest token-saver for the opening drop of a new document — N per-kind `propose` turns become 1.
+
+```
+# manifest.yaml — block-style only ({placeholder} parens trap flow-mappings)
+convention:
+  file: convention.yaml
+schemas:
+  - name: User
+    file: schemas/User.yaml
+  - name: Order
+    file: schemas/Order.yaml
+endpoints:
+  - method: POST
+    path: /orders
+    file: endpoints/POST-orders.yaml
+  - method: GET
+    path: /orders/{id}
+    file: endpoints/GET-orders-id.yaml
+
+# then:
+brackish propose-batch <doc> --manifest manifest.yaml
+```
+
+Each `file:` in the manifest is a **complete spec** (same shape `<kind> propose --file` consumes), **not a diff** — for revisions, set `expected: <N>` and point at the new whole body. Order is forced: convention → schemas → endpoints, regardless of how the manifest is laid out. Full reference + revision/force semantics in the "Proposing many artifacts at once" section below.
+
 ## Convention propose
 
 ```
