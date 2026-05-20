@@ -10,6 +10,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
+import pkg from '../package.json' with { type: 'json' };
 import { register as registerBatch } from './cli/batch.js';
 import { register as registerBootstrap } from './cli/bootstrap.js';
 import { errExit } from './cli/common.js';
@@ -24,7 +25,9 @@ import { register as registerSchema } from './cli/schema.js';
 import { register as registerStatus } from './cli/status.js';
 import { register as registerVisualize } from './cli/visualize.js';
 
-const CLI_VERSION = '0.3.0';
+// Pulled from package.json at build time (esbuild inlines static JSON imports). Keeps the bin's
+// `--version` in sync with the published package version automatically.
+const CLI_VERSION = pkg.version;
 
 export function buildProgram(): Command {
   const program = new Command();
