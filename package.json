@@ -10,13 +10,15 @@
     "dist",
     "skill",
     "scripts/check-node.cjs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "preinstall": "node scripts/check-node.cjs",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build",
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
