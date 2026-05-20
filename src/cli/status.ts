@@ -302,7 +302,10 @@ function buildNextHint(doc: string, b: DocBuckets): string | null {
     return `→ peer has ${b.awaitingPeer.length} of your proposal${b.awaitingPeer.length === 1 ? '' : 's'} pending; brackish nap [--seconds 60] to wait, or move on`;
   }
   if (b.accepted.length > 0 && b.awaitingMe.length === 0 && b.awaitingPeer.length === 0) {
-    return `→ current milestone looks settled. If further proposals would be out-of-scope, brackish send ${doc} "<doc> is settled at <milestone>; <X> out of scope — hold for next round"`;
+    return (
+      `→ current milestone looks settled. If further proposals would be out-of-scope, brackish send ${doc} "<doc> is settled at <milestone>; <X> out of scope — hold for next round"\n` +
+      `→ done negotiating? \`brackish deactivate\` mutes the hook + stops the daemon so you can focus on implementing the contract.`
+    );
   }
   return null;
 }

@@ -1,8 +1,15 @@
-// `brackish install` / `uninstall` / `hook-snippet` — Claude Code skill + hook wiring.
+// `brackish install` / `uninstall` / `hook-snippet` / `activate` / `deactivate` —
+// Claude Code skill + hook wiring. `activate`/`deactivate` are the day-to-day mute toggle for
+// when you're switching from negotiating contracts to implementing them and don't want the
+// UserPromptSubmit hook re-pinging.
 
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { Command } from 'commander';
+import { brackishHome, defaultSocketPath } from '../io/config.js';
 import {
   BRACKISH_PERMISSION_PATTERN,
   claudeHome,
@@ -273,6 +280,126 @@ export function register(program: Command): void {
       const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
       process.stdout.write(`${hookSnippet(scriptPath)}\n`);
     });
+
+  program
+    .command('deactivate')
+    .description(
+      "mute brackish for now: stop the daemon (if running) and remove the UserPromptSubmit hook. Skill files + permission rule stay in place. Use when you're switching from negotiating to implementing and don't want the hook re-pinging.",
+    )
+    .option('--scope <user|project>', 'which `.claude/` home to edit; auto-detects if omitted')
+    .option('--global', 'shortcut for --scope user')
+    .option('--local', 'shortcut for --scope project')
+    .option('--dest <path>', 'override skill dest (defaults to <home>/skills/brackish)')
+    .option('--yes', 'non-interactive')
+    .action(
+      async (opts: {
+        scope?: string;
+        global?: boolean;
+        local?: boolean;
+        dest?: string;
+        yes?: boolean;
+      }) => {
+        const scope = await resolveScope(opts);
+        const home = claudeHome(scope);
+        const dest = opts.dest ?? defaultSkillDest(home);
+        const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
+        const lines: string[] = [];
+
+        const daemonResult = await stopDaemonIfRunning();
+        lines.push(`  daemon: ${daemonResult}`);
+
+        const hookRes = uninstallHook(scriptPath, home);
+        lines.push(
+          hookRes.removed
+            ? `  hook:   removed from ${hookRes.settingsPath}${hookRes.backupPath ? ` (backup: ${hookRes.backupPath})` : ''}`
+            : `  hook:   nothing to remove`,
+        );
+
+        process.stderr.write(
+          `brackish deactivate (scope=${scope}, home=${home}):\n${lines.join('\n')}\n` +
+            `\nskill files preserved at ${dest}; permission allow-rule preserved.\n` +
+            `→ run \`brackish activate\` to re-enable the hook when you're back to negotiating.\n`,
+        );
+      },
+    );
+
+  program
+    .command('activate')
+    .description(
+      're-enable the brackish UserPromptSubmit hook (the inverse of `brackish deactivate`). Daemon stays down — start it explicitly with `brackish up` when ready.',
+    )
+    .option('--scope <user|project>', 'which `.claude/` home to edit; auto-detects if omitted')
+    .option('--global', 'shortcut for --scope user')
+    .option('--local', 'shortcut for --scope project')
+    .option('--dest <path>', 'override skill dest (defaults to <home>/skills/brackish)')
+    .option('--yes', 'non-interactive')
+    .action(
+      async (opts: {
+        scope?: string;
+        global?: boolean;
+        local?: boolean;
+        dest?: string;
+        yes?: boolean;
+      }) => {
+        const scope = await resolveScope(opts);
+        const home = claudeHome(scope);
+        const dest = opts.dest ?? defaultSkillDest(home);
+        const scriptPath = `${dest}/hooks/inbox-on-prompt.sh`;
+        if (!existsSync(scriptPath)) {
+          errExit(
+            2,
+            `activate: hook script not found at ${scriptPath}. Run \`brackish install\` first (or pass --dest to point at an existing skill).`,
+          );
+        }
+        const res = installHook(scriptPath, home);
+        process.stderr.write(
+          `brackish activate (scope=${scope}, home=${home}):\n` +
+            (res.alreadyInstalled
+              ? `  hook:   already present (no edit needed)\n`
+              : `  hook:   added → ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}\n`) +
+            `\n→ run \`brackish up\` to start the daemon when ready (the hook stays silent while the daemon is down).\n`,
+        );
+      },
+    );
+}
+
+/** Stop the daemon if a PID file is found and the process responds to SIGTERM. Returns a
+ *  one-line status string for the activate/deactivate summary. Mirrors `brackish down`'s logic
+ *  in cli/daemon.ts but inlined here to keep the dependency one-way. */
+async function stopDaemonIfRunning(): Promise<string> {
+  const pidPath = join(brackishHome(), 'serve.pid');
+  if (!existsSync(pidPath)) {
+    return existsSync(defaultSocketPath())
+      ? `socket present at ${defaultSocketPath()} but no PID file (kill manually if needed)`
+      : 'not running';
+  }
+  const pid = Number.parseInt(readFileSync(pidPath, 'utf8').trim(), 10);
+  if (!Number.isFinite(pid)) return `corrupt PID file at ${pidPath}`;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (e) {
+    const code = e instanceof Error && 'code' in e ? e.code : undefined;
+    if (code === 'ESRCH') {
+      try {
+        unlinkSync(pidPath);
+      } catch {
+        /* */
+      }
+      try {
+        unlinkSync(defaultSocketPath());
+      } catch {
+        /* */
+      }
+      return `stale PID ${pid} cleaned up`;
+    }
+    throw e;
+  }
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (!existsSync(defaultSocketPath())) return `stopped (pid ${pid})`;
+    await sleep(100);
+  }
+  return `SIGTERM sent to pid ${pid} but socket persists; check ${join(brackishHome(), 'serve.log')}`;
 }
 
 /** Determine the install scope from flags or prompt. Defaults to `user` when non-interactive. */

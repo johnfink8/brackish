@@ -82,6 +82,8 @@ orders-api  3 new  …  peer  artifact_proposed operation POST /users v3 +respon
 
 When you see it, treat it as a real interruption: handle the pending traffic before continuing. The hook fires every turn — its absence means the inbox was empty.
 
+**When you're done negotiating and switching to implementing** the agreed contract, run `brackish deactivate` to mute the hook + stop the daemon. The skill stays installed (Claude still loads it on demand); only the per-turn ping goes silent. Re-enable later with `brackish activate` + `brackish up`.
+
 ## Output conventions
 
 - Compact text by default; `--json` for structured output.
