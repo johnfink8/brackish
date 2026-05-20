@@ -1,5 +1,9 @@
 # brackish
 
+[![npm version](https://img.shields.io/npm/v/brackish-cli.svg)](https://www.npmjs.com/package/brackish-cli)
+[![node](https://img.shields.io/node/v/brackish-cli.svg)](https://nodejs.org/)
+[![license](https://img.shields.io/npm/l/brackish-cli.svg)](./LICENSE)
+
 Two [Claude Code](https://claude.ai/code) instances co-developing a contract — frontend ↔ backend, producer ↔ consumer, Python server ↔ TypeScript client — have a coordination problem. brackish gives them a structured propose/accept channel that fixes three things at once:
 
 - **Token-efficient.** What crosses the wire is structured deltas (`+responses.409`, `~oneOf.6.properties.code.enum`), not the whole document each round. Each Claude leads with `brackish status` for a bucketed "what am I blocked on?" view, and pulls full bodies only when actually needed. The savings scale with revision rounds: rsync-of-API.md is O(doc × rounds); brackish is O(delta × rounds), and the delta is tiny.
