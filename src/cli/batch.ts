@@ -20,33 +20,39 @@ export function register(program: Command): void {
       'manifest path (see `brackish propose-batch --help-format`)',
     )
     .option('--lint-only', "lint and parse every artifact, but don't send any proposes")
+    .option('--dry-run', 'synonym for --lint-only')
     .option('--json')
-    .action(async (doc: string, opts: { manifest: string; lintOnly?: boolean; json?: boolean }) =>
-      withClient(async (client) => {
-        const result = await proposeBatchFromManifest(client, doc, opts.manifest, {
-          ...(opts.lintOnly ? { lintOnly: true } : {}),
-        });
-        if (opts.json) {
-          emitJson(result);
-          if (result.failed) process.exit(1);
-          return;
-        }
-        for (const s of result.succeeded) {
-          const where = describeArtifactKey(s.key);
-          const vTag = opts.lintOnly ? '(lint-only)' : `v${s.version}`;
-          emit(`${opts.lintOnly ? 'linted  ' : 'proposed'} ${where.padEnd(40)} ${vTag}`);
-        }
-        if (result.failed) {
-          emitProposeBatchFailure(result);
-          process.exit(1);
-        } else {
-          const counts = countSucceededByKind(result.succeeded);
-          const verb = opts.lintOnly ? 'linted' : 'proposed';
-          emit(
-            `${verb}: ${counts.convention} convention, ${counts.schemas} schemas, ${counts.endpoints} endpoints`,
-          );
-        }
-      }),
+    .action(
+      async (
+        doc: string,
+        opts: { manifest: string; lintOnly?: boolean; dryRun?: boolean; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const lintOnly = opts.lintOnly === true || opts.dryRun === true;
+          const result = await proposeBatchFromManifest(client, doc, opts.manifest, {
+            ...(lintOnly ? { lintOnly: true } : {}),
+          });
+          if (opts.json) {
+            emitJson(result);
+            if (result.failed) process.exit(1);
+            return;
+          }
+          for (const s of result.succeeded) {
+            const where = describeArtifactKey(s.key);
+            const vTag = lintOnly ? '(lint-only)' : `v${s.version}`;
+            emit(`${lintOnly ? 'linted  ' : 'proposed'} ${where.padEnd(40)} ${vTag}`);
+          }
+          if (result.failed) {
+            emitProposeBatchFailure(result);
+            process.exit(1);
+          } else {
+            const counts = countSucceededByKind(result.succeeded);
+            const verb = lintOnly ? 'linted' : 'proposed';
+            emit(
+              `${verb}: ${counts.convention} convention, ${counts.schemas} schemas, ${counts.endpoints} endpoints`,
+            );
+          }
+        }),
     );
 }
 

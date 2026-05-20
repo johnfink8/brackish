@@ -27,7 +27,10 @@ export function register(program: Command): void {
       withClient(async (client) => {
         const t = await client.createDocument(name);
         if (opts.json) emitJson(t);
-        else emit(`created document "${t.name}" by ${t.createdBy}`);
+        else
+          emit(
+            `created document "${t.name}" by ${t.createdBy}\n  → next: brackish convention propose ${t.name}   # set doc-level defaults (info, security, naming) before schemas/endpoints`,
+          );
       }),
     );
 }

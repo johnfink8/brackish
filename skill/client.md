@@ -119,3 +119,12 @@ Use the compact paths in this order:
 5. `brackish visualize <doc>` — table-of-contents view; `--format openapi` writes the assembled YAML; `--format markdown` is human-readable with rationale interleaved.
 
 **Don't pull a full spec body until you've decided you need it.** The delta summary + diff tell you what changed at a fraction of the bytes.
+
+## Respect a scope-freeze
+
+If the server side sends a "we're settled at <milestone>; X/Y/Z out of scope" chat message after the core contract is accepted, **don't pile on**. New ideas after the freeze go in one of two buckets:
+
+- **Genuinely needed for the client to function** — propose it, but acknowledge in the propose rationale (`brackish send`) that you saw the freeze and explain why this one is essential rather than nice-to-have.
+- **Nice-to-have / "while we're here"** — hold for the next round. Don't propose now; jot it in `notes.md` (or a comment) for later.
+
+If the server rejects your post-freeze proposal with an "out of scope" reason, accept it — withdraw your proposal (`brackish <kind> withdraw <doc> <selector>`) and move on. Don't argue.

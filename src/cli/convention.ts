@@ -97,7 +97,10 @@ export function register(program: Command): void {
           : buildConventionSpec(opts);
         const v = await client.proposeConvention(doc, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
-        else emit(`proposed ${describeConvention(v)}`);
+        else
+          emit(
+            `proposed ${describeConvention(v)}\n  → convention sets doc-level defaults (security, naming). Schemas + endpoints inherit from it — peer should accept this first before you propose dependents.`,
+          );
       }),
     );
 
@@ -142,7 +145,10 @@ export function register(program: Command): void {
         const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
         const v = await client.rejectConvention(doc, reason, versionN);
         if (opts.json) emitJson(v);
-        else emit(`rejected ${describeConvention(v)}`);
+        else
+          emit(
+            `rejected ${describeConvention(v)}\n  → peer sees the reason in their inbox; a rejected convention blocks dependents — they should re-propose before either side adds more schemas/endpoints`,
+          );
       }),
     );
 

@@ -58,7 +58,10 @@ export function register(program: Command): void {
             : buildSchemaSpec(opts);
           const v = await client.proposeSchema(doc, name, spec, parseConcurrencyOpts(opts));
           if (opts.json) emitJson(v);
-          else emit(`proposed ${describeSchema(v)}`);
+          else
+            emit(
+              `proposed ${describeSchema(v)}\n  → peer's inbox will pick it up; \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
+            );
         }),
     );
 
@@ -168,7 +171,10 @@ export function register(program: Command): void {
             opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
           const v = await client.rejectSchema(doc, name, reason, versionN);
           if (opts.json) emitJson(v);
-          else emit(`rejected ${describeSchema(v)}`);
+          else
+            emit(
+              `rejected ${describeSchema(v)}\n  → peer sees the reason in their inbox; expect a counter-proposal (or propose your own alternative now with --expected-version ${v.version})`,
+            );
         }),
     );
 

@@ -78,6 +78,18 @@ See [`propose.md`](propose.md) for the propose flag reference and race-protectio
 - **`cannot_accept_own`** (403): you tried to accept something you proposed. Wrong side; the peer accepts your proposals, you accept theirs.
 - **Rejected convention blocks dependents.** If `status` shows the convention in "needs attention" (rejected/withdrawn), endpoints and schemas inherit doc-level defaults from it — proposing them on top of a stalled convention means re-proposing once it settles. Clear the convention first.
 
+## Scope-freezing the current milestone
+
+When the current milestone's contract is accepted and you don't want the peer to keep piling on out-of-scope additions, **send a chat boundary message** — no new CLI verb needed:
+
+```
+brackish send <doc> "<doc> is settled at <whatever you're calling this milestone — info.version, 'MVP', 'first cut', etc.>: <list the accepted endpoints/schemas>. <X, Y, Z> are out of scope here — please hold them for the next round."
+```
+
+Then **reject any proposal that crosses the line**, citing scope: `brackish endpoint reject <doc> <METHOD> <PATH> "out of scope for the current milestone per the boundary message; hold for next round"`. The reject reason is attached to the artifact and renders in the rationale, so the peer Claude has the boundary in writing.
+
+`brackish status <doc>` will also nudge you toward this once everything's accepted + nothing's awaiting either side — read its `→ next:` line.
+
 ## Tear down later
 
 ```

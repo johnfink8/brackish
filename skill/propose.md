@@ -148,7 +148,7 @@ brackish propose-batch <doc> --manifest manifest.yaml
 - Each file is parsed + linted **locally** before sending. Parse errors surface with line/col; lint errors include the field path. Round-trip cost only on real disagreements with the peer.
 - `expected: new` is the default per item. Override per-item with `expected: <N>` for revisions or `expected: force` to stack.
 - Stop-on-first-failure: prints what landed, names the failing item, lists what was never attempted.
-- `--lint-only` runs the pipeline without sending — useful for CI or sanity-checking before a big drop.
+- `--lint-only` (alias `--dry-run`) runs the pipeline without sending — useful for CI or sanity-checking before a big drop.
 
 ## Ground in code, not docs
 

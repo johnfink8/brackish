@@ -236,12 +236,46 @@ export async function withClient(
   } catch (err) {
     if (err instanceof ClientError) {
       const code = err.status >= 500 ? 2 : 1;
-      errExit(code, `${err.code ?? `HTTP ${err.status}`}: ${err.message}`);
+      const hint = recoveryHint(err.code);
+      const head = `${err.code ?? `HTTP ${err.status}`}: ${err.message}`;
+      errExit(code, hint ? `${head}\n  → ${hint}` : head);
     }
     if (err instanceof Error) errExit(2, err.message);
     errExit(2, String(err));
   } finally {
     if (client) await client.close();
+  }
+}
+
+/** Map a ClientError code to a one-line recovery suggestion. Null = no useful hint
+ *  (server's message is already actionable). The CLI is the surface Claude reads mid-task; an
+ *  error without a "→ try this next" is a turn-burner. */
+function recoveryHint(code: string | null): string | null {
+  switch (code) {
+    case 'version_in_flight':
+      return 'read the in-flight version with `brackish <kind> show <id> --proposed`, then accept/reject — or override with `--expected-version <N>` / `--force`';
+    case 'version_mismatch':
+      return 'state drifted from your --expected-version; `brackish read <doc>` to reconcile, then retry with the actual latest';
+    case 'cannot_accept_own':
+      return 'this is your proposal; only the peer can accept it. To take it back yourself: `brackish <kind> withdraw <id>`';
+    case 'cannot_reject_own':
+      return 'this is your proposal; only the peer can reject it. To take it back yourself: `brackish <kind> withdraw <id>`';
+    case 'cannot_withdraw_others':
+      return 'only the proposer can withdraw; reject it with a reason instead';
+    case 'artifact_not_pending':
+      return 'this version is already accepted or rejected — no pending version to act on. Check with `brackish status <doc>` for what is actually awaiting you';
+    case 'artifact_not_found':
+      return '`brackish endpoint list <doc>` or `brackish schema list <doc>` to confirm the identity key, or pass `--proposed` if you meant the in-flight version';
+    case 'document_not_found':
+      return '`brackish documents` to list existing docs (alias `brackish docs`)';
+    case 'document_exists':
+      return 'a doc with that name already exists — reuse it (`brackish status <name>`) or pick a different name';
+    case 'invite_invalid':
+    case 'invite_redeemed':
+    case 'invite_expired':
+      return 'ask the inviter for a fresh `/brackish connect …` line';
+    default:
+      return null;
   }
 }
 

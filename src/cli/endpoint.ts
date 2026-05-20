@@ -106,7 +106,10 @@ export function register(program: Command): void {
           : buildOperationSpec(opts, { path, convention });
         const v = await client.proposeEndpoint(doc, method, path, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
-        else emit(`proposed ${describeOperation(v)}`);
+        else
+          emit(
+            `proposed ${describeOperation(v)}\n  → peer's inbox will pick it up; \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
+          );
       }),
     );
 
@@ -263,7 +266,10 @@ export function register(program: Command): void {
             opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
           const v = await client.rejectEndpoint(doc, method, path, reason, versionN);
           if (opts.json) emitJson(v);
-          else emit(`rejected ${describeOperation(v)}`);
+          else
+            emit(
+              `rejected ${describeOperation(v)}\n  → peer sees the reason in their inbox; expect a counter-proposal (or propose your own alternative now with --expected-version ${v.version})`,
+            );
         }),
     );
 
