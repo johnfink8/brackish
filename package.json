@@ -1,10 +1,10 @@
 {
   "name": "brackish-cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Claude-to-Claude contract negotiation: OpenAPI 3.1 propose/accept lifecycle (endpoints + schemas + convention), JSON-Patch diffs, browser UI via Swagger UI. For two Claude Code instances co-developing paired components.",
   "type": "module",
   "bin": {
-    "brackish": "./dist/cli.js"
+    "brackish": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/johnfink8/brackish"
+    "url": "git+https://github.com/johnfink8/brackish.git"
   },
   "keywords": [
     "claude",

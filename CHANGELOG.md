@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-05-19
+
+### Fixed
+
+- `package.json` `bin` field had a leading `./` on the path, which npm 11 silently strips and then removes the entry entirely. The 0.4.0 publish landed without a `bin`, so `npm install -g brackish-cli@0.4.0` did not expose the `brackish` command. 0.4.1 publishes with the bin intact.
+- `package.json` `repository.url` normalized to the canonical `git+https://github.com/johnfink8/brackish.git` form.
+
 ## [0.4.0] - 2026-05-19
 
 Initial public release.
