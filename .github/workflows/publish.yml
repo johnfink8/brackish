@@ -1,25 +1,3 @@
-# Publish to npm via trusted publishing (OIDC). Triggered by a GitHub Release being
-# published — write release notes in the UI, hit Publish, this workflow takes over.
-#
-# How a release goes:
-#   1. Locally: bump version in package.json + CHANGELOG, commit, push.
-#   2. Locally: `git tag vX.Y.Z && git push --follow-tags`.
-#   3. On GitHub: create a release for that tag (or use `gh release create vX.Y.Z`).
-#      The workflow fires on `release: published`.
-#   4. `build` runs the prepublishOnly chain (typecheck + lint + test + build). On green,
-#      `publish` calls `npm publish --provenance`. The npm registry mints a short-lived
-#      publish token from GitHub's OIDC identity for this exact workflow run; no long-lived
-#      NPM_TOKEN secret lives anywhere.
-#   5. Published artifact gets a "Provenance" badge on the npm page linking back to this run.
-#
-# One-time setup on the npm side (do this before the first release-triggered publish):
-#   npmjs.com → brackish-cli package → Settings → Trusted Publishers → Add
-#   - Publisher: GitHub Actions
-#   - Organization / user: johnfink8
-#   - Repository: brackish
-#   - Workflow filename: publish.yml
-#   - Environment: (leave blank)
-
 name: publish
 
 on:
@@ -33,10 +11,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24.x'
+          package-manager-cache: false
       - run: npm install
       - run: npm run typecheck
       - run: npm run lint
@@ -48,17 +27,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # required for OIDC token minting
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
       - run: npm install
 
-      # Refuse to publish if the tag doesn't match package.json. Same class of mistake as
-      # last release's stale CLI_VERSION; cheap to gate against here.
       - name: Verify tag matches package.json version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -68,7 +46,4 @@ jobs:
             exit 1
           fi
 
-      # npm CLI (≥11.5.1) auto-exchanges the GitHub OIDC token with the npm registry when
-      # `id-token: write` is granted on this job and trusted publishing is configured on the
-      # package's npm settings page. No NODE_AUTH_TOKEN, no NPM_TOKEN secret.
       - run: npm publish --provenance --access public
