@@ -554,6 +554,33 @@ describe('server (Unix-socket transport)', () => {
       });
       expect(res.status).toBe(201);
     });
+
+    it('rolls back earlier items in the batch when a later propose fails (version_in_flight)', async () => {
+      // Pre-seed an in-flight proposal of `C` by host. A subsequent batch from peer
+      // that proposes [A, B, C] passes meta-schema validation (well-formed), but the
+      // per-artifact propose for C will throw `version_in_flight`. The whole batch
+      // must roll back — A and B must not be visible afterward. With the pre-fix
+      // implementation, A and B land before C fails, leaving partial state.
+      await call('POST', '/documents/b/schemas', {
+        body: { name: 'C', spec: { type: 'object' } },
+        identity: 'host',
+      });
+      const res = await call('POST', '/documents/b/propose-batch', {
+        body: {
+          schemas: [
+            { name: 'A', spec: { type: 'object' } },
+            { name: 'B', spec: { type: 'object' } },
+            { name: 'C', spec: { type: 'object' } },
+          ],
+        },
+        identity: 'peer',
+      });
+      expect(res.status).toBe(409);
+      const aCheck = await call('GET', '/documents/b/schemas/A?proposed=true', { identity: 'peer' });
+      expect(aCheck.status).toBe(404);
+      const bCheck = await call('GET', '/documents/b/schemas/B?proposed=true', { identity: 'peer' });
+      expect(bCheck.status).toBe(404);
+    });
   });
 
   describe('inbox', () => {

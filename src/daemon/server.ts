@@ -242,58 +242,49 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       );
     }
 
-    // All-or-nothing commit. The store doesn't have a transaction primitive exposed across
-    // artifact kinds, so we issue the proposes sequentially in convention → schemas →
-    // endpoints order. Since the doc is already meta-schema-valid as a whole, individual
-    // proposes can land in any order without ref errors.
+    // Atomic commit via Store.batchPropose: one outer SQLite transaction wraps the
+    // per-artifact proposes as savepoints. Any failure mid-batch rolls back every
+    // earlier propose, so partial state is impossible. The doc was already validated
+    // as a whole above, so individual proposes resolve refs correctly.
     const identity = c.get('identity');
-    const succeeded: ProposeBatchResponse['succeeded'] = [];
+    const input: import('./store/index.js').BatchProposeInput = {};
+    if (body.convention) {
+      input.convention = { spec: body.convention.spec };
+      const opts = toProposeOptions(body.convention.options);
+      if (Object.keys(opts).length > 0) input.convention.opts = opts;
+    }
+    if (body.schemas) {
+      input.schemas = body.schemas.map((s) => {
+        const item: NonNullable<typeof input.schemas>[number] = { name: s.name, spec: s.spec };
+        const opts = toProposeOptions(s.options);
+        if (Object.keys(opts).length > 0) item.opts = opts;
+        return item;
+      });
+    }
+    if (body.endpoints) {
+      input.endpoints = body.endpoints.map((e) => {
+        const item: NonNullable<typeof input.endpoints>[number] = {
+          method: e.method,
+          path: e.path,
+          spec: e.spec,
+        };
+        const opts = toProposeOptions(e.options);
+        if (Object.keys(opts).length > 0) item.opts = opts;
+        return item;
+      });
+    }
     try {
-      if (body.convention) {
-        const env = await store.proposeConvention(
-          docName,
-          body.convention.spec,
-          identity,
-          toProposeOptions(body.convention.options),
-        );
-        succeeded.push({ kind: 'convention', envelope: env });
-      }
-      if (body.schemas) {
-        for (const s of body.schemas) {
-          const env = await store.proposeSchema(
-            docName,
-            s.name,
-            s.spec,
-            identity,
-            toProposeOptions(s.options),
-          );
-          succeeded.push({ kind: 'schema', name: s.name, envelope: env });
-        }
-      }
-      if (body.endpoints) {
-        for (const e of body.endpoints) {
-          const env = await store.proposeEndpoint(
-            docName,
-            e.method,
-            e.path,
-            e.spec,
-            identity,
-            toProposeOptions(e.options),
-          );
-          succeeded.push({ kind: 'endpoint', method: e.method, path: e.path, envelope: env });
-        }
-      }
+      const succeeded = await store.batchPropose(docName, input, identity);
+      return c.json({ succeeded }, 201);
     } catch (err) {
-      // A propose mid-batch failed (almost always a concurrency conflict: another peer raced
-      // a write between our validation pass and this commit). Surface what we did write so the
-      // caller can reconcile, plus the failure shape that mirrors the per-propose error
-      // envelope.
+      // The whole batch rolled back. Surface the failure shape (mirroring per-propose
+      // errors) so the caller can reconcile, with no `succeeded` field — atomic means
+      // there is nothing partial to report.
       const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
       const message = err instanceof Error ? err.message : String(err);
       const code = err instanceof StoreError ? err.code : null;
-      return c.json({ error: message, code, succeeded }, status);
+      return c.json({ error: message, code }, status);
     }
-    return c.json({ succeeded }, 201);
   });
 
   // --- endpoints (operation artifacts) ---

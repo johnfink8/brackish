@@ -214,6 +214,36 @@ export interface Store {
   // --- inbox (cross-document summary for one identity) ---
   inboxSummary(identity: Identity): Promise<InboxEntry[]>;
 
+  // --- atomic batch propose ---
+  /**
+   * Atomically propose a coordinated set of artifacts. Runs all per-artifact proposes
+   * inside one transaction — any failure rolls back the whole batch, so partial
+   * state is impossible. The caller is responsible for validating the assembled doc
+   * before invoking this; per-artifact errors here (e.g. version_in_flight from a
+   * racing peer) abort and roll back.
+   */
+  batchPropose(
+    documentName: DocumentName,
+    body: BatchProposeInput,
+    by: Identity,
+  ): Promise<BatchProposeSucceededItem[]>;
+
   // --- lifecycle ---
   close(): Promise<void>;
 }
+
+export type BatchProposeInput = {
+  convention?: { spec: ConventionSpec; opts?: ProposeOptions };
+  schemas?: Array<{ name: SchemaName; spec: JSONSchema; opts?: ProposeOptions }>;
+  endpoints?: Array<{
+    method: HttpMethod;
+    path: string;
+    spec: OperationSpec;
+    opts?: ProposeOptions;
+  }>;
+};
+
+export type BatchProposeSucceededItem =
+  | { kind: 'convention'; envelope: ConventionArtifact }
+  | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
+  | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };

@@ -45,7 +45,13 @@ import {
   type SchemaSummary,
 } from '../../lib/models.js';
 import type { EventNotifier } from '../../lib/notifier.js';
-import type { ProposeOptions, RationaleEntry, Store } from './index.js';
+import type {
+  BatchProposeInput,
+  BatchProposeSucceededItem,
+  ProposeOptions,
+  RationaleEntry,
+  Store,
+} from './index.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS documents (
@@ -1209,6 +1215,63 @@ export class SqliteStore implements Store {
       });
     }
     return entries;
+  }
+
+  // --- atomic batch propose ---
+
+  async batchPropose(
+    documentName: DocumentName,
+    body: BatchProposeInput,
+    by: Identity,
+  ): Promise<BatchProposeSucceededItem[]> {
+    // One outer transaction; each per-artifact propose runs its own inner transaction,
+    // which better-sqlite3 implements as a savepoint inside the outer. Any throw out
+    // of the outer transaction body rolls back every savepoint plus the outer tx, so
+    // partial commit is impossible.
+    const succeeded: BatchProposeSucceededItem[] = [];
+    const tx = this.db.transaction(() => {
+      if (body.convention) {
+        const row = this.proposeRaw(
+          documentName,
+          'convention',
+          CONVENTION_KEY,
+          body.convention.spec,
+          by,
+          body.convention.opts ?? {},
+        );
+        succeeded.push({ kind: 'convention', envelope: this.rowToConventionArtifact(row) });
+      }
+      if (body.schemas) {
+        for (const s of body.schemas) {
+          const row = this.proposeRaw(documentName, 'schema', s.name, s.spec, by, s.opts ?? {});
+          succeeded.push({
+            kind: 'schema',
+            name: s.name,
+            envelope: this.rowToSchemaArtifact(row),
+          });
+        }
+      }
+      if (body.endpoints) {
+        for (const e of body.endpoints) {
+          const row = this.proposeRaw(
+            documentName,
+            'operation',
+            operationIdentityKey(e.method, e.path),
+            e.spec,
+            by,
+            e.opts ?? {},
+          );
+          succeeded.push({
+            kind: 'endpoint',
+            method: e.method,
+            path: e.path,
+            envelope: this.rowToOperationArtifact(row),
+          });
+        }
+      }
+    });
+    tx();
+    return succeeded;
   }
 
   // --- lifecycle ---
