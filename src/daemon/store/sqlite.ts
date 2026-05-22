@@ -1221,15 +1221,15 @@ export class SqliteStore implements Store {
 function previewOf(e: Event): string {
   switch (e.kind) {
     case 'message':
-      return truncate(e.text, 80);
+      return truncate(neutralizeForReminder(e.text), 80);
     case 'artifact_proposed': {
-      const delta = e.delta ? ` (${truncate(e.delta, 50)})` : '';
+      const delta = e.delta ? ` (${truncate(neutralizeForReminder(e.delta), 50)})` : '';
       return `proposed ${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;
     }
     case 'artifact_accepted':
       return `accepted ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
-      return `rejected ${e.artifactKind} ${e.identityKey} v${e.version}: ${truncate(e.reason, 50)}`;
+      return `rejected ${e.artifactKind} ${e.identityKey} v${e.version}: ${truncate(neutralizeForReminder(e.reason), 50)}`;
     case 'artifact_withdrawn':
       return `withdrew ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'document_created':
@@ -1239,6 +1239,16 @@ function previewOf(e: Event): string {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+// Inbox previews flow into the UserPromptSubmit hook, which wraps them in a
+// <system-reminder> block in Claude's context. Peer-controlled text containing
+// </system-reminder> would break out of the wrapper and turn into a forged
+// reminder. Replace angle brackets with visually-similar non-tag codepoints
+// (U+2039, U+203A) and strip C0 control characters.
+export function neutralizeForReminder(s: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping C0 controls is the point
+  return s.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[<>]/g, (c) => (c === '<' ? '‹' : '›'));
 }
 
 export class StoreError extends Error {
