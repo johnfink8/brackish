@@ -25,7 +25,7 @@ Wait for the answers before running anything — don't `brackish up`, don't `bra
 
 If the human's invocation already supplies an answer (e.g. `/brackish invite mac2 — just the chat endpoints`), paraphrase back and skip that question.
 
-**Bind default changed in 0.6.0.** Bare `brackish serve --bind` and `brackish up --bind` now default to `127.0.0.1:11442` (loopback) — a peer on a different machine **cannot reach** that. If the human says "different machine", confirm with them whether `--bind 0.0.0.0` (LAN-reachable, trusted networks only) is what they want before running it. brackish prints a security warning when you bind non-loopback; surface that to the human.
+**Bind defaults to loopback.** Bare `brackish serve --bind` and `brackish up --bind` resolve to `127.0.0.1:11442` — a peer on a different machine **cannot reach** that. If the human says "different machine", confirm with them whether `--bind 0.0.0.0` (LAN-reachable, trusted networks only) is what they want before running it. brackish prints a security warning when you bind non-loopback; surface that to the human.
 
 ## Pick your role + load the matching subfile
 
