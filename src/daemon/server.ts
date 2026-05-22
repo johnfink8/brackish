@@ -11,6 +11,7 @@ import pkg from '../../package.json' with { type: 'json' };
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
 import { generatePatch } from '../lib/diff.js';
 import {
+  AcceptArtifactRequestSchema,
   type ConventionSpec,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
@@ -150,6 +151,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/documents/:name/events', async (c) => {
     const name = DocumentNameSchema.parse(c.req.param('name'));
     const identity = c.get('identity');
+    const tail = parseTail(c.req.query('tail'));
+    if (tail !== undefined) {
+      // --tail is a read-only peek at the end of the log. Don't advance the caller's cursor —
+      // the whole point is to inspect recent events without consuming them.
+      const events = await store.listLastEvents(name, tail);
+      const cursor = await store.getLastSeenCursor(identity, name);
+      return c.json({ events, cursor });
+    }
     const since = parseSince(c.req.query('since'));
     const limit = parseLimit(c.req.query('limit'));
     const events = await store.listEvents(name, since ?? 0, limit);
@@ -367,7 +376,8 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
         400,
       );
     }
-    const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'));
+    const reason = await parseOptionalAcceptBody(c);
+    const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'), reason);
     return c.json(v);
   });
 
@@ -503,7 +513,8 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
         400,
       );
     }
-    const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'));
+    const reason = await parseOptionalAcceptBody(c);
+    const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'), reason);
     return c.json(v);
   });
 
@@ -629,7 +640,8 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
         400,
       );
     }
-    const v = await store.acceptConvention(docName, version, c.get('identity'));
+    const reason = await parseOptionalAcceptBody(c);
+    const v = await store.acceptConvention(docName, version, c.get('identity'), reason);
     return c.json(v);
   });
 
@@ -698,7 +710,8 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const docName = DocumentNameSchema.parse(c.req.param('doc'));
     const document = await buildOpenAPI(store, docName);
     const rationale = await buildRationaleMap(store, docName);
-    return c.html(renderHtml({ document, rationale }, { documentName: docName }));
+    const events = await store.listEvents(docName, 0, EVENT_PAGE_MAX);
+    return c.html(renderHtml({ document, rationale, events }, { documentName: docName }));
   });
 
   return app;
@@ -782,6 +795,15 @@ function parseLimit(raw: string | undefined): number {
   return Math.min(n, EVENT_PAGE_MAX);
 }
 
+function parseTail(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) {
+    throw new HttpError(400, 'invalid "tail" count');
+  }
+  return Math.min(n, EVENT_PAGE_MAX);
+}
+
 function clampTimeoutSeconds(raw: string | undefined): number {
   if (raw === undefined) return WAIT_TIMEOUT_DEFAULT_S;
   const n = Number.parseFloat(raw);
@@ -795,6 +817,17 @@ function decodeEndpointId(rawId: string): { method: HttpMethod; path: string } {
 
 function boolQuery(raw: string | undefined): boolean {
   return raw === '1' || raw === 'true';
+}
+
+/** Parse the optional `{reason}` accept body. Accept requests historically have no body;
+ *  callers passing `--rationale` will send one. Missing/empty body → `undefined`. */
+async function parseOptionalAcceptBody(c: {
+  req: { json: () => Promise<unknown>; header: (n: string) => string | undefined };
+}): Promise<string | undefined> {
+  const len = c.req.header('content-length');
+  if (len === undefined || len === '0') return undefined;
+  const body = AcceptArtifactRequestSchema.parse(await c.req.json());
+  return body.reason;
 }
 
 async function resolveEndpointTargetVersion(

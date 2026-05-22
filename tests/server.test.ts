@@ -140,6 +140,29 @@ describe('server (Unix-socket transport)', () => {
       };
       expect(reread.events.length).toBe(r.events.length);
     });
+
+    it('--tail returns the last N events without advancing the cursor', async () => {
+      for (let i = 0; i < 5; i++) {
+        await call('POST', '/documents/t/messages', { body: { text: `m${i}` } });
+      }
+      const cursorBefore = (
+        (await (await call('GET', '/documents/t/events?tail=2')).json()) as { cursor: number }
+      ).cursor;
+      const tailRes = (await (await call('GET', '/documents/t/events?tail=2')).json()) as {
+        events: { kind: string }[];
+        cursor: number;
+      };
+      expect(tailRes.events).toHaveLength(2);
+      // Cursor is unchanged — a follow-up wait with no since still sees nothing.
+      const wait = (await (await call('GET', '/documents/t/wait?timeout=1')).json()) as {
+        events: unknown[];
+      };
+      // wait may return everything since cursor=0 was never advanced (no prior read). Either way,
+      // tail itself didn't change the cursor:
+      expect(tailRes.cursor).toBe(cursorBefore);
+      // wait result confirms tail didn't advance — events count would be 0 if tail HAD advanced.
+      expect(wait.events.length).toBeGreaterThan(0);
+    });
   });
 
   describe('long-poll wait', () => {
@@ -520,6 +543,45 @@ describe('server (Unix-socket transport)', () => {
       const names = data.documents.map((t) => t.documentName);
       expect(names).toContain('a');
       expect(names).toContain('b');
+    });
+  });
+
+  describe('accept --rationale', () => {
+    it('attaches the rationale to the artifact_accepted event', async () => {
+      await call('POST', '/documents', { body: { name: 'r' } });
+      // host proposes a minimal schema
+      const prop = await call('POST', '/documents/r/schemas', {
+        body: { name: 'Foo', spec: { type: 'object' } },
+      });
+      expect(prop.status).toBe(201);
+      // peer accepts with rationale
+      const acc = await call('POST', '/documents/r/schemas/Foo/accept', {
+        identity: 'peer',
+        body: { reason: 'matches the API.md shape' },
+      });
+      expect(acc.status).toBe(200);
+      // The reason should show up on the artifact_accepted event in the stream
+      const events = (await (await call('GET', '/documents/r/events?since=0')).json()) as {
+        events: { kind: string; reason?: string }[];
+      };
+      const acceptEv = events.events.find((e) => e.kind === 'artifact_accepted');
+      expect(acceptEv).toBeDefined();
+      expect(acceptEv?.reason).toBe('matches the API.md shape');
+    });
+
+    it('accept with no body still works (back-compat)', async () => {
+      await call('POST', '/documents', { body: { name: 'r2' } });
+      await call('POST', '/documents/r2/schemas', {
+        body: { name: 'Bar', spec: { type: 'object' } },
+      });
+      const acc = await call('POST', '/documents/r2/schemas/Bar/accept', { identity: 'peer' });
+      expect(acc.status).toBe(200);
+      const events = (await (await call('GET', '/documents/r2/events?since=0')).json()) as {
+        events: { kind: string; reason?: string }[];
+      };
+      const acceptEv = events.events.find((e) => e.kind === 'artifact_accepted');
+      expect(acceptEv).toBeDefined();
+      expect(acceptEv?.reason).toBeUndefined();
     });
   });
 });

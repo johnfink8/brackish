@@ -32,18 +32,20 @@ export type BatchAcceptResult = {
   remaining: string[];
 };
 
-/** Sequentially accept schemas in the given order. On the first failure, stop. */
+/** Sequentially accept schemas in the given order. On the first failure, stop.
+ *  When `reason` is passed, it's attached to each accept event in the batch. */
 export async function acceptSchemas(
   client: BrackishClient,
   document: DocumentName,
   names: SchemaName[],
+  reason?: string,
 ): Promise<BatchAcceptResult> {
   const accepted: SchemaArtifact[] = [];
   for (let i = 0; i < names.length; i++) {
     const n = names[i];
     if (n === undefined) continue;
     try {
-      const v = await client.acceptSchema(document, n);
+      const v = await client.acceptSchema(document, n, undefined, reason);
       accepted.push(v);
     } catch (e) {
       const code = e instanceof ClientError ? e.code : null;
@@ -73,13 +75,14 @@ export async function acceptEndpoints(
   client: BrackishClient,
   document: DocumentName,
   targets: EndpointTarget[],
+  reason?: string,
 ): Promise<EndpointBatchAcceptResult> {
   const accepted: OperationArtifact[] = [];
   for (let i = 0; i < targets.length; i++) {
     const t = targets[i];
     if (t === undefined) continue;
     try {
-      const v = await client.acceptEndpoint(document, t.method, t.path);
+      const v = await client.acceptEndpoint(document, t.method, t.path, undefined, reason);
       accepted.push(v);
     } catch (e) {
       const code = e instanceof ClientError ? e.code : null;

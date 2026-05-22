@@ -237,6 +237,9 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
     schemas: Object.fromEntries(Array.from(rationale.schemas, ([k, vs]) => [k, vs.map(withYaml)])),
     convention: rationale.convention.map(withYaml),
   });
+  // Pass the raw event stream through; the client renders it as a chronological timeline,
+  // looking up spec bodies in the rationale map for propose events.
+  const eventsJson = JSON.stringify(input.events ?? []);
   // Inline the rationale JSON so the page works offline once Swagger UI is cached.
   return `<!doctype html>
 <html lang="en">
@@ -245,22 +248,29 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
 <title>brackish: ${escapeHtml(opts.documentName)}</title>
 <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 <style>
-  body { display: flex; margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-  #swagger-ui { flex: 2; min-width: 0; }
-  #rationale { flex: 1; min-width: 360px; padding: 20px 24px; border-left: 1px solid #ddd; background: #fafafa; overflow-y: auto; max-height: 100vh; font-size: 14px; }
+  html, body { height: 100%; }
+  body { display: flex; margin: 0; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  #swagger-ui { flex: 2; min-width: 0; overflow-y: auto; }
+  #rationale { flex: 1; min-width: 360px; padding: 20px 24px; border-left: 1px solid #ddd; background: #fafafa; overflow-y: auto; font-size: 14px; }
   #rationale h1 { font-size: 18px; margin-top: 0; }
   #rationale h2 { font-size: 14px; text-transform: uppercase; color: #666; border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-top: 24px; }
   #rationale h3 { font-size: 14px; margin: 12px 0 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
   /* All sidebar class selectors are scoped under #rationale so they don't clobber Swagger UI's
      own .version / etc. classes on the left pane. */
-  #rationale .version { margin: 6px 0; padding: 6px 8px; border-left: 3px solid #ddd; background: #fff; font-size: 12px; }
-  #rationale .version.accepted { border-color: #4caf50; }
-  #rationale .version.rejected { border-color: #f44336; }
-  #rationale .version.withdrawn { border-color: #f9a825; }
-  #rationale .version.proposed { border-color: #2196f3; }
-  #rationale .who { color: #666; }
-  #rationale .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; }
-  #rationale .reason { font-style: italic; color: #c62828; }
+  #rationale .ev { margin: 8px 0; padding: 8px 10px; background: #fff; border-left: 3px solid #ddd; border-radius: 2px; font-size: 13px; }
+  #rationale .ev.proposed  { border-color: #2196f3; }
+  #rationale .ev.accepted  { border-color: #4caf50; }
+  #rationale .ev.rejected  { border-color: #f44336; }
+  #rationale .ev.withdrawn { border-color: #f9a825; }
+  #rationale .ev.message   { border-color: #90a4ae; }
+  #rationale .ev .meta { font-size: 11px; color: #666; margin-bottom: 4px; font-family: ui-monospace, SFMono-Regular, monospace; }
+  #rationale .ev .meta .who { color: #1976d2; font-weight: 600; }
+  #rationale .ev .meta .verb { text-transform: uppercase; letter-spacing: 0.04em; color: #555; }
+  #rationale .ev .target { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: #222; }
+  #rationale .ev .delta { font-family: ui-monospace, monospace; font-size: 11px; color: #555; margin-top: 2px; }
+  #rationale .ev .reason { font-style: italic; color: #c62828; margin-top: 4px; }
+  #rationale .ev .reason-note { font-style: italic; color: #2e7d32; margin-top: 4px; }
+  #rationale .ev .body { line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
   #rationale details.spec { margin-top: 6px; }
   #rationale details.spec > summary { font-size: 11px; color: #1976d2; cursor: pointer; user-select: none; }
   #rationale details.spec > summary:hover { color: #0d47a1; }
@@ -271,7 +281,7 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
 <div id="swagger-ui"></div>
 <div id="rationale">
   <h1>${escapeHtml(opts.documentName)}</h1>
-  <p>Negotiation history of this document. The spec on the left is the agreed contract; the right shows how it got there.</p>
+  <p>Negotiation timeline. The doc on the left is the contract as it stands now; this side is how the two sides got there, in the order it happened.</p>
   <div id="rationale-content"></div>
 </div>
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
@@ -279,36 +289,68 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   const spec = ${specJson};
   SwaggerUIBundle({ spec: spec, dom_id: '#swagger-ui', deepLinking: true, presets: [SwaggerUIBundle.presets.apis] });
   const rationale = ${rationaleJson};
+  const events = ${eventsJson};
   function escape(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-  function renderVersion(v) {
-    const isWithdrawn = v.status === 'rejected' && v.rejectionReason === 'withdrawn by proposer';
-    const cls = isWithdrawn ? 'withdrawn' : v.status;
-    let body = '<div class="version ' + cls + '">';
-    body += 'v' + v.version + ' <span class="who">proposed by ' + escape(v.proposedBy) + '</span>';
-    if (v.delta) body += ' <span class="delta">' + escape(v.delta) + '</span>';
-    if (v.status === 'accepted') body += '<br><span class="who">accepted by ' + escape(v.acceptedBy) + '</span>';
-    if (v.status === 'rejected' && isWithdrawn) body += '<br><span class="who">↩ withdrawn by ' + escape(v.rejectedBy) + '</span>';
-    else if (v.status === 'rejected') body += '<br><span class="who">rejected by ' + escape(v.rejectedBy) + '</span>: <span class="reason">' + escape(v.rejectionReason) + '</span>';
-    if (v.specYaml) body += '<details class="spec"><summary>show v' + v.version + ' content</summary><pre>' + escape(v.specYaml) + '</pre></details>';
-    return body + '</div>';
+  // Build a (kind|identityKey|version) -> rationale-version lookup so propose events can attach
+  // the spec body and (for v>=2) the delta string without re-fetching from the server.
+  const versionLookup = {};
+  for (const v of rationale.convention) versionLookup['convention|convention|' + v.version] = v;
+  for (const [name, vs] of Object.entries(rationale.schemas))
+    for (const v of vs) versionLookup['schema|' + name + '|' + v.version] = v;
+  for (const [key, vs] of Object.entries(rationale.endpoints))
+    for (const v of vs) versionLookup['operation|' + key + '|' + v.version] = v;
+  function targetLabel(kind, identityKey) {
+    if (kind === 'convention') return 'convention';
+    if (kind === 'schema') return 'schema ' + identityKey;
+    return identityKey; // operation: identity key is already "GET /messages"
   }
-  function renderGroup(title, map) {
-    if (!map || Object.keys(map).length === 0) return '';
-    let html = '<h2>' + escape(title) + '</h2>';
-    for (const key of Object.keys(map)) {
-      html += '<h3>' + escape(key) + '</h3>';
-      for (const v of map[key]) html += renderVersion(v);
+  function fmtTime(iso) {
+    // Just the HH:MM:SS portion — keeps the meta line compact since wall-clock minutes is what
+    // tells the story (the gap between propose and accept).
+    const m = /T(\\d\\d:\\d\\d:\\d\\d)/.exec(String(iso));
+    return m ? m[1] : String(iso);
+  }
+  function renderEvent(e) {
+    const t = fmtTime(e.createdAt);
+    if (e.kind === 'document_created') {
+      return '<div class="ev"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.by) + '</span> <span class="verb">created document</span></div></div>';
     }
-    return html;
+    if (e.kind === 'message') {
+      return '<div class="ev message"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.from) + '</span></div><div class="body">' + escape(e.text) + '</div></div>';
+    }
+    const target = targetLabel(e.artifactKind, e.identityKey);
+    const v = versionLookup[e.artifactKind + '|' + e.identityKey + '|' + e.version];
+    if (e.kind === 'artifact_proposed') {
+      const isV1 = e.version === 1;
+      const delta = e.delta || (v && v.delta) || '';
+      let html = '<div class="ev proposed"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.from) + '</span> <span class="verb">proposed</span></div>';
+      html += '<div class="target">' + escape(target) + ' v' + e.version + (isV1 ? '' : ' (revision)') + '</div>';
+      if (delta) html += '<div class="delta">' + escape(delta) + '</div>';
+      if (v && v.specYaml) html += '<details class="spec"><summary>show v' + e.version + ' content</summary><pre>' + escape(v.specYaml) + '</pre></details>';
+      return html + '</div>';
+    }
+    if (e.kind === 'artifact_accepted') {
+      let html = '<div class="ev accepted"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.from) + '</span> <span class="verb">accepted</span></div>';
+      html += '<div class="target">' + escape(target) + ' v' + e.version + '</div>';
+      if (e.reason) html += '<div class="reason-note">' + escape(e.reason) + '</div>';
+      return html + '</div>';
+    }
+    if (e.kind === 'artifact_rejected') {
+      const isWithdrawn = e.reason === 'withdrawn by proposer';
+      const cls = isWithdrawn ? 'withdrawn' : 'rejected';
+      const verb = isWithdrawn ? 'withdrew' : 'rejected';
+      let html = '<div class="ev ' + cls + '"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.from) + '</span> <span class="verb">' + verb + '</span></div>';
+      html += '<div class="target">' + escape(target) + ' v' + e.version + '</div>';
+      if (!isWithdrawn) html += '<div class="reason">' + escape(e.reason) + '</div>';
+      return html + '</div>';
+    }
+    if (e.kind === 'artifact_withdrawn') {
+      return '<div class="ev withdrawn"><div class="meta">' + escape(t) + ' · <span class="who">' + escape(e.from) + '</span> <span class="verb">withdrew</span></div><div class="target">' + escape(target) + ' v' + e.version + '</div></div>';
+    }
+    return '';
   }
-  let body = '';
-  body += renderGroup('Endpoints', rationale.endpoints);
-  body += renderGroup('Schemas', rationale.schemas);
-  if (rationale.convention && rationale.convention.length > 0) {
-    body += '<h2>Convention</h2>';
-    for (const v of rationale.convention) body += renderVersion(v);
-  }
-  document.getElementById('rationale-content').innerHTML = body || '<p>(no negotiation history yet)</p>';
+  const html = events.map(renderEvent).join('');
+  document.getElementById('rationale-content').innerHTML = html || '<p>(no negotiation history yet)</p>';
 </script>
 </body>
 </html>

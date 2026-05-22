@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-05-22
+
+### Added
+
+- `--rationale "<text>"` on `accept` (schema/endpoint/convention; single and batch). The reason rides on the `artifact_accepted` event and renders in the sidebar.
+- `--tail N` on `brackish read` — peek at the last N events without advancing the cursor; cheap end-of-log scan with no cursor math.
+- `harness/extract-demo.ts` + `run-trial --demo-data <path>` for regenerating the `brackish demo` move log from a finished trial; demo data refreshed from a 6-round, fully-settled chat-app run (11 of 14 accepts carry rationale).
+
+### Changed
+
+- `skill/server.md` now teaches `<kind> diff --from N --to M` so backend Claudes find it; `skill/propose.md` reconciles the batch threshold (3+ artifacts of any mix, with convention bundled unless contentious).
+- Hook reminder is informational rather than directive; surfaces `brackish deactivate` as the off-ramp once a negotiation has wrapped.
+- `brackish demo` UI: sidebar is a single chronological timeline (one card per event, color-coded by kind), accepts surface their `--rationale` inline, both panes scroll independently within the viewport.
+- README: added a demo screenshot.
+
 ## [0.5.2] - 2026-05-20
 
 ### Fixed

@@ -17,7 +17,9 @@ Every brackish document assembles into a real OpenAPI 3.1 spec. Three kinds of n
 Two propose surfaces; the right one depends on how many artifacts you're about to drop:
 
 - **1–2 artifacts** → per-kind: `brackish convention propose <doc>`, `brackish schema propose <doc> <name>`, `brackish endpoint propose <doc> <METHOD> <PATH>`. Sections below.
-- **3 or more artifacts in one go** → **`brackish propose-batch <doc> --manifest <file>`**. Author a tiny manifest, run one command. Each artifact gets parsed + linted locally before *any* network call; on first failure you stop with a clear "what landed / what's left" summary. This is the single biggest token-saver for the opening drop of a new document — N per-kind `propose` turns become 1.
+- **3 or more artifacts in one go** (any mix of kinds — five schemas counts, two schemas + one endpoint counts) → **`brackish propose-batch <doc> --manifest <file>`**. Author a tiny manifest, run one command. Each artifact gets parsed + linted locally before *any* network call; on first failure you stop with a clear "what landed / what's left" summary. This is the single biggest token-saver for the opening drop of a new document — N per-kind `propose` turns become 1.
+
+**Fold the convention into the same batch** when you'd otherwise propose it standalone. If your naming/auth/server-url is non-contentious (sniffed from your framework), bundling it in saves a propose/accept cycle. Only split the convention out when you genuinely expect a debate on it (e.g. snake_case vs camelCase is a known team disagreement) — then a standalone propose-then-accept clears it before the schemas/endpoints that depend on it.
 
 ```
 # manifest.yaml — block-style only ({placeholder} parens trap flow-mappings)
@@ -150,7 +152,7 @@ The 409s are your friend — they catch the race window. Prefer explicit asserti
 
 ## Proposing many artifacts at once: `propose-batch --manifest`
 
-For >5 artifacts (typical opening dump for a non-trivial API), write a manifest:
+For 3+ artifacts (any mix of kinds — see the threshold note at the top), write a manifest:
 
 ```yaml
 # manifest.yaml — block-style, not flow-style (the {placeholder} traps flow-mapping parsers)

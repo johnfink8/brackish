@@ -378,6 +378,7 @@ export class SqliteStore implements Store {
     identityKey: string,
     version: number,
     by: Identity,
+    reason?: string,
   ): ArtifactRow {
     let row: ArtifactRow | undefined;
     const tx = this.db.transaction(() => {
@@ -414,6 +415,7 @@ export class SqliteStore implements Store {
         artifactKind: kind,
         identityKey,
         version,
+        ...(reason !== undefined ? { reason } : {}),
       });
       row = this.db
         .prepare<[string, string, string, number], ArtifactRow>(
@@ -666,6 +668,17 @@ export class SqliteStore implements Store {
     return rows.map((r) => this.rowToEvent(r));
   }
 
+  async listLastEvents(documentName: DocumentName, limit: number): Promise<Event[]> {
+    // Reverse-fetch the tail in id-DESC order then flip to chronological — keeps the response
+    // shape identical to listEvents (oldest first).
+    const rows = this.db
+      .prepare<[string, number], EventRow>(
+        'SELECT * FROM events WHERE document_name = ? ORDER BY id DESC LIMIT ?',
+      )
+      .all(documentName, limit);
+    return rows.reverse().map((r) => this.rowToEvent(r));
+  }
+
   async latestCursor(documentName: DocumentName): Promise<Cursor> {
     const row = this.db
       .prepare<[string], { max_id: number | null }>(
@@ -702,9 +715,17 @@ export class SqliteStore implements Store {
     path: string,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<OperationArtifact> {
     return this.rowToOperationArtifact(
-      this.acceptRaw(documentName, 'operation', operationIdentityKey(method, path), version, by),
+      this.acceptRaw(
+        documentName,
+        'operation',
+        operationIdentityKey(method, path),
+        version,
+        by,
+        reason,
+      ),
     );
   }
 
@@ -833,8 +854,11 @@ export class SqliteStore implements Store {
     name: SchemaName,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<SchemaArtifact> {
-    return this.rowToSchemaArtifact(this.acceptRaw(documentName, 'schema', name, version, by));
+    return this.rowToSchemaArtifact(
+      this.acceptRaw(documentName, 'schema', name, version, by, reason),
+    );
   }
 
   async rejectSchema(
@@ -919,9 +943,10 @@ export class SqliteStore implements Store {
     documentName: DocumentName,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<ConventionArtifact> {
     return this.rowToConventionArtifact(
-      this.acceptRaw(documentName, 'convention', CONVENTION_KEY, version, by),
+      this.acceptRaw(documentName, 'convention', CONVENTION_KEY, version, by, reason),
     );
   }
 

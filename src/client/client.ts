@@ -147,12 +147,12 @@ export class BrackishClient {
 
   listEvents(
     document: DocumentName,
-    opts: { since?: number; limit?: number } = {},
+    opts: { since?: number; limit?: number; tail?: number } = {},
   ): Promise<EventListResponse> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/events`,
       EventListResponseSchema,
-      { query: { since: opts.since, limit: opts.limit } },
+      { query: { since: opts.since, limit: opts.limit, tail: opts.tail } },
     );
   }
 
@@ -223,12 +223,17 @@ export class BrackishClient {
     method: HttpMethod,
     path: string,
     version?: number,
+    reason?: string,
   ): Promise<OperationArtifact> {
     const id = encodeURIComponent(operationIdentityKey(method, path));
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/endpoints/${id}/accept`,
       OperationArtifactSchema,
-      { method: 'POST', query: { version } },
+      {
+        method: 'POST',
+        query: { version },
+        ...(reason !== undefined ? { body: { reason } } : {}),
+      },
     );
   }
 
@@ -313,11 +318,16 @@ export class BrackishClient {
     document: DocumentName,
     name: SchemaName,
     version?: number,
+    reason?: string,
   ): Promise<SchemaArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/schemas/${encodeURIComponent(name)}/accept`,
       SchemaArtifactSchema,
-      { method: 'POST', query: { version } },
+      {
+        method: 'POST',
+        query: { version },
+        ...(reason !== undefined ? { body: { reason } } : {}),
+      },
     );
   }
 
@@ -401,11 +411,19 @@ export class BrackishClient {
     );
   }
 
-  acceptConvention(document: DocumentName, version?: number): Promise<ConventionArtifact> {
+  acceptConvention(
+    document: DocumentName,
+    version?: number,
+    reason?: string,
+  ): Promise<ConventionArtifact> {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/convention/accept`,
       ConventionArtifactSchema,
-      { method: 'POST', query: { version } },
+      {
+        method: 'POST',
+        query: { version },
+        ...(reason !== undefined ? { body: { reason } } : {}),
+      },
     );
   }
 

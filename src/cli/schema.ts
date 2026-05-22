@@ -114,45 +114,55 @@ export function register(program: Command): void {
       'accept the latest proposed version of one or more schemas. Stops on first failure; remaining names are left unaccepted.',
     )
     .option('--version <n>', 'pin a specific version (only valid with a single name)')
+    .option(
+      '--rationale <text>',
+      'optional acceptance rationale; rides on the accept event so peers see the reason in their inbox',
+    )
     .option('--json')
-    .action(async (doc: string, names: string[], opts: { version?: string; json?: boolean }) =>
-      withClient(async (client) => {
-        if (names.length === 0) errExit(2, 'schema accept: at least one name required');
-        if (opts.version !== undefined && names.length !== 1) {
-          errExit(
-            2,
-            '--version requires exactly one name (different schemas have different version chains)',
-          );
-        }
-        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+    .action(
+      async (
+        doc: string,
+        names: string[],
+        opts: { version?: string; rationale?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          if (names.length === 0) errExit(2, 'schema accept: at least one name required');
+          if (opts.version !== undefined && names.length !== 1) {
+            errExit(
+              2,
+              '--version requires exactly one name (different schemas have different version chains)',
+            );
+          }
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
 
-        // Single-name form preserves the existing text/JSON shape.
-        if (names.length === 1) {
-          const n = names[0];
-          if (n === undefined) errExit(2, 'schema accept: empty name');
-          const v = await client.acceptSchema(doc, n, versionN);
-          if (opts.json) emitJson(v);
-          else emit(`accepted ${describeSchema(v)}`);
-          return;
-        }
+          // Single-name form preserves the existing text/JSON shape.
+          if (names.length === 1) {
+            const n = names[0];
+            if (n === undefined) errExit(2, 'schema accept: empty name');
+            const v = await client.acceptSchema(doc, n, versionN, opts.rationale);
+            if (opts.json) emitJson(v);
+            else emit(`accepted ${describeSchema(v)}`);
+            return;
+          }
 
-        const result = await acceptSchemas(client, doc, names);
-        if (opts.json) {
-          emitJson(result);
-          if (result.failed) process.exit(1);
-          return;
-        }
-        for (const v of result.accepted) emit(`accepted ${describeSchema(v)}`);
-        if (result.failed) {
-          process.stderr.write(
-            `error at "${result.failed.name}": ${result.failed.code ?? 'error'} (${result.failed.message})\n` +
-              (result.remaining.length > 0
-                ? `remaining (unaccepted): ${result.remaining.join(', ')}\n`
-                : ''),
-          );
-          process.exit(1);
-        }
-      }),
+          const result = await acceptSchemas(client, doc, names, opts.rationale);
+          if (opts.json) {
+            emitJson(result);
+            if (result.failed) process.exit(1);
+            return;
+          }
+          for (const v of result.accepted) emit(`accepted ${describeSchema(v)}`);
+          if (result.failed) {
+            process.stderr.write(
+              `error at "${result.failed.name}": ${result.failed.code ?? 'error'} (${result.failed.message})\n` +
+                (result.remaining.length > 0
+                  ? `remaining (unaccepted): ${result.remaining.join(', ')}\n`
+                  : ''),
+            );
+            process.exit(1);
+          }
+        }),
     );
 
   schema

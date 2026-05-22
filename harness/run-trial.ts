@@ -23,6 +23,7 @@ import {
   InboxResponseSchema,
   SchemaListResponseSchema,
 } from '../src/lib/models.js';
+import { extractDemoFromTrial, writeDemoDataFile } from './extract-demo.js';
 import { chatAppScenario } from './scenarios/chat-app.js';
 import type { DocumentSummary, Scenario, Side } from './types.js';
 
@@ -309,6 +310,12 @@ function meetsSuccessCriterion(summary: DocumentSummary, scenario: Scenario): bo
   if (summary.acceptedEndpoints.length < c.minAcceptedEndpoints) return false;
   if (c.requireAcceptedConvention && summary.conventionStatus !== 'accepted') return false;
   if (c.requireRejectionCycle && summary.rejectionCount < 1) return false;
+  if (
+    c.requireSettled &&
+    (summary.proposedEndpoints.length > 0 || summary.proposedSchemas.length > 0)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -375,11 +382,13 @@ function parseArgs(): {
   scenarioName: string;
   maxRoundsOverride?: number;
   budgetOverride?: number;
+  demoDataPath?: string;
 } {
   const args = process.argv.slice(2);
   let scenarioName = 'chat-app';
   let maxRoundsOverride: number | undefined;
   let budgetOverride: number | undefined;
+  let demoDataPath: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--max-rounds') {
@@ -390,22 +399,30 @@ function parseArgs(): {
       const next = args[++i];
       if (!next) throw new Error('--budget requires a number');
       budgetOverride = Number.parseFloat(next);
+    } else if (a === '--demo-data') {
+      const next = args[++i];
+      if (!next) throw new Error('--demo-data requires a path');
+      demoDataPath = next;
     } else if (a && !a.startsWith('--')) {
       scenarioName = a;
     } else {
       throw new Error(`unknown arg: ${a}`);
     }
   }
-  const result: { scenarioName: string; maxRoundsOverride?: number; budgetOverride?: number } = {
-    scenarioName,
-  };
+  const result: {
+    scenarioName: string;
+    maxRoundsOverride?: number;
+    budgetOverride?: number;
+    demoDataPath?: string;
+  } = { scenarioName };
   if (maxRoundsOverride !== undefined) result.maxRoundsOverride = maxRoundsOverride;
   if (budgetOverride !== undefined) result.budgetOverride = budgetOverride;
+  if (demoDataPath !== undefined) result.demoDataPath = demoDataPath;
   return result;
 }
 
 async function main(): Promise<void> {
-  const { scenarioName, maxRoundsOverride, budgetOverride } = parseArgs();
+  const { scenarioName, maxRoundsOverride, budgetOverride, demoDataPath } = parseArgs();
   const baseScenario = SCENARIOS[scenarioName];
   if (!baseScenario) {
     console.error(`unknown scenario: ${scenarioName}. known: ${Object.keys(SCENARIOS).join(', ')}`);
@@ -698,6 +715,17 @@ async function main(): Promise<void> {
     '',
   ].join('\n');
   writeFileSync(join(trialDir, 'summary.txt'), summaryReport);
+
+  if (demoDataPath !== undefined) {
+    try {
+      const data = extractDemoFromTrial(trialDir);
+      writeDemoDataFile(data, demoDataPath);
+      console.error(`harness: wrote demo data (${data.moves.length} moves) → ${demoDataPath}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`harness: --demo-data extraction failed: ${msg}`);
+    }
+  }
 
   console.error(`\nharness: trial complete.\n  → ${trialDir}`);
   console.error(

@@ -89,5 +89,8 @@ export const chatAppScenario: Scenario = {
     requireAcceptedConvention: true,
     // Naturalistic split — friction may or may not produce rejections. Don't force one.
     requireRejectionCycle: false,
+    // Don't terminate while either side still has in-flight proposals — we want a fully
+    // settled contract so the demo lands on "done", not "mid-negotiation".
+    requireSettled: true,
   },
 };

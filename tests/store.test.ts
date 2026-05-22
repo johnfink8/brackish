@@ -83,6 +83,27 @@ describe('SqliteStore', () => {
       expect(limited.length).toBeLessThanOrEqual(2);
     });
 
+    it('listLastEvents returns the last N events in chronological order', async () => {
+      for (let i = 0; i < 5; i++) await store.appendMessage('t', 'host', `m${i}`);
+      const tail3 = await store.listLastEvents('t', 3);
+      expect(tail3).toHaveLength(3);
+      // Should be in ascending id order
+      expect(tail3[0]!.id).toBeLessThan(tail3[1]!.id);
+      expect(tail3[1]!.id).toBeLessThan(tail3[2]!.id);
+      // And these should match the last three from a full listEvents
+      const all = await store.listEvents('t', 0, 100);
+      expect(tail3.map((e) => e.id)).toEqual(all.slice(-3).map((e) => e.id));
+    });
+
+    it('listLastEvents on a smaller log returns all events', async () => {
+      // 't' was created in the test setup with 1 document_created event; appending 2 more = 3 total
+      await store.appendMessage('t', 'host', 'a');
+      await store.appendMessage('t', 'host', 'b');
+      const tail10 = await store.listLastEvents('t', 10);
+      const all = await store.listEvents('t', 0, 100);
+      expect(tail10.map((e) => e.id)).toEqual(all.map((e) => e.id));
+    });
+
     it('latestCursor reflects highest event id', async () => {
       expect(await store.latestCursor('t')).toBeGreaterThan(0); // document_created event
       const before = await store.latestCursor('t');

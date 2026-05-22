@@ -172,13 +172,17 @@ export function register(program: Command): void {
       collect,
       [],
     )
+    .option(
+      '--rationale <text>',
+      'optional acceptance rationale; rides on the accept event so peers see the reason in their inbox',
+    )
     .option('--json')
     .action(
       async (
         doc: string,
         methodRaw: string | undefined,
         path: string | undefined,
-        opts: { version?: string; target: string[]; json?: boolean },
+        opts: { version?: string; target: string[]; rationale?: string; json?: boolean },
       ) =>
         withClient(async (client) => {
           const usingTargets = opts.target.length > 0;
@@ -195,7 +199,7 @@ export function register(program: Command): void {
             const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
             const versionN =
               opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-            const v = await client.acceptEndpoint(doc, method, path, versionN);
+            const v = await client.acceptEndpoint(doc, method, path, versionN, opts.rationale);
             if (opts.json) emitJson(v);
             else emit(`accepted ${describeOperation(v)}`);
             return;
@@ -221,13 +225,13 @@ export function register(program: Command): void {
           if (targets.length === 1) {
             const t = targets[0];
             if (!t) errExit(2, 'endpoint accept: empty --target');
-            const v = await client.acceptEndpoint(doc, t.method, t.path);
+            const v = await client.acceptEndpoint(doc, t.method, t.path, undefined, opts.rationale);
             if (opts.json) emitJson(v);
             else emit(`accepted ${describeOperation(v)}`);
             return;
           }
 
-          const result = await acceptEndpoints(client, doc, targets);
+          const result = await acceptEndpoints(client, doc, targets, opts.rationale);
           if (opts.json) {
             emitJson(result);
             if (result.failed) process.exit(1);

@@ -126,11 +126,15 @@ export function register(program: Command): void {
   convention
     .command('accept <doc>')
     .option('--version <n>')
+    .option(
+      '--rationale <text>',
+      'optional acceptance rationale; rides on the accept event so peers see the reason in their inbox',
+    )
     .option('--json')
-    .action(async (doc: string, opts: { version?: string; json?: boolean }) =>
+    .action(async (doc: string, opts: { version?: string; rationale?: string; json?: boolean }) =>
       withClient(async (client) => {
         const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-        const v = await client.acceptConvention(doc, versionN);
+        const v = await client.acceptConvention(doc, versionN, opts.rationale);
         if (opts.json) emitJson(v);
         else emit(`accepted ${describeConvention(v)}`);
       }),

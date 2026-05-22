@@ -318,6 +318,9 @@ export const ArtifactAcceptedEventSchema = z.object({
   artifactKind: ArtifactKindSchema,
   identityKey: z.string(),
   version: z.number().int().positive(),
+  /** Optional acceptance rationale — surfaces in event/render output so the reason rides on the
+   *  accept event instead of needing a separate `brackish send`. */
+  reason: z.string().min(1).optional(),
 });
 
 export const ArtifactRejectedEventSchema = z.object({
@@ -490,6 +493,12 @@ export const RejectArtifactRequestSchema = z.object({
   reason: z.string().min(1),
 });
 export type RejectArtifactRequest = z.infer<typeof RejectArtifactRequestSchema>;
+
+/** Optional acceptance rationale that rides on the artifact_accepted event. */
+export const AcceptArtifactRequestSchema = z.object({
+  reason: z.string().min(1).optional(),
+});
+export type AcceptArtifactRequest = z.infer<typeof AcceptArtifactRequestSchema>;
 
 export const CreateInviteRequestSchema = z.object({
   identity: IdentitySchema,

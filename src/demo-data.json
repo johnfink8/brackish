@@ -1,0 +1,962 @@
+{
+  "document": "chat-api",
+  "moves": [
+    {
+      "t": "create_document",
+      "actor": "backend",
+      "at": "2026-05-22T01:15:42.114Z",
+      "doc": "chat-api"
+    },
+    {
+      "t": "message",
+      "actor": "backend",
+      "at": "2026-05-22T01:15:51.310Z",
+      "text": "Hi frontend — backend here. I'll propose the whole v1 surface in one batch since the API is small: convention + 5 schemas (User, Message, MessageCreate, MessageList, Error) + 3 endpoints (POST /messages, GET /messages, GET /users/{id}).\n\nDefaults I'm starting from (push back where it costs you something real):\n- snake_case JSON keys (path of least resistance for our ORM; happy to flip to camelCase if rendering/codegen on your side benefits)\n- Bearer JWT auth, inherited on all endpoints\n- Short-polling for new messages via GET /messages?since=<cursor>; messages returned chronologically with next_cursor for the next poll. No SSE/WS in v1 unless you have a strong argument.\n- Author is just an author_id ref; you fetch users via GET /users/{id} and cache. No embedded user objects on messages.\n- Simple error envelope { error: { code, message } }\n- No Idempotency-Key on POST /messages for v1 (real concern for double-tap; can add if you want)\n\nThings I'd love your input on: cursor semantics for history vs. polling new (one endpoint with since/before, or split?), text length limit, whether you need batch user fetch."
+    },
+    {
+      "t": "propose_convention",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:05.719Z",
+      "spec": {
+        "info": {
+          "title": "Chat API",
+          "version": "1.0.0"
+        },
+        "servers": [
+          {
+            "url": "https://api.chat.example.com",
+            "description": "production"
+          }
+        ],
+        "securitySchemes": {
+          "bearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "x-brackish": {
+          "naming": "snake_case"
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:37.345Z",
+      "name": "User",
+      "spec": {
+        "type": "object",
+        "required": ["id", "display_name"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Opaque user id."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Human-readable name shown in the UI."
+          },
+          "avatar_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Optional avatar image URL."
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:38.424Z",
+      "name": "Message",
+      "spec": {
+        "type": "object",
+        "required": ["id", "text", "author_id", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Opaque message id; also usable as a cursor."
+          },
+          "text": {
+            "type": "string",
+            "description": "Message body. UTF-8, server-enforced max 4000 chars."
+          },
+          "author_id": {
+            "type": "string",
+            "description": "References User.id; the frontend caches users separately."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server-assigned creation time, RFC 3339 / ISO 8601 UTC."
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:39.435Z",
+      "name": "MessageCreate",
+      "spec": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "Message body. Author is derived from the bearer token."
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:40.166Z",
+      "name": "MessageList",
+      "spec": {
+        "type": "object",
+        "required": ["messages", "next_cursor"],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "description": "Messages in chronological order (oldest first).",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Cursor to pass as `since` on the next poll. Null when there are no messages yet (cold start); otherwise always a string, even when no new messages arrived (use last seen)."
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:16:40.776Z",
+      "name": "Error",
+      "spec": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable code (e.g. `invalid_request`, `unauthorized`, `not_found`, `rate_limited`, `internal`)."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable explanation; not stable, do not parse."
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:17:04.753Z",
+      "method": "get",
+      "path": "/messages",
+      "spec": {
+        "summary": "List messages / poll for new",
+        "description": "Returns messages in chronological order (oldest first).\n\n- No `since`: returns the most recent `limit` messages (still ordered oldest-first within the page). Use this for an initial render.\n- `since=<cursor>`: returns up to `limit` messages strictly newer than the cursor. Use this for polling.\n\n`next_cursor` in the response is what you pass as `since` on the next call.\n",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Cursor returned by a previous call's `next_cursor`. Omit for initial load.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max messages to return. Default 50, max 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of messages (possibly empty if polling and nothing new).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `since` cursor or `limit` out of range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "timing": {
+            "p50": "20ms",
+            "p99": "150ms",
+            "timeout": "2s"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:17:07.924Z",
+      "method": "post",
+      "path": "/messages",
+      "spec": {
+        "summary": "Send a message",
+        "description": "Creates a message. The author is derived from the bearer token; do not send author_id in the body.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created message; id, author_id, created_at are server-assigned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (e.g. empty text, text too long).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "sideEffects": ["inserts a row into messages"],
+          "timing": {
+            "p50": "30ms",
+            "p99": "200ms",
+            "timeout": "5s"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:17:10.181Z",
+      "method": "get",
+      "path": "/users/{id}",
+      "spec": {
+        "summary": "Fetch a user by id",
+        "description": "Returns a single user. Intended to populate the frontend's user cache when an unknown author_id is seen.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id path parameter",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No user with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "timing": {
+            "p50": "10ms",
+            "p99": "80ms",
+            "timeout": "2s"
+          }
+        }
+      }
+    },
+    {
+      "t": "message",
+      "actor": "frontend",
+      "at": "2026-05-22T01:19:54.939Z",
+      "text": "Thanks — shape mostly works for us. One real ask: embed the author on Message. Our row renders need display_name+avatar_url inline; an N+1 user fetch per row (or even a batched lookup) is friction we'd rather not push into the client. I'm rejecting Message v1 and proposing v2 with author as an embedded User ref (keeping GET /users/{id} useful for profile views, just not on the render path).\n\nConceding the smaller stuff: snake_case is fine, JWT bearer is fine, short-poll with since-cursor is fine for now, 4000-char limit is fine, no batch user fetch needed if author embeds. One small follow-up worth considering on POST /messages: an optional Idempotency-Key header would let us safely retry on flaky network without dup messages — happy to defer if you'd rather not, since dedup can also live on the client."
+    },
+    {
+      "t": "reject_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:19:58.109Z",
+      "name": "Message",
+      "reason": "embed author (display_name+avatar_url) on the message so a chat row renders without an extra fetch; counter in v2"
+    },
+    {
+      "t": "propose_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:01.306Z",
+      "name": "Message",
+      "spec": {
+        "type": "object",
+        "required": ["id", "text", "author", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Opaque message id; also usable as a cursor."
+          },
+          "text": {
+            "type": "string",
+            "description": "Message body. UTF-8, server-enforced max 4000 chars."
+          },
+          "author": {
+            "$ref": "#/components/schemas/User",
+            "description": "Embedded author so a chat row renders without an extra fetch."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Server-assigned creation time, RFC 3339 / ISO 8601 UTC."
+          }
+        }
+      }
+    },
+    {
+      "t": "accept_convention",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:06.390Z",
+      "reason": "snake_case + JWT bearer fine; ORM ergonomics on your side beat our codegen ergonomics on ours"
+    },
+    {
+      "t": "accept_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:07.016Z",
+      "name": "User"
+    },
+    {
+      "t": "accept_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:07.020Z",
+      "name": "MessageCreate"
+    },
+    {
+      "t": "accept_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:22.486Z",
+      "name": "Error"
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:27.077Z",
+      "method": "get",
+      "path": "/users/{id}",
+      "reason": "still useful for profile views even with author embedded on Message"
+    },
+    {
+      "t": "message",
+      "actor": "frontend",
+      "at": "2026-05-22T01:20:42.344Z",
+      "text": "Left MessageList / GET /messages / POST /messages in proposed (your originals) deliberately — they ref Message and the doc validator wouldn't let me accept until Message resolves. Once you take Message v2 (or counter), I'll accept those three immediately; no other changes needed on them as far as I can see."
+    },
+    {
+      "t": "accept_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:21:29.034Z",
+      "name": "Message",
+      "reason": "Fair trade — single JOIN against the users table on our side beats N+1 (or batched fetch) on the render path. Users table is small reference data so the extra bytes per message are fine. Note for both of us: embedded author is a point-in-time snapshot at fetch; if a user later edits display_name/avatar, previously-rendered messages keep the old values until refetched (same as client-side caching, just no inconsistency window between message and user)."
+    },
+    {
+      "t": "message",
+      "actor": "backend",
+      "at": "2026-05-22T01:21:35.691Z",
+      "text": "Took Message v2 — embedding author is fine, single JOIN on our side beats N+1 on yours. As you noted, MessageList / GET /messages / POST /messages should validate now against the originals; nothing else to change there from me.\n\nOn Idempotency-Key: deferring for v1 as you offered. Keeps the contract tight and client-side dedup covers the flaky-network case. If we see real duplicate-message reports in production we'll add it post-v1 — easy additive change (optional header, no breaking impact).\n\nI think we're effectively done once you accept the remaining three. Handing back to you."
+    },
+    {
+      "t": "accept_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:22:47.032Z",
+      "name": "MessageList",
+      "reason": "LGTM; chronological pagination + next_cursor semantics are clear, nullable cold-start case is well-documented."
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:22:52.872Z",
+      "method": "get",
+      "path": "/messages",
+      "reason": "Polling shape works for v1; cursor semantics (omit for initial, since= for poll) are clean."
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:22:52.982Z",
+      "method": "post",
+      "path": "/messages",
+      "reason": "Send shape works. Tiny nit (not blocking): description says 'id, author_id, created_at are server-assigned' but Message v2 has 'author' (embedded) not author_id — feel free to tidy in a v2 of this op or leave it, the schema ref is unambiguous."
+    },
+    {
+      "t": "propose_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:32.852Z",
+      "name": "Message",
+      "spec": {
+        "type": "object",
+        "description": "A single chat message, with the author embedded so a client can render a chat row from one GET /messages response (no separate users lookup). The embedded `author` reflects the user's *current* profile as of the GET — the server resolves it via a join on users.id at fetch time, it is not a stored snapshot. Practical consequence: if a user changes their display_name or avatar_url, the next poll will return the new values on their historical messages as well.\n",
+        "required": ["id", "text", "author", "created_at"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable opaque message id. Lexicographically orderable (ULID-style) so the client can use it directly as the `since` cursor on GET /messages.\n"
+          },
+          "text": {
+            "type": "string",
+            "description": "Message body. UTF-8, no server-side formatting. When `deleted_at` is non-null the server may clear or substitute this field; clients should render a tombstone based on `deleted_at` rather than displaying `text` for deleted messages.\n"
+          },
+          "author": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/User"
+              }
+            ],
+            "description": "The author User as of this GET. Server-resolved via join on users.id = messages.author_id; no denormalized snapshot is stored.\n"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 UTC timestamp of when the server accepted the message."
+          },
+          "edited_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "ISO 8601 UTC timestamp of the most recent edit, or null if the message has never been edited. Clients may show an \"(edited)\" affordance when this is non-null.\n"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "ISO 8601 UTC soft-delete timestamp. Null for live messages. When set, the message is a tombstone — clients should render \"[deleted]\" or similar in place of `text`.\n"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:36.229Z",
+      "name": "MessageEdit",
+      "spec": {
+        "type": "object",
+        "description": "Body for PATCH /messages/{id}. Replaces the message's text. Author identity comes from the bearer token; no fields beyond `text` are settable from the client.\n",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Replacement message body. UTF-8, server-enforced max 4000 chars, non-empty.\n"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_schema",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:38.974Z",
+      "name": "TypingStatus",
+      "spec": {
+        "type": "object",
+        "description": "Snapshot of who is currently typing in the chat, as of the time of the GET /typing call. \"Currently\" is server-defined — typically users whose last heartbeat (POST /typing) arrived within an idle window of a few seconds. Embeds full User objects (mirroring the Message.author embedding pattern) so a client can render \"Alice and Bob are typing…\" without a follow-up users lookup.\n",
+        "required": ["typing_users"],
+        "properties": {
+          "typing_users": {
+            "type": "array",
+            "description": "Users currently typing. Excludes the requesting user (a client never needs to render its own typing indicator back to itself). Order is not significant.\n",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            }
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:42.927Z",
+      "method": "patch",
+      "path": "/messages/{id}",
+      "spec": {
+        "summary": "Edit a message",
+        "description": "Replace the text of a message you authored. Allowed only within a server-defined edit window (suggest 5 minutes) from `created_at`; outside the window the server returns 403. On success the server sets `edited_at` to now and returns the updated Message. The edit also needs to propagate to other clients viewing the thread — see the rationale message on this proposal for the open cursor-semantics question on GET /messages.\n",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id (as returned by POST /messages or GET /messages).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageEdit"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated message; `edited_at` is set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (empty text, text too long).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the message author, or edit window has expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such message.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "sideEffects": ["updates messages row (text, edited_at)"],
+          "timing": {
+            "p50": "30ms",
+            "p99": "200ms",
+            "timeout": "5s"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:45.576Z",
+      "method": "delete",
+      "path": "/messages/{id}",
+      "spec": {
+        "summary": "Delete a message",
+        "description": "Soft-delete a message you authored. Allowed only within a server-defined deletion window (suggest 5 minutes) from `created_at`; outside the window the server returns 403. On success the server sets `deleted_at` to now (and may clear `text`) and returns the tombstone Message. Returning the tombstone body (vs. 204) lets the client patch its in-memory thread immediately without a refetch.\n",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tombstone message; `deleted_at` is set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the message author, or deletion window has expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such message (or already hard-deleted).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "sideEffects": ["updates messages row (deleted_at, possibly clears text)"],
+          "timing": {
+            "p50": "30ms",
+            "p99": "200ms",
+            "timeout": "5s"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:48.278Z",
+      "method": "post",
+      "path": "/typing",
+      "spec": {
+        "summary": "Send a typing heartbeat",
+        "description": "Tell the server the authenticated user is currently typing. Clients should debounce this — sending one heartbeat every 2-3 seconds while the input field is non-empty and being modified is plenty. The server records a presence timestamp keyed by user id; GET /typing surfaces users whose most-recent heartbeat is within the idle window. No body; identity comes from the bearer token. Fire-and-forget — the client does not need the response value for anything.\n",
+        "responses": {
+          "204": {
+            "description": "Heartbeat recorded."
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "sideEffects": ["updates in-memory presence map (last_typed_at by user_id)"],
+          "timing": {
+            "p50": "10ms",
+            "p99": "50ms",
+            "timeout": "2s"
+          }
+        }
+      }
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:50.922Z",
+      "method": "get",
+      "path": "/typing",
+      "spec": {
+        "summary": "List currently-typing users",
+        "description": "Returns the set of users whose most-recent typing heartbeat (POST /typing) is within the server-defined idle window. Polled separately from GET /messages so the client can use a tighter cadence (typically every ~2 seconds) without coupling it to the message poll interval. Excludes the requesting user.\n",
+        "responses": {
+          "200": {
+            "description": "Current typing snapshot (possibly empty).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TypingStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "timing": {
+            "p50": "10ms",
+            "p99": "50ms",
+            "timeout": "2s"
+          }
+        }
+      }
+    },
+    {
+      "t": "message",
+      "actor": "frontend",
+      "at": "2026-05-22T01:25:59.467Z",
+      "text": "Core v1 fully accepted — thanks. Loading in the two product extras you hadn't seen yet (design signed off on both): typing indicator (POST/GET /typing) and 5-minute edit/delete (PATCH/DELETE /messages/{id} + Message v3 adds nullable edited_at/deleted_at). Open question: propagation of edits/deletes through GET /messages. Current poll semantics ('strictly newer than cursor') won't surface modified messages, so other clients won't see edits/deletes until a hard refresh. Two paths I see: (a) extend the cursor to mean 'messages whose id > since OR whose edited_at/deleted_at > cursor_time' — single endpoint, slightly more complex query; (b) separate change-event endpoint. Your call — you've got the DB-side context. Happy to take a Message v4 / GET /messages v2 counter-proposal if you want to tighten the semantics. Handing back."
+    },
+    {
+      "t": "accept_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:00.442Z",
+      "name": "Message",
+      "reason": "Edit/delete is a reasonable v1 addition; tombstone-on-success (vs 204) avoids a refetch, soft-delete columns are normal DB work, and the embedded-author clarification (server-resolved join, not snapshot) matches what we'd do anyway."
+    },
+    {
+      "t": "accept_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:00.446Z",
+      "name": "MessageEdit",
+      "reason": "Edit/delete is a reasonable v1 addition; tombstone-on-success (vs 204) avoids a refetch, soft-delete columns are normal DB work, and the embedded-author clarification (server-resolved join, not snapshot) matches what we'd do anyway."
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:04.356Z",
+      "method": "patch",
+      "path": "/messages/{id}",
+      "reason": "5-minute window is cheap to enforce (created_at + interval check on the row); 403 vs 404 split is correct; returning the updated/tombstone Message keeps client state coherent without a refetch."
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:04.361Z",
+      "method": "delete",
+      "path": "/messages/{id}",
+      "reason": "5-minute window is cheap to enforce (created_at + interval check on the row); 403 vs 404 split is correct; returning the updated/tombstone Message keeps client state coherent without a refetch."
+    },
+    {
+      "t": "reject_schema",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:11.600Z",
+      "name": "TypingStatus",
+      "reason": "Typing is a push-shaped signal getting forced into poll — and we agreed to no push channel in v1. Two real costs on our side: (1) sustained background load from every connected client GET /typing'ing every ~2s plus heartbeat POSTs (~constant traffic even in an idle room), and (2) the UX is fundamentally degraded — 2s poll = 2s lag on an indicator that wants to feel instant, and tighter cadence makes the load problem worse. The right home for typing is when we add SSE/WS (v1.x), at which point it becomes a first-class push event and the operational cost is right-sized. Deferring."
+    },
+    {
+      "t": "reject_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:16.217Z",
+      "method": "post",
+      "path": "/typing",
+      "reason": "Deferring with TypingStatus v1 — see that rejection for the full rationale. Tl;dr: typing wants a push channel, we agreed no push in v1, and poll-based typing is bad UX (lag) and bad cost (sustained traffic in idle rooms). Right home for this is the SSE/WS round."
+    },
+    {
+      "t": "reject_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:17.737Z",
+      "method": "get",
+      "path": "/typing",
+      "reason": "Deferring with TypingStatus v1 — see that rejection for the full rationale. Tl;dr: typing wants a push channel, we agreed no push in v1, and poll-based typing is bad UX (lag) and bad cost (sustained traffic in idle rooms). Right home for this is the SSE/WS round."
+    },
+    {
+      "t": "propose_endpoint",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:21.076Z",
+      "method": "get",
+      "path": "/messages",
+      "spec": {
+        "summary": "List messages / poll for new, edited, and deleted",
+        "description": "Returns messages in change-time order. Powers both initial render and polling,\nincluding propagation of edits and deletes from PATCH/DELETE /messages/{id}.\n\n- **No `since`** (initial render): returns the most recent `limit` messages,\n  chronologically (oldest first within the page). Tombstones (`deleted_at`\n  set) are included so the client renders the same view as anyone else\n  looking at the thread.\n\n- **`since=<cursor>`** (polling): returns up to `limit` messages whose state\n  has changed since the cursor — newly created, edited, or soft-deleted.\n  Ordered ascending by *change-time* (server-side `max(created_at,\n  edited_at, deleted_at)` per row), so `next_cursor` advances monotonically\n  and a single page never straddles two state changes of the same row.\n\n**Dedupe by `id`.** A previously-seen message can reappear when it is edited\nor deleted; clients should treat the response as an upsert stream keyed by\n`id`, replacing any in-memory copy with the row returned.\n\n**Cursor is opaque.** It encodes a server-side change-time, not an id. Always\npass back the `next_cursor` from your previous response; do not synthesize a\ncursor from a message id.\n",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Opaque cursor from a previous call's `next_cursor`. Omit for initial load.\n",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max messages to return. Default 50, max 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of messages (possibly empty if polling and nothing has changed). May include tombstones (`deleted_at` set) and edited rows (`edited_at` set).\n",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid `since` cursor or `limit` out of range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-brackish": {
+          "idempotent": true,
+          "timing": {
+            "p50": "25ms",
+            "p99": "180ms",
+            "timeout": "2s"
+          }
+        }
+      }
+    },
+    {
+      "t": "message",
+      "actor": "backend",
+      "at": "2026-05-22T01:29:35.760Z",
+      "text": "Round summary:\n\nTook the edit/delete stack — Message v3, MessageEdit v1, PATCH /messages/{id}, DELETE /messages/{id}. 5-min window is cheap server-side, soft-delete columns are bog standard, and returning the tombstone/edited row from the mutations keeps your in-memory thread coherent.\n\nRejected the typing trio (TypingStatus, POST /typing, GET /typing). Not the feature — the transport. Typing-over-poll is a sustained-cost / high-latency combo that's bad on both ends, and we explicitly didn't sign up for a push channel in v1. Right home for typing is the SSE/WS round (call it v1.x). When we add that, typing falls out for free as a push event with the cost shaped correctly.\n\nFor propagation of edits/deletes through GET /messages: proposed v2 going with your option (a) — single endpoint, extended semantics. Key changes:\n- 'since' now means 'changed since', not 'newer than': returns rows where max(created_at, edited_at, deleted_at) > cursor-time.\n- Ordered ascending by change-time so next_cursor advances monotonically.\n- Cursor is opaque and encodes a server-side change-time, not a message id — clients must use next_cursor (id-as-cursor only ever surfaced new rows, won't see edits).\n- Clients dedupe by id since a previously-seen message can reappear in modified form.\n- Initial render (no since) unchanged in shape — most recent limit, oldest first within the page, includes tombstones so everyone sees the same thread state.\n\nDB-side: index on greatest(created_at, edited_at, deleted_at) covers it. The query gets one extra OR clause; not a meaningful complexity bump.\n\nIf v2 looks right, accept and we're done with v1. If you want a separate change-feed endpoint instead I'll take a counter, but I think one endpoint with upsert-stream semantics is cleaner than two polls running side by side."
+    },
+    {
+      "t": "accept_endpoint",
+      "actor": "frontend",
+      "at": "2026-05-22T01:30:15.274Z",
+      "method": "get",
+      "path": "/messages",
+      "reason": "v2 matches option (a) exactly — change-time semantics, opaque cursor, upsert-stream dedupe by id, tombstones in initial render. The doc copy is unambiguous about cursor opacity and replace-on-id, which is what we need for the in-memory thread to stay coherent. p50 25ms / p99 180ms is a fine bump for the extra clause. v1 closed on our side."
+    },
+    {
+      "t": "message",
+      "actor": "frontend",
+      "at": "2026-05-22T01:30:23.993Z",
+      "text": "Round close from our side: accepted GET /messages v2 — change-time cursor + upsert-stream-keyed-by-id is exactly what edit/delete propagation needed; doc copy is clear enough that I don't think we'll trip over the cursor-opacity rule in client code.\n\nOn the typing trio: taking the deferral. You're right that typing-over-poll is shape-wrong — sustained traffic for an almost-always-empty signal, and worst-case staleness pinned to the poll interval. Punting to the v1.x SSE/WS round is the better home. Logging here so it doesn't get lost: when push lands, we want a typing event ({ thread_id, user_id, started_at } or similar — shape TBD then) emitted while a user is actively typing, debounced server-side, no separate read endpoint. I'll re-propose against the push surface in that round, not against v1.\n\nv1 looks done on our side. Thanks — clean negotiation."
+    }
+  ]
+}

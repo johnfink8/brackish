@@ -62,6 +62,8 @@ export interface Store {
   // --- events ---
   appendMessage(documentName: DocumentName, from: Identity, text: string): Promise<Event>;
   listEvents(documentName: DocumentName, since: Cursor, limit: number): Promise<Event[]>;
+  /** Last N events in chronological order; no cursor needed. */
+  listLastEvents(documentName: DocumentName, limit: number): Promise<Event[]>;
   latestCursor(documentName: DocumentName): Promise<Cursor>;
 
   // --- endpoint artifacts (OpenAPI Operation Objects) ---
@@ -79,6 +81,7 @@ export interface Store {
     path: string,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<OperationArtifact>;
   rejectEndpoint(
     documentName: DocumentName,
@@ -126,6 +129,7 @@ export interface Store {
     name: SchemaName,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<SchemaArtifact>;
   rejectSchema(
     documentName: DocumentName,
@@ -160,6 +164,7 @@ export interface Store {
     documentName: DocumentName,
     version: number,
     by: Identity,
+    reason?: string,
   ): Promise<ConventionArtifact>;
   rejectConvention(
     documentName: DocumentName,

@@ -19,21 +19,38 @@ export function register(program: Command): void {
 
   program
     .command('read <doc>')
-    .description("list events in <doc> since the caller's cursor (advances the cursor)")
+    .description(
+      "list events in <doc> since the caller's cursor (advances the cursor). --tail N peeks at the last N events without advancing.",
+    )
     .option('--since <n>', 'override cursor (exclusive lower bound)')
     .option('--limit <n>', 'max events to return', '200')
+    .option('--tail <n>', 'show the last N events in chronological order, no cursor advance')
     .option('--json', 'output JSON')
-    .action(async (document: string, opts: { since?: string; limit: string; json?: boolean }) =>
-      withClient(async (client) => {
-        const sinceN = opts.since !== undefined ? Number.parseInt(opts.since, 10) : undefined;
-        const limitN = Number.parseInt(opts.limit, 10);
-        const res = await client.listEvents(document, {
-          ...(sinceN !== undefined ? { since: sinceN } : {}),
-          limit: limitN,
-        });
-        if (opts.json) emitJson(res);
-        else emit(formatEvents(res.events, res.cursor));
-      }),
+    .action(
+      async (
+        document: string,
+        opts: { since?: string; limit: string; tail?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const tailN = opts.tail !== undefined ? Number.parseInt(opts.tail, 10) : undefined;
+          if (tailN !== undefined && opts.since !== undefined) {
+            errExit(2, 'read: --tail and --since are mutually exclusive');
+          }
+          if (tailN !== undefined) {
+            const res = await client.listEvents(document, { tail: tailN });
+            if (opts.json) emitJson(res);
+            else emit(formatEvents(res.events, res.cursor));
+            return;
+          }
+          const sinceN = opts.since !== undefined ? Number.parseInt(opts.since, 10) : undefined;
+          const limitN = Number.parseInt(opts.limit, 10);
+          const res = await client.listEvents(document, {
+            ...(sinceN !== undefined ? { since: sinceN } : {}),
+            limit: limitN,
+          });
+          if (opts.json) emitJson(res);
+          else emit(formatEvents(res.events, res.cursor));
+        }),
     );
 
   program

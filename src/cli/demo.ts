@@ -1,4 +1,4 @@
-// `brackish demo` — one-shot ephemeral daemon + seeded negotiation + browser URL.
+// `brackish demo` — one-shot ephemeral daemon + replay a real chat-app trial + print browser URL.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,29 +6,21 @@ import { join } from 'node:path';
 import type { Command } from 'commander';
 import { BrackishClient, redeemInvite } from '../client/client.js';
 import { startServer } from '../daemon/server.js';
-import { seedChatterDemo } from '../demo.js';
-import { IdentitySchema } from '../lib/models.js';
+import { DEFAULT_DEMO_ADMIN, DEFAULT_DEMO_DOCUMENT, seedDemo } from '../demo.js';
 import { errExit } from './common.js';
 
 export function register(program: Command): void {
   program
     .command('demo [doc]')
     .description(
-      "one-shot: starts an ephemeral brackish daemon in a tmp sandbox, seeds a sample chat-API negotiation (with rejections, multiple content types, a WS endpoint), and prints a ready-to-open /ui URL. Stays in the foreground; ^C tears down and cleans up. Doesn't touch your existing brackish state — no `init`/`serve` needed.",
+      "one-shot: starts an ephemeral brackish daemon in a tmp sandbox, replays a real chat-app trial (extracted from harness output — backend + frontend Claudes negotiating an OpenAPI doc, including one substantive rejection), and prints a ready-to-open /ui URL. Stays in the foreground; ^C tears down and cleans up. Doesn't touch your existing brackish state.",
     )
     .option('--bind <addr>', 'TCP host:port (default 127.0.0.1:0 = ephemeral port)', '127.0.0.1:0')
-    .option('--alice <name>', 'identity for the proposing side', 'alice')
-    .option('--bob <name>', 'identity for the accepting/rejecting side', 'bob')
     .option('--ttl <seconds>', 'lifetime of the issued browser token (default 3600)', '3600')
     .option('--keep', 'keep the sandbox dir after shutdown (default: removed)')
     .action(
-      async (
-        docArg: string | undefined,
-        opts: { bind: string; alice: string; bob: string; ttl: string; keep?: boolean },
-      ) => {
-        const docName = docArg ?? 'chatter-api';
-        IdentitySchema.parse(opts.alice);
-        IdentitySchema.parse(opts.bob);
+      async (docArg: string | undefined, opts: { bind: string; ttl: string; keep?: boolean }) => {
+        const docName = docArg ?? DEFAULT_DEMO_DOCUMENT;
         const ttl = Number.parseInt(opts.ttl, 10);
         if (!Number.isFinite(ttl) || ttl < 60)
           errExit(2, 'demo: --ttl must be at least 60 seconds');
@@ -38,7 +30,7 @@ export function register(program: Command): void {
         const dataPath = join(sandbox, 'brackish.db');
 
         process.stderr.write(`brackish demo: sandbox=${sandbox}\n`);
-        process.stderr.write(`               starting ephemeral daemon...\n`);
+        process.stderr.write('               starting ephemeral daemon...\n');
         const server = await startServer({
           config: { socketPath, dataPath, bind: opts.bind },
         });
@@ -67,11 +59,10 @@ export function register(program: Command): void {
 
         process.stderr.write('               seeding...\n');
         try {
-          await seedChatterDemo({
+          await seedDemo({
             socketPath,
+            dataPath,
             documentName: docName,
-            alice: opts.alice,
-            bob: opts.bob,
             onStep: (m) => process.stderr.write(`                 ${m}\n`),
           });
         } catch (err) {
@@ -80,7 +71,7 @@ export function register(program: Command): void {
           throw err;
         }
 
-        const admin = new BrackishClient({ socketPath, identity: opts.alice });
+        const admin = new BrackishClient({ socketPath, identity: DEFAULT_DEMO_ADMIN });
         let url: string;
         try {
           const invite = await admin.createInvite('viewer', ttl);
@@ -98,9 +89,9 @@ export function register(program: Command): void {
             '',
             `  ${url}`,
             '',
-            `Other views (while this is running):`,
-            `  BRACKISH_HOME=${sandbox} BRACKISH_IDENTITY=${opts.alice} brackish visualize ${docName} --format markdown | less`,
-            `  curl -s "${url.replace('/ui/', '/documents/').replace(`?token=`, `/openapi.yaml?token=`)}"`,
+            'Other views (while this is running):',
+            `  BRACKISH_HOME=${sandbox} BRACKISH_IDENTITY=${DEFAULT_DEMO_ADMIN} brackish visualize ${docName} --format markdown | less`,
+            `  curl -s "${url.replace('/ui/', '/documents/').replace('?token=', '/openapi.yaml?token=')}"`,
             '',
             '(Ctrl-C to stop and clean up the sandbox.)',
             '',

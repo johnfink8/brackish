@@ -25,6 +25,9 @@ export type Scenario = {
     minAcceptedEndpoints: number;
     requireAcceptedConvention: boolean;
     requireRejectionCycle: boolean;
+    /** When true, the doc must also have zero in-flight (proposed-but-not-acted-on) artifacts.
+     *  Use for "land on a fully settled contract" scenarios; omit to let the min-bar trigger. */
+    requireSettled?: boolean;
   };
 };
 

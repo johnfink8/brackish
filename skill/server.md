@@ -66,8 +66,9 @@ After the peer connects (`/brackish connect` runs on their side), you'll see the
 
 1. **Start with `brackish status <doc>`** — bucketed view of awaiting-peer / awaiting-me / accepted / needs-attention. This is your "what changed?" view.
 2. For things awaiting your review (peer counter-proposed or proposed something new), use `brackish endpoint show <doc> ... --proposed` to read what they sent.
-3. Accept (`brackish <kind> accept`), reject with a reason (`brackish <kind> reject <doc> <selector> "<reason>"`), or counter-propose (reject first, then propose your alternative with `--expected-new`).
-4. When you've responded to everything, `brackish nap [--seconds 60]` blocks for a minute then snapshots the inbox. If `nap` returns empty twice, `brackish send <doc> "<status>"` to ping the peer instead of napping a third time.
+3. **When the peer revises after a rejection** — `brackish <kind> diff <doc> <selector> --from N --to M` shows the RFC 6902 patch between two versions (defaults: previous and latest). Cheapest possible context for "what actually changed in v2"; skip re-reading both bodies. `--format rendered` gives side-by-side YAML if you want to see the change in context, `--format yaml` / `--format json` gives the new body wrapped in an envelope.
+4. Accept (`brackish <kind> accept`), reject with a reason (`brackish <kind> reject <doc> <selector> "<reason>"`), or counter-propose (reject first, then propose your alternative with `--expected-new`). Both accept and reject take `--rationale "<text>"` so your reasoning rides on the event itself — no separate `brackish send` needed.
+5. When you've responded to everything, `brackish nap [--seconds 60]` blocks for a minute then snapshots the inbox. If `nap` returns empty twice, `brackish send <doc> "<status>"` to ping the peer instead of napping a third time.
 
 See [`propose.md`](propose.md) for the propose flag reference and race-protection (`--expected-version`, `--force`).
 

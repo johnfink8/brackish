@@ -31,7 +31,9 @@ const eventPreview = (e: Event): string => {
       return `${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;
     }
     case 'artifact_accepted':
-      return `${e.artifactKind} ${e.identityKey} v${e.version}`;
+      return e.reason
+        ? `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`
+        : `${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
       return `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`;
     case 'artifact_withdrawn':
