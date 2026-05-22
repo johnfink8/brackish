@@ -204,19 +204,8 @@ export interface Store {
   touchPartySeen(identity: Identity): Promise<void>;
 
   // --- invites ---
-  createInvite(
-    identity: Identity,
-    ttlSeconds: number,
-    grantDocs?: DocumentName[],
-  ): Promise<Invite>;
+  createInvite(identity: Identity, ttlSeconds: number, grantDocs?: DocumentName[]): Promise<Invite>;
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
-
-  // --- UI sessions (browser auth: OTT + cookie; replaces ?token= query fallback) ---
-  createUiOtt(identity: Identity, ttlSeconds: number): Promise<{ ott: string; expiresAt: string }>;
-  redeemUiOtt(
-    ott: string,
-  ): Promise<{ identity: Identity; cookieToken: string; cookieExpiresAt: string } | null>;
-  getIdentityForUiSession(cookieToken: string): Promise<Identity | null>;
 
   // --- per-document ACL (TCP-only enforcement; socket transport bypasses) ---
   isMember(documentName: DocumentName, identity: Identity): Promise<boolean>;
@@ -228,7 +217,9 @@ export interface Store {
     grantedBy: Identity,
   ): Promise<void>;
   removeDocumentMember(documentName: DocumentName, identity: Identity): Promise<void>;
-  listDocumentMembers(documentName: DocumentName): Promise<
+  listDocumentMembers(
+    documentName: DocumentName,
+  ): Promise<
     Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>
   >;
 

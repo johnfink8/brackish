@@ -231,10 +231,7 @@ describe('renderHtml', () => {
         text: '</script><script>window.__pwned=true</script>',
       },
     ];
-    const html = renderHtml(
-      { document: fixtureDoc, events },
-      { documentName: 'orders-api' },
-    );
+    const html = renderHtml({ document: fixtureDoc, events }, { documentName: 'orders-api' });
     const closers = (html.match(/<\/script>/g) ?? []).length;
     expect(closers).toBe(2);
   });

@@ -576,9 +576,13 @@ describe('server (Unix-socket transport)', () => {
         identity: 'peer',
       });
       expect(res.status).toBe(409);
-      const aCheck = await call('GET', '/documents/b/schemas/A?proposed=true', { identity: 'peer' });
+      const aCheck = await call('GET', '/documents/b/schemas/A?proposed=true', {
+        identity: 'peer',
+      });
       expect(aCheck.status).toBe(404);
-      const bCheck = await call('GET', '/documents/b/schemas/B?proposed=true', { identity: 'peer' });
+      const bCheck = await call('GET', '/documents/b/schemas/B?proposed=true', {
+        identity: 'peer',
+      });
       expect(bCheck.status).toBe(404);
     });
   });
@@ -597,11 +601,9 @@ describe('server (Unix-socket transport)', () => {
           identity: 'host',
         });
         expect(prop.status).toBe(201);
-        const acc = await call(
-          'POST',
-          `/documents/d/schemas/Big/accept?version=${v}`,
-          { identity: 'peer' },
-        );
+        const acc = await call('POST', `/documents/d/schemas/Big/accept?version=${v}`, {
+          identity: 'peer',
+        });
         expect(acc.status).toBe(200);
       }
       // No `from`/`to`: the server should walk back to find the latest. Pre-fix code
@@ -761,7 +763,9 @@ describe('server (TCP transport + invite/connect)', () => {
         const r = await fetch(`${tcpUrl}/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ inviteToken: `bogus-padding-token-${i.toString().padStart(20, '0')}` }),
+          body: JSON.stringify({
+            inviteToken: `bogus-padding-token-${i.toString().padStart(20, '0')}`,
+          }),
         });
         statuses.push(r.status);
       }
@@ -772,11 +776,46 @@ describe('server (TCP transport + invite/connect)', () => {
     });
   });
 
+  describe('/ui loopback bypass', () => {
+    // Browser navigation can't attach an Authorization header to a URL bar visit.
+    // Rather than carry tokens in URLs (the leak we just fixed) or build OTT+cookie
+    // machinery for a use case that's only realistic on the same host anyway, we
+    // accept `/ui/*` without auth ONLY on loopback. Non-loopback TCP still requires
+    // Bearer, which a browser visit can't supply — so cross-machine browser UI is
+    // explicitly NOT supported. Use ssh-forward to loopback, or the CLI.
+    it('serves /ui/<doc> without auth headers on loopback TCP', async () => {
+      // host creates a doc over socket so /ui/<doc> has something to render.
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        await undiciFetch('http://localhost/documents', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'host',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: 'public-ui' }),
+          dispatcher: sockAgent,
+        });
+      } finally {
+        await sockAgent.close();
+      }
+      const res = await fetch(`${tcpUrl}/ui/public-ui`);
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(body).toContain('swagger-ui');
+    });
+
+    it('still requires Bearer for non-/ui paths on loopback TCP', async () => {
+      const res = await fetch(`${tcpUrl}/whoami`);
+      expect(res.status).toBe(401);
+    });
+  });
+
   describe('no token-in-query fallback', () => {
     // Pre-fix code accepted `?token=<valid>` as a TCP auth fallback (used by browser
     // UI URLs). Tokens in query strings leak via Referer, server access logs, browser
     // history, and shared URLs — and combine with XSS for trivial exfil. The fix
-    // removes the fallback; browser UI uses single-use OTT + HttpOnly cookie instead.
+    // removes the fallback; browser UI now uses the loopback /ui bypass instead.
     it('GET /whoami?token=<valid> with no Authorization header returns 401', async () => {
       const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
       let bearer: string;

@@ -8,11 +8,9 @@ You're the source of truth for what the API actually emits. Your job is to drop 
 
 **Cross-machine** (peer is on a different host):
 ```
-brackish up --bind 0.0.0.0           # LAN-reachable — ONLY on networks you trust
+brackish up --bind 0.0.0.0
 ```
-Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind 0.0.0.0`. The bare `--bind` form (without an address) resolves to `127.0.0.1` — loopback-only, the peer on another host CANNOT reach it. brackish prints a warning banner when you bind non-loopback — surface that to the human.
-
-Before running this, confirm with the human (via AskUserQuestion) that LAN exposure is what they want. If they want broader reach, suggest a TLS-terminating reverse proxy rather than direct `--bind 0.0.0.0`.
+Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind 0.0.0.0`. Bare `--bind` (no address) resolves to `127.0.0.1` — loopback-only, the peer on another host can't reach it, so for cross-machine you want `0.0.0.0` explicitly. The daemon prints a security warning banner on non-loopback binds — surface that to the human along with the connect URL.
 
 **Same-machine** (peer Claude is on the same host):
 ```
@@ -38,9 +36,13 @@ This is the single highest-leverage move for avoiding duplicate-name collisions 
 
 ## Step 3 — mint the invite (cross-machine only)
 
+**Prerequisite: Step 2 must already be done.** The doc has to exist before the invite is minted, because the invite carries a `--grant` that binds the peer's membership at redeem time. Skip Step 2 and the peer will redeem successfully but get `forbidden: not a member of "<doc>"` on every read.
+
 ```
-brackish invite <peer-name> --ttl 86400 --json
+brackish invite <peer-name> --grant <doc-name> --ttl 86400 --json
 ```
+
+`--grant <doc-name>` is **required** for cross-machine. Per-document ACLs gate every doc-scoped TCP endpoint, so without the grant the redeeming peer authenticates but is locked out of the doc. Pass `--grant` once per doc you want the peer to access (repeatable).
 
 The output's `connectCommand` field is a bash string. **Replace the leading `brackish ` with `/brackish `** and print the result on its own line — the human pastes it verbatim into the peer Claude:
 
@@ -48,7 +50,7 @@ The output's `connectCommand` field is a bash string. **Replace the leading `bra
 /brackish connect <URL> --token <T> --identity <peer-name>
 ```
 
-`--ttl 86400` (24h) avoids invites expiring mid-session. If the daemon wasn't running yet, `brackish serve --invite <peer-name>` does both at once.
+`--ttl 86400` (24h) avoids invites expiring mid-session.
 
 ## Step 4 — drop the initial artifact set
 

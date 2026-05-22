@@ -150,15 +150,6 @@ CREATE TABLE IF NOT EXISTS invite_grants (
 );
 
 
-
-CREATE TABLE IF NOT EXISTS ui_sessions (
-  token_hash    TEXT PRIMARY KEY,
-  identity      TEXT NOT NULL REFERENCES parties(identity) ON DELETE CASCADE,
-  kind          TEXT NOT NULL CHECK (kind IN ('ott','cookie')),
-  expires_at    TEXT NOT NULL,
-  consumed_at   TEXT
-);
-CREATE INDEX IF NOT EXISTS ui_sessions_identity_idx ON ui_sessions(identity);
 `;
 
 const SCHEMA_VERSION = 3;
@@ -275,9 +266,7 @@ export class SqliteStore implements Store {
    *  install). */
   private migrateLegacyTokenColumns(): void {
     // Bootstrap the meta table eagerly so we can read schema_version even on first run.
-    this.db.exec(
-      `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
-    );
+    this.db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     const versionRow = this.db
       .prepare<[], { value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")
       .get();
@@ -345,9 +334,7 @@ export class SqliteStore implements Store {
   }
 
   private tableColumns(table: string): string[] {
-    const rows = this.db
-      .prepare<[], { name: string }>(`PRAGMA table_info('${table}')`)
-      .all();
+    const rows = this.db.prepare<[], { name: string }>(`PRAGMA table_info('${table}')`).all();
     return rows.map((r) => r.name);
   }
 
@@ -875,10 +862,7 @@ export class SqliteStore implements Store {
       .run(documentName, identity, role, grantedBy, now());
   }
 
-  async removeDocumentMember(
-    documentName: DocumentName,
-    identity: Identity,
-  ): Promise<void> {
+  async removeDocumentMember(documentName: DocumentName, identity: Identity): Promise<void> {
     this.db
       .prepare('DELETE FROM document_members WHERE document_name = ? AND identity = ?')
       .run(documentName, identity);
@@ -886,7 +870,9 @@ export class SqliteStore implements Store {
 
   async listDocumentMembers(
     documentName: DocumentName,
-  ): Promise<Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>> {
+  ): Promise<
+    Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>
+  > {
     const rows = this.db
       .prepare<
         [string],
@@ -1534,65 +1520,6 @@ export class SqliteStore implements Store {
       )
       .get(documentName, kind, identityKey);
     return row?.v ?? null;
-  }
-
-  // --- UI sessions (browser auth: OTT → cookie) ---
-
-  async createUiOtt(identity: Identity, ttlSeconds: number): Promise<{ ott: string; expiresAt: string }> {
-    const ott = newToken();
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO ui_sessions (token_hash, identity, kind, expires_at)
-         VALUES (?, ?, 'ott', ?)`,
-      )
-      .run(hashToken(ott), identity, expiresAt);
-    return { ott, expiresAt };
-  }
-
-  async redeemUiOtt(
-    ott: string,
-  ): Promise<{ identity: Identity; cookieToken: string; cookieExpiresAt: string } | null> {
-    const ottHash = hashToken(ott);
-    let result: { identity: Identity; cookieToken: string; cookieExpiresAt: string } | null = null;
-    const tx = this.db.transaction(() => {
-      const row = this.db
-        .prepare<
-          [string],
-          { identity: string; kind: string; expires_at: string; consumed_at: string | null }
-        >('SELECT identity, kind, expires_at, consumed_at FROM ui_sessions WHERE token_hash = ?')
-        .get(ottHash);
-      if (!row || row.kind !== 'ott') return;
-      if (row.consumed_at !== null) return;
-      if (isExpired(row.expires_at)) return;
-      const consumedAt = now();
-      this.db
-        .prepare('UPDATE ui_sessions SET consumed_at = ? WHERE token_hash = ?')
-        .run(consumedAt, ottHash);
-      const cookieToken = newToken();
-      const cookieExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1h
-      this.db
-        .prepare(
-          `INSERT INTO ui_sessions (token_hash, identity, kind, expires_at)
-           VALUES (?, ?, 'cookie', ?)`,
-        )
-        .run(hashToken(cookieToken), row.identity, cookieExpiresAt);
-      result = { identity: row.identity, cookieToken, cookieExpiresAt };
-    });
-    tx();
-    return result;
-  }
-
-  async getIdentityForUiSession(cookieToken: string): Promise<Identity | null> {
-    const row = this.db
-      .prepare<
-        [string],
-        { identity: string; kind: string; expires_at: string; consumed_at: string | null }
-      >('SELECT identity, kind, expires_at, consumed_at FROM ui_sessions WHERE token_hash = ?')
-      .get(hashToken(cookieToken));
-    if (!row || row.kind !== 'cookie') return null;
-    if (isExpired(row.expires_at)) return null;
-    return row.identity;
   }
 
   // --- atomic batch propose ---

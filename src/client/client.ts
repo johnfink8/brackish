@@ -508,12 +508,6 @@ export class BrackishClient {
     });
   }
 
-  // --- UI sessions (browser auth via OTT + HttpOnly cookie) ---
-
-  createUiOtt(): Promise<{ ott: string; expiresAt: string }> {
-    return this.fetchAndParse('/ui-sessions', UiOttResponseSchema, { method: 'POST' });
-  }
-
   // --- per-document ACL ---
 
   listMembers(document: DocumentName): Promise<DocumentMember[]> {
@@ -590,7 +584,6 @@ export class BrackishClient {
 }
 
 const HealthzResponseSchema = z.object({ ok: z.boolean(), version: z.string() });
-const UiOttResponseSchema = z.object({ ott: z.string(), expiresAt: z.string() });
 
 // --- helpers ---
 

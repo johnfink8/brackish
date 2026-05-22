@@ -203,9 +203,9 @@ describe('SqliteStore', () => {
       // goes away or holds only a hash of the token, never the raw value the peer holds.
       const inspect = new Database(dbPath, { readonly: true });
       try {
-        const cols = inspect
-          .prepare("PRAGMA table_info('party_tokens')")
-          .all() as Array<{ name: string }>;
+        const cols = inspect.prepare("PRAGMA table_info('party_tokens')").all() as Array<{
+          name: string;
+        }>;
         const hasRawColumn = cols.some((c) => c.name === 'token');
         if (hasRawColumn) {
           const row = inspect

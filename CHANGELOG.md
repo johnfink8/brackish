@@ -15,7 +15,7 @@ A security-and-correctness pass. Eleven targeted fixes covering XSS, prompt-inje
 - Prompt-injection of the local Claude via the UserPromptSubmit hook: inbox previews neutralize angle brackets in peer-supplied text (message bodies, rejection reasons, delta strings), and the hook moves peer content out of the `<system-reminder>` block into a labeled `<untrusted_user_content>` block.
 - Tokens are stored hashed (sha256) at rest. Both persistent peer tokens and outstanding invite tokens migrate in place on first startup; the raw token only ever lives on the peer side. Malformed `expires_at` columns now fail-closed (treat as expired) instead of fail-open via `Date.parse() === NaN`.
 - Per-document ACLs gate every doc-scoped TCP endpoint. Document creators are owners; other parties access docs only if explicitly granted (via `brackish doc grant` or `brackish invite --grant <doc>`). Socket peers retain peer-trust.
-- Token-in-URL-query (`?token=`) auth fallback removed. Browser UI now uses a single-use OTT (`POST /ui-sessions`) exchanged at `GET /ui-login` for an `HttpOnly; SameSite=Strict` cookie. Tokens never appear in URLs, logs, browser history, or Referer headers.
+- Token-in-URL-query (`?token=`) auth fallback removed. Browser UI is now reachable only on loopback TCP, without auth — anyone who can connect to `127.0.0.1` already qualifies as a local user. Cross-machine browser UI is explicitly not supported; ssh-forward to loopback, or use the CLI. Tokens never appear in URLs, logs, browser history, or Referer headers.
 - Rate limiting on `/connect` (10/min per source IP), failed bearer auth (20/min per IP), and OTT mint (30/min per identity). Socket peers bypass.
 
 ### Added
@@ -37,7 +37,7 @@ A security-and-correctness pass. Eleven targeted fixes covering XSS, prompt-inje
 ### Breaking
 
 - `--bind` default switched from `0.0.0.0` to `127.0.0.1`. Re-launch cross-machine daemons with `--bind 0.0.0.0` explicitly.
-- TCP `?token=` query-string auth fallback removed. Browser callers must use the OTT/cookie flow; CLI callers must use the `Authorization: Bearer` header.
+- TCP `?token=` query-string auth fallback removed. Browser callers visit `/ui/<doc>` on loopback (no auth required there); CLI callers must use the `Authorization: Bearer` header.
 - Per-document ACL enforcement on TCP. Existing docs auto-grant their `created_by` as owner via migration; pre-0.6.0 TCP peers other than the doc creator must be added explicitly with `brackish doc grant`.
 - Token-at-rest format change. The migration rehashes existing tokens in place on first startup; peers don't need to re-redeem. The raw `token` column is replaced by `token_hash`.
 - `Store.createInvite` interface grew an optional `grantDocs` array; external Store implementations need to handle it (or ignore via default `[]`).

@@ -24,44 +24,41 @@ export function register(program: Command): void {
       [] as string[],
     )
     .option('--json', 'output JSON')
-    .action(
-      async (
-        identity: string,
-        opts: { ttl: string; grant: string[]; json?: boolean },
-      ) =>
-        withClient(async (client) => {
-          const ttl = Number.parseInt(opts.ttl, 10);
-          if (!Number.isFinite(ttl) || ttl < 1)
-            errExit(2, 'invite: --ttl must be a positive integer');
-          IdentitySchema.parse(identity);
-          // Accept both repeated --grant and comma-separated values within a single flag.
-          const grantDocs = opts.grant.flatMap((s) => s.split(','))
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0);
-          const inv = await client.createInvite(identity, ttl, grantDocs);
-          const cfg = await loadServerAddrForInvite();
-          const url = cfg.tcpUrl;
-          if (opts.json) {
-            emitJson({
-              inviteToken: inv.inviteToken,
-              identity: inv.identity,
-              expiresAt: inv.expiresAt,
-              grantDocs,
-              connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
-              ...(cfg.hint ? { hint: cfg.hint } : {}),
-            });
-          } else {
-            const hintLine = cfg.hint ? `\n  ${cfg.hint}` : '';
-            const grantLine =
-              grantDocs.length > 0
-                ? `\n  on redeem: ${identity} becomes a member of ${grantDocs.join(', ')}`
-                : `\n  (no docs granted — run \`brackish doc grant <doc> ${identity}\` after redeem)`;
-            emit(
-              `invite issued: identity=${identity}, expires=${inv.expiresAt}${grantLine}\n` +
-                `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
-            );
-          }
-        }),
+    .action(async (identity: string, opts: { ttl: string; grant: string[]; json?: boolean }) =>
+      withClient(async (client) => {
+        const ttl = Number.parseInt(opts.ttl, 10);
+        if (!Number.isFinite(ttl) || ttl < 1)
+          errExit(2, 'invite: --ttl must be a positive integer');
+        IdentitySchema.parse(identity);
+        // Accept both repeated --grant and comma-separated values within a single flag.
+        const grantDocs = opts.grant
+          .flatMap((s) => s.split(','))
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        const inv = await client.createInvite(identity, ttl, grantDocs);
+        const cfg = await loadServerAddrForInvite();
+        const url = cfg.tcpUrl;
+        if (opts.json) {
+          emitJson({
+            inviteToken: inv.inviteToken,
+            identity: inv.identity,
+            expiresAt: inv.expiresAt,
+            grantDocs,
+            connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
+            ...(cfg.hint ? { hint: cfg.hint } : {}),
+          });
+        } else {
+          const hintLine = cfg.hint ? `\n  ${cfg.hint}` : '';
+          const grantLine =
+            grantDocs.length > 0
+              ? `\n  on redeem: ${identity} becomes a member of ${grantDocs.join(', ')}`
+              : `\n  (no docs granted — run \`brackish doc grant <doc> ${identity}\` after redeem)`;
+          emit(
+            `invite issued: identity=${identity}, expires=${inv.expiresAt}${grantLine}\n` +
+              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
+          );
+        }
+      }),
     );
 
   program

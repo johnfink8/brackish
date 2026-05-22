@@ -6,6 +6,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { stringify as yamlStringify } from 'yaml';
 import { ZodError } from 'zod';
 import pkg from '../../package.json' with { type: 'json' };
@@ -36,11 +37,11 @@ import {
   SendMessageRequestSchema,
 } from '../lib/models.js';
 import { EventNotifier } from '../lib/notifier.js';
-import { RateLimiter } from './limiter.js';
 import type { assembleDocument } from '../lib/openapi.js';
 import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
+import { RateLimiter } from './limiter.js';
 import { operationKey, projectDocument } from './projection.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
@@ -67,12 +68,10 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
 
-  // Three TCP-only rate limiters. Socket callers bypass each one (peer-trust + the
-  // filesystem permission on the socket already gate access). Keys are source IP for
-  // network-facing endpoints and identity for the authenticated OTT mint.
+  // TCP-only rate limiters. Socket callers bypass each one (peer-trust + the
+  // filesystem permission on the socket already gate access). Keys are source IP.
   const connectLimiter = new RateLimiter({ burst: 10, windowSeconds: 60 });
   const failedAuthLimiter = new RateLimiter({ burst: 20, windowSeconds: 60 });
-  const ottMintLimiter = new RateLimiter({ burst: 30, windowSeconds: 60 });
 
   const sourceIp = (c: import('hono').Context<AppEnv>): string =>
     c.env.incoming.socket.remoteAddress ?? 'unknown';
@@ -91,17 +90,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     if (c.get('transport') === 'sock') return null;
     const doc = await store.getDocument(docName);
     if (!doc) {
-      return c.json(
-        { error: `document "${docName}" not found`, code: 'document_not_found' },
-        404,
-      );
+      return c.json({ error: `document "${docName}" not found`, code: 'document_not_found' }, 404);
     }
     const ok = await store.isMember(docName, c.get('identity'));
     if (!ok) {
-      return c.json(
-        { error: `not a member of "${docName}"`, code: 'forbidden' },
-        403,
-      );
+      return c.json({ error: `not a member of "${docName}"`, code: 'forbidden' }, 403);
     }
     return null;
   };
@@ -146,58 +139,17 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, token });
   });
 
-  // /ui-login is a public route that consumes a one-time UI token (OTT) minted by an
-  // authenticated caller via POST /ui-sessions. Success path sets an HttpOnly cookie
-  // and 302s to the doc UI; failure path returns a plain 401. This is the ONLY way
-  // a browser obtains brackish auth after 0.6.0 (the ?token= query fallback is gone).
-  app.get('/ui-login', async (c) => {
-    const ott = c.req.query('ott');
-    const docRaw = c.req.query('doc');
-    if (!ott) return c.json({ error: '?ott=… required' }, 401);
-    const redeemed = await store.redeemUiOtt(ott);
-    if (!redeemed) return c.json({ error: 'invalid or expired OTT' }, 401);
-    const redirect = docRaw ? `/ui/${encodeURIComponent(docRaw)}` : '/ui';
-    // HttpOnly + SameSite=Strict prevent JS access and cross-site abuse. Path scoped
-    // to /ui so the cookie isn't sent on every API call; Authorization-bearer is
-    // still the auth mechanism for non-UI HTTP. Secure flag is intentionally omitted
-    // for loopback HTTP — TLS termination is the user's responsibility for non-local
-    // binds (documented in the security model section).
-    c.header(
-      'Set-Cookie',
-      `brackish_ui=${redeemed.cookieToken}; HttpOnly; SameSite=Strict; Path=/ui; Max-Age=3600`,
-    );
-    return c.redirect(redirect, 302);
-  });
-
   // --- authenticated routes ---
 
   const authMiddleware = makeAuthMiddleware(store, { failedAuthLimiter });
   const auth = app.use('*', async (c, next) => {
-    // /healthz, /connect, and /ui-login are public; skip auth for them.
-    // /ui-login is the OTT redeemer — it consumes a single-use token from the URL and
-    // sets an HttpOnly cookie; auth happens via that mechanism, not Bearer.
+    // /healthz and /connect are public; skip auth for them. Browser UI access at
+    // /ui/* is handled inside the auth middleware itself (public on loopback TCP).
     const path = new URL(c.req.url).pathname;
-    if (path === '/healthz' || path === '/connect' || path === '/ui-login') return next();
+    if (path === '/healthz' || path === '/connect') return next();
     return authMiddleware(c, next);
   });
   void auth;
-
-  // Authenticated endpoint to mint a OTT for browser handoff. The caller (Claude over
-  // socket, or a TCP peer via Bearer) trades a real bearer token for a single-use OTT
-  // that can ride in a URL; the browser visits /ui-login?ott=… to exchange it for a
-  // cookie. No spec body needed — the OTT inherits the caller's identity at mint time.
-  app.post('/ui-sessions', async (c) => {
-    if (c.get('transport') === 'tcp') {
-      const key = `ott:${c.get('identity')}`;
-      if (!ottMintLimiter.tryConsume(key)) {
-        const retry = ottMintLimiter.retryAfterSeconds(key);
-        c.header('Retry-After', String(retry));
-        return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
-      }
-    }
-    const { ott, expiresAt } = await store.createUiOtt(c.get('identity'), 60);
-    return c.json({ ott, expiresAt }, 201);
-  });
 
   app.get('/whoami', (c) => c.json({ identity: c.get('identity'), serverVersion: SERVER_VERSION }));
 
@@ -1166,7 +1118,7 @@ async function advanceCursorForRead(
 
 export class HttpError extends Error {
   constructor(
-    readonly status: number,
+    readonly status: ContentfulStatusCode,
     message: string,
   ) {
     super(message);

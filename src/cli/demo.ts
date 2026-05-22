@@ -71,22 +71,21 @@ export function register(program: Command): void {
           throw err;
         }
 
+        // Browser URL is plain /ui/<doc>. The daemon bound 127.0.0.1, so the auth
+        // middleware treats /ui/* as public on loopback — no token in URL, no cookie,
+        // no OTT. Token-bearing endpoints (everything else) still require Authorization
+        // for non-loopback callers, and the demo's `brackish visualize` examples below
+        // use BRACKISH_HOME + the demo identity to reach the daemon over its socket.
+        const tcpUrl = `http://127.0.0.1:${server.tcpAddress.port}`;
+        const url = `${tcpUrl}/ui/${encodeURIComponent(docName)}`;
+        // Mint a persistent token for the curl example so the user can poke at the
+        // JSON/YAML render endpoints (those still require Bearer).
         const admin = new BrackishClient({ socketPath, identity: DEFAULT_DEMO_ADMIN });
-        let url: string;
+        let bearer: string;
         try {
           const invite = await admin.createInvite('viewer', ttl, [docName]);
-          const tcpUrl = `http://127.0.0.1:${server.tcpAddress.port}`;
           const persistent = await redeemInvite(tcpUrl, invite.inviteToken);
-          // Mint a single-use OTT for the viewer; the browser's GET /ui-login?ott=…
-          // exchanges it for an HttpOnly cookie. The persistent bearer never appears
-          // in a URL (post-0.6.0 — `?token=` was removed for security).
-          const viewer = new BrackishClient({ server: tcpUrl, token: persistent.token });
-          try {
-            const ott = await viewer.createUiOtt();
-            url = `${tcpUrl}/ui-login?ott=${encodeURIComponent(ott.ott)}&doc=${encodeURIComponent(docName)}`;
-          } finally {
-            await viewer.close();
-          }
+          bearer = persistent.token;
         } finally {
           await admin.close();
         }
@@ -100,7 +99,7 @@ export function register(program: Command): void {
             '',
             'Other views (while this is running):',
             `  BRACKISH_HOME=${sandbox} BRACKISH_IDENTITY=${DEFAULT_DEMO_ADMIN} brackish visualize ${docName} --format markdown | less`,
-            `  curl -s "${url.replace('/ui/', '/documents/').replace('?token=', '/openapi.yaml?token=')}"`,
+            `  curl -s -H 'Authorization: Bearer ${bearer}' "${tcpUrl}/documents/${encodeURIComponent(docName)}/openapi.yaml"`,
             '',
             '(Ctrl-C to stop and clean up the sandbox.)',
             '',

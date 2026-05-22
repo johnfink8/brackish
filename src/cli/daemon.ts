@@ -172,10 +172,9 @@ export function register(program: Command): void {
               );
             } else {
               process.stderr.write(
-                `\nWARNING: brackish is not production-hardened. You are binding TCP on ${server.tcpAddress.host}:${server.tcpAddress.port},\n` +
-                  `which is reachable from any host that can route to this address. Use ONLY on networks\n` +
-                  `you trust, or place behind TLS + an upstream auth layer. Set BRACKISH_QUIET_BIND_WARNING=1\n` +
-                  `to silence this.\n\n`,
+                `\nWARNING: brackish is binding TCP on ${server.tcpAddress.host}:${server.tcpAddress.port} —\n` +
+                  `reachable from any host that can route to this address. Use ONLY if the user\n` +
+                  `indicated your peer is on another machine. Set BRACKISH_QUIET_BIND_WARNING=1 to silence.\n\n`,
               );
             }
           }

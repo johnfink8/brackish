@@ -7,6 +7,11 @@
 //
 // TCP transport (bearer-token): require `Authorization: Bearer <token>`; look up the identity
 // via the parties/party_tokens tables. Identity is unspoofable on this path.
+//
+// `/ui/*` is a narrow exception on loopback TCP: browser navigations to localhost don't carry
+// Authorization headers, so requiring bearer there would make the local browser UI unusable.
+// Loopback is the trust boundary — anyone who can connect to 127.0.0.1 is already a local user.
+// Cross-machine browser UI is an explicit non-goal; ssh-forward to loopback, or use the CLI.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context, MiddlewareHandler } from 'hono';
@@ -42,6 +47,17 @@ export function detectTransport(socket: SocketLike): Transport {
   return 'sock';
 }
 
+/** True if the remote address is on the local loopback (IPv4 127/8 or IPv6 ::1).
+ *  Used to gate the `/ui/*` no-auth bypass: only requests sourced from the same host
+ *  qualify, so cross-machine browser UI is not reachable without explicit bearer auth. */
+export function isLoopbackAddress(remoteAddress: string | undefined): boolean {
+  if (!remoteAddress) return false;
+  // node:net normalizes ::ffff:127.0.0.1 for IPv4-mapped clients; handle both forms.
+  const addr = remoteAddress.replace(/^::ffff:/, '');
+  if (addr === '::1') return true;
+  return addr.startsWith('127.');
+}
+
 const HEADER_IDENTITY = 'X-Brackish-Identity';
 
 /**
@@ -72,26 +88,29 @@ export function makeAuthMiddleware(
       return;
     }
 
-    // TCP path: bearer-only via Authorization header. The legacy `?token=` query-string
-    // fallback was removed in 0.6.0 — query tokens leak via Referer, access logs, browser
-    // history, and shared URLs. Browser UI uses single-use OTT + HttpOnly cookie instead
-    // (POST /ui-sessions → GET /ui-login → brackish_ui cookie).
-    const authHeader = c.req.header('Authorization');
-    const cookieToken = readBrackishUiCookie(c.req.header('Cookie'));
-    let token: string | undefined;
-    let isCookie = false;
-    if (authHeader?.startsWith('Bearer ')) {
-      token = authHeader.slice('Bearer '.length).trim();
-    } else if (cookieToken) {
-      token = cookieToken;
-      isCookie = true;
+    // TCP path. Browser-UI exception: /ui/* is public on loopback. The `/ui/<doc>`
+    // handler inlines the spec/rationale/events into the rendered HTML, so the page
+    // is self-contained — no follow-up API calls leave the browser, so no further
+    // auth surface is exposed by this bypass.
+    const path = new URL(c.req.url).pathname;
+    if (path.startsWith('/ui') && isLoopbackAddress(c.env.incoming.socket.remoteAddress)) {
+      await next();
+      return;
     }
+
+    // TCP path, bearer-only via Authorization header. The legacy `?token=` query-string
+    // fallback was removed — query tokens leak via Referer, access logs, browser
+    // history, and shared URLs.
+    const authHeader = c.req.header('Authorization');
+    const token = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : undefined;
     const ip = c.env.incoming.socket.remoteAddress ?? 'unknown';
     const limiter = opts.failedAuthLimiter;
     const limiterKey = `auth:${ip}`;
     // The limiter throttles FAILED auths only — successful Bearer requests don't
     // consume a slot. If prior failures already filled the bucket, deny up front.
-    if (limiter && limiter.isExhausted(limiterKey)) {
+    if (limiter?.isExhausted(limiterKey)) {
       const retry = limiter.retryAfterSeconds(limiterKey);
       c.header('Retry-After', String(retry));
       console.warn(`[brackish] rate-limited TCP auth from ${ip}`);
@@ -107,9 +126,7 @@ export function makeAuthMiddleware(
         error: 'Authorization: Bearer <token> required for TCP transport',
       });
     }
-    const identity = isCookie
-      ? await store.getIdentityForUiSession(token)
-      : await store.getIdentityForToken(token);
+    const identity = await store.getIdentityForToken(token);
     if (!identity) {
       return failAuth('invalid bearer', { error: 'invalid token' });
     }
@@ -117,18 +134,4 @@ export function makeAuthMiddleware(
     c.set('identity', identity);
     await next();
   };
-}
-
-/** Extract the `brackish_ui` cookie value from a Cookie header. Browser-set cookies are
- *  the ONLY UI-auth path post-0.6.0 (replacing the removed `?token=` query fallback). */
-function readBrackishUiCookie(header: string | undefined): string | undefined {
-  if (!header) return undefined;
-  for (const piece of header.split(';')) {
-    const [k, ...rest] = piece.trim().split('=');
-    if (k === 'brackish_ui' && rest.length > 0) {
-      const v = rest.join('=').trim();
-      return v.length > 0 ? v : undefined;
-    }
-  }
-  return undefined;
 }
