@@ -423,8 +423,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/documents/:name/endpoints/:id/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const { method, path } = decodeEndpointId(c.req.param('id'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getEndpointByVersion(docName, method, path, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getEndpointByVersion(docName, method, path, v),
+      () => store.latestVersion(docName, 'operation', operationKey(method, path)),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
@@ -557,8 +560,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/documents/:name/schemas/:schemaName/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getSchemaByVersion(docName, schemaName, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getSchemaByVersion(docName, schemaName, v),
+      () => store.latestVersion(docName, 'schema', schemaName),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
@@ -665,8 +671,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.get('/documents/:name/convention/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getConventionByVersion(docName, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getConventionByVersion(docName, v),
+      () => store.latestVersion(docName, 'convention', 'convention'),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
@@ -893,6 +902,7 @@ async function resolveDiffRange<T extends VersionedSpec | null>(
   fromRaw: string | undefined,
   toRaw: string | undefined,
   fetchByVersion: (v: number) => Promise<T>,
+  latestVersion: () => Promise<number | null>,
 ): Promise<{ from: VersionedSpec | null; to: VersionedSpec | null }> {
   // Defaults: --to is the latest existing version; --from is to-1 if not given.
   const toV = toRaw !== undefined ? Number.parseInt(toRaw, 10) : NaN;
@@ -903,13 +913,10 @@ async function resolveDiffRange<T extends VersionedSpec | null>(
     const v = await fetchByVersion(toV);
     if (v) to = { version: v.version, spec: v.spec };
   } else {
-    // Walk down from a high version until we find one. For typical use the agent will pass --to.
-    for (let v = 50; v >= 1; v--) {
-      const found = await fetchByVersion(v);
-      if (found) {
-        to = { version: found.version, spec: found.spec };
-        break;
-      }
+    const max = await latestVersion();
+    if (max !== null) {
+      const v = await fetchByVersion(max);
+      if (v) to = { version: v.version, spec: v.spec };
     }
   }
   if (!to) return { from: null, to: null };

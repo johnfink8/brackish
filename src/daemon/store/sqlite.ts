@@ -1217,6 +1217,20 @@ export class SqliteStore implements Store {
     return entries;
   }
 
+  async latestVersion(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+  ): Promise<number | null> {
+    const row = this.db
+      .prepare<[string, string, string], { v: number }>(
+        `SELECT MAX(version) AS v FROM artifact_versions
+         WHERE document_name = ? AND kind = ? AND identity_key = ?`,
+      )
+      .get(documentName, kind, identityKey);
+    return row?.v ?? null;
+  }
+
   // --- atomic batch propose ---
 
   async batchPropose(

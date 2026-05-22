@@ -583,6 +583,38 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('diff resolution past v50', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'd' } });
+    });
+
+    it('resolves --to to the actual latest version, not capped at 50', async () => {
+      // Drive a schema up to v60 by alternating propose (host) → accept (peer).
+      const target = 60;
+      for (let v = 1; v <= target; v++) {
+        const prop = await call('POST', '/documents/d/schemas', {
+          body: { name: 'Big', spec: { type: 'object', title: `v${v}` } },
+          identity: 'host',
+        });
+        expect(prop.status).toBe(201);
+        const acc = await call(
+          'POST',
+          `/documents/d/schemas/Big/accept?version=${v}`,
+          { identity: 'peer' },
+        );
+        expect(acc.status).toBe(200);
+      }
+      // No `from`/`to`: the server should walk back to find the latest. Pre-fix code
+      // probes versions 50→1 and stops at v50, missing v51..v60 entirely and returning
+      // "not enough versions to diff" 404.
+      const diff = await call('GET', '/documents/d/schemas/Big/diff');
+      expect(diff.status).toBe(200);
+      const body = (await diff.json()) as { fromVersion: number; toVersion: number };
+      expect(body.toVersion).toBe(60);
+      expect(body.fromVersion).toBe(59);
+    });
+  });
+
   describe('inbox', () => {
     it('lists documents with new events for the caller', async () => {
       await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });

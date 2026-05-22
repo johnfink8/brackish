@@ -214,6 +214,16 @@ export interface Store {
   // --- inbox (cross-document summary for one identity) ---
   inboxSummary(identity: Identity): Promise<InboxEntry[]>;
 
+  // --- diff support ---
+  /** Return the highest existing version number for an artifact regardless of status,
+   *  or null if none. Used by the diff endpoint to default `--to` to the actual latest
+   *  without linearly probing version numbers. */
+  latestVersion(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+  ): Promise<number | null>;
+
   // --- atomic batch propose ---
   /**
    * Atomically propose a coordinated set of artifacts. Runs all per-artifact proposes
