@@ -13,7 +13,7 @@
 // module against the previous version's spec. It's surfaced in event payloads + summaries so
 // callers can decide whether to fetch the full spec.
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { z } from 'zod';
 import { compactSummary, generatePatch } from '../../lib/diff.js';
@@ -95,15 +95,20 @@ CREATE TABLE IF NOT EXISTS parties (
   last_seen_at  TEXT
 );
 
+-- party_tokens.token_hash stores sha256(raw token). The raw token only ever
+-- lives on the peer (in their config.toml) and in transit (Bearer header);
+-- the daemon never persists it. See migration in SqliteStore constructor for
+-- the v1→v2 in-place upgrade path.
 CREATE TABLE IF NOT EXISTS party_tokens (
-  token       TEXT PRIMARY KEY,
+  token_hash  TEXT PRIMARY KEY,
   identity    TEXT NOT NULL REFERENCES parties(identity) ON DELETE CASCADE,
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS party_tokens_identity_idx ON party_tokens(identity);
 
+-- Same hashing scheme for invites: the daemon stores only sha256(inviteToken).
 CREATE TABLE IF NOT EXISTS invites (
-  token        TEXT PRIMARY KEY,
+  token_hash   TEXT PRIMARY KEY,
   identity     TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   expires_at   TEXT NOT NULL,
@@ -116,7 +121,26 @@ CREATE TABLE IF NOT EXISTS cursors (
   last_seen     INTEGER NOT NULL,
   PRIMARY KEY (identity, document_name)
 );
+
+-- One-row schema-version tracker. Gates startup migrations.
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
+
+const SCHEMA_VERSION = 2;
+
+const hashToken = (raw: string): string => createHash('sha256').update(raw).digest('hex');
+
+/** Parse a stored ISO datetime; treat anything unparseable as "expired" (fail-closed).
+ *  Replaces the pre-fix `Date.parse(s) < Date.now()` pattern that returned false for
+ *  NaN, leaving malformed `expires_at` columns silently redeemable. */
+function isExpired(iso: string): boolean {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return true;
+  return t < Date.now();
+}
 
 type EventRow = {
   id: number;
@@ -146,7 +170,7 @@ type ArtifactRow = {
 type DocumentRow = { name: string; created_by: string; created_at: string };
 type PartyRow = { identity: string; created_at: string; last_seen_at: string | null };
 type InviteRow = {
-  token: string;
+  token_hash: string;
   identity: string;
   created_at: string;
   expires_at: string;
@@ -176,8 +200,104 @@ export class SqliteStore implements Store {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
+    // Migrate any pre-v2 schema (raw `token` columns) to v2 (sha256 `token_hash`)
+    // BEFORE applying SCHEMA — the CREATE TABLE IF NOT EXISTS statements would skip
+    // the rebuild on an existing DB, and we need the old shape readable to migrate it.
+    this.migrateLegacyTokenColumns();
     this.db.exec(SCHEMA);
+    this.recordSchemaVersion();
     this.notifier = opts.notifier;
+  }
+
+  /** v1 → v2 token migration: rebuild party_tokens and invites with hashed primary keys,
+   *  carrying forward the existing rows by hashing their raw `token` columns. Idempotent —
+   *  no-op when the meta row already says v2, or when the legacy tables don't exist (fresh
+   *  install). */
+  private migrateLegacyTokenColumns(): void {
+    // Bootstrap the meta table eagerly so we can read schema_version even on first run.
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+    );
+    const versionRow = this.db
+      .prepare<[], { value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")
+      .get();
+    const current = versionRow ? Number.parseInt(versionRow.value, 10) : 0;
+    if (current >= SCHEMA_VERSION) return;
+    const partyCols = this.tableColumns('party_tokens');
+    const inviteCols = this.tableColumns('invites');
+    const partyHasRaw = partyCols.includes('token') && !partyCols.includes('token_hash');
+    const inviteHasRaw = inviteCols.includes('token') && !inviteCols.includes('token_hash');
+    if (!partyHasRaw && !inviteHasRaw) return; // fresh install or already migrated
+
+    const tx = this.db.transaction(() => {
+      if (partyHasRaw) {
+        const rows = this.db
+          .prepare<[], { token: string; identity: string; created_at: string }>(
+            'SELECT token, identity, created_at FROM party_tokens',
+          )
+          .all();
+        this.db.exec('DROP TABLE party_tokens');
+        this.db.exec(
+          `CREATE TABLE party_tokens (
+             token_hash TEXT PRIMARY KEY,
+             identity TEXT NOT NULL REFERENCES parties(identity) ON DELETE CASCADE,
+             created_at TEXT NOT NULL
+           );
+           CREATE INDEX party_tokens_identity_idx ON party_tokens(identity);`,
+        );
+        const insert = this.db.prepare(
+          'INSERT INTO party_tokens (token_hash, identity, created_at) VALUES (?, ?, ?)',
+        );
+        for (const r of rows) insert.run(hashToken(r.token), r.identity, r.created_at);
+      }
+      if (inviteHasRaw) {
+        const rows = this.db
+          .prepare<
+            [],
+            {
+              token: string;
+              identity: string;
+              created_at: string;
+              expires_at: string;
+              redeemed_at: string | null;
+            }
+          >('SELECT token, identity, created_at, expires_at, redeemed_at FROM invites')
+          .all();
+        this.db.exec('DROP TABLE invites');
+        this.db.exec(
+          `CREATE TABLE invites (
+             token_hash TEXT PRIMARY KEY,
+             identity TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             expires_at TEXT NOT NULL,
+             redeemed_at TEXT
+           );`,
+        );
+        const insert = this.db.prepare(
+          'INSERT INTO invites (token_hash, identity, created_at, expires_at, redeemed_at) VALUES (?, ?, ?, ?, ?)',
+        );
+        for (const r of rows) {
+          insert.run(hashToken(r.token), r.identity, r.created_at, r.expires_at, r.redeemed_at);
+        }
+      }
+    });
+    tx();
+  }
+
+  private tableColumns(table: string): string[] {
+    const rows = this.db
+      .prepare<[], { name: string }>(`PRAGMA table_info('${table}')`)
+      .all();
+    return rows.map((r) => r.name);
+  }
+
+  private recordSchemaVersion(): void {
+    this.db
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(String(SCHEMA_VERSION));
   }
 
   // --- helpers ---
@@ -1046,8 +1166,10 @@ export class SqliteStore implements Store {
 
   async getIdentityForToken(token: string): Promise<Identity | null> {
     const row = this.db
-      .prepare<[string], { identity: string }>('SELECT identity FROM party_tokens WHERE token = ?')
-      .get(token);
+      .prepare<[string], { identity: string }>(
+        'SELECT identity FROM party_tokens WHERE token_hash = ?',
+      )
+      .get(hashToken(token));
     return row ? row.identity : null;
   }
 
@@ -1094,22 +1216,27 @@ export class SqliteStore implements Store {
     const createdAt = now();
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
     this.db
-      .prepare('INSERT INTO invites (token, identity, created_at, expires_at) VALUES (?, ?, ?, ?)')
-      .run(token, identity, createdAt, expiresAt);
+      .prepare(
+        'INSERT INTO invites (token_hash, identity, created_at, expires_at) VALUES (?, ?, ?, ?)',
+      )
+      .run(hashToken(token), identity, createdAt, expiresAt);
     return { token, identity, createdAt, expiresAt };
   }
 
   async redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }> {
     let issued: { identity: Identity; token: string } | undefined;
+    const inviteHash = hashToken(inviteToken);
     const tx = this.db.transaction(() => {
       const row = this.db
-        .prepare<[string], InviteRow>('SELECT * FROM invites WHERE token = ?')
-        .get(inviteToken);
+        .prepare<[string], InviteRow>('SELECT * FROM invites WHERE token_hash = ?')
+        .get(inviteHash);
       if (!row) throw new StoreError('invite_invalid', 'invite token not recognized');
       if (row.redeemed_at !== null) {
         throw new StoreError('invite_redeemed', 'invite already redeemed');
       }
-      if (Date.parse(row.expires_at) < Date.now()) {
+      // fail-closed on malformed expires_at — pre-fix used `Date.parse() < now()` which
+      // returned false for NaN, silently allowing redemption of tampered/corrupt rows.
+      if (isExpired(row.expires_at)) {
         throw new StoreError('invite_expired', 'invite has expired');
       }
       this.db
@@ -1121,9 +1248,11 @@ export class SqliteStore implements Store {
         .run(row.identity, now());
       const persistentToken = newToken();
       this.db
-        .prepare('INSERT INTO party_tokens (token, identity, created_at) VALUES (?, ?, ?)')
-        .run(persistentToken, row.identity, now());
-      this.db.prepare('UPDATE invites SET redeemed_at = ? WHERE token = ?').run(now(), inviteToken);
+        .prepare('INSERT INTO party_tokens (token_hash, identity, created_at) VALUES (?, ?, ?)')
+        .run(hashToken(persistentToken), row.identity, now());
+      this.db
+        .prepare('UPDATE invites SET redeemed_at = ? WHERE token_hash = ?')
+        .run(now(), inviteHash);
       issued = { identity: row.identity, token: persistentToken };
     });
     tx();
