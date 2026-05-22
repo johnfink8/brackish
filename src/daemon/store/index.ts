@@ -211,6 +211,13 @@ export interface Store {
   ): Promise<Invite>;
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
 
+  // --- UI sessions (browser auth: OTT + cookie; replaces ?token= query fallback) ---
+  createUiOtt(identity: Identity, ttlSeconds: number): Promise<{ ott: string; expiresAt: string }>;
+  redeemUiOtt(
+    ott: string,
+  ): Promise<{ identity: Identity; cookieToken: string; cookieExpiresAt: string } | null>;
+  getIdentityForUiSession(cookieToken: string): Promise<Identity | null>;
+
   // --- per-document ACL (TCP-only enforcement; socket transport bypasses) ---
   isMember(documentName: DocumentName, identity: Identity): Promise<boolean>;
   listDocumentsForMember(identity: Identity): Promise<Document[]>;

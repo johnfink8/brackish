@@ -750,6 +750,46 @@ describe('server (TCP transport + invite/connect)', () => {
     expect(res.status).toBe(401);
   });
 
+  describe('no token-in-query fallback', () => {
+    // Pre-fix code accepted `?token=<valid>` as a TCP auth fallback (used by browser
+    // UI URLs). Tokens in query strings leak via Referer, server access logs, browser
+    // history, and shared URLs — and combine with XSS for trivial exfil. The fix
+    // removes the fallback; browser UI uses single-use OTT + HttpOnly cookie instead.
+    it('GET /whoami?token=<valid> with no Authorization header returns 401', async () => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      let bearer: string;
+      try {
+        const inv = await undiciFetch('http://localhost/invites', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'admin',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ identity: 'qpeer', ttlSeconds: 60 }),
+          dispatcher: sockAgent,
+        });
+        const invData = (await inv.json()) as { inviteToken: string };
+        const con = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invData.inviteToken }),
+        });
+        const conData = (await con.json()) as { token: string };
+        bearer = conData.token;
+      } finally {
+        await sockAgent.close();
+      }
+      // Sanity: bearer works via Authorization header.
+      const ok = await fetch(`${tcpUrl}/whoami`, {
+        headers: { Authorization: `Bearer ${bearer}` },
+      });
+      expect(ok.status).toBe(200);
+      // The targeted exploit: same token, passed via query string, no header.
+      const res = await fetch(`${tcpUrl}/whoami?token=${encodeURIComponent(bearer)}`);
+      expect(res.status).toBe(401);
+    });
+  });
+
   describe('per-document ACLs (TCP)', () => {
     // Helper: mint an invite over socket for an identity, redeem it over TCP, return the bearer.
     const mintTokenForPeer = async (peerIdentity: string): Promise<string> => {

@@ -70,26 +70,29 @@ export function makeAuthMiddleware(
       return;
     }
 
-    // TCP path: bearer token (Authorization header preferred; ?token=… query param accepted as
-    // a fallback so browsers visiting /ui/<doc> can authenticate from a URL).
+    // TCP path: bearer-only via Authorization header. The legacy `?token=` query-string
+    // fallback was removed in 0.6.0 — query tokens leak via Referer, access logs, browser
+    // history, and shared URLs. Browser UI uses single-use OTT + HttpOnly cookie instead
+    // (POST /ui-sessions → GET /ui-login → brackish_ui cookie).
     const authHeader = c.req.header('Authorization');
-    const queryToken = c.req.query('token');
+    const cookieToken = readBrackishUiCookie(c.req.header('Cookie'));
     let token: string | undefined;
+    let isCookie = false;
     if (authHeader?.startsWith('Bearer ')) {
       token = authHeader.slice('Bearer '.length).trim();
-    } else if (queryToken && queryToken.length > 0) {
-      token = queryToken;
+    } else if (cookieToken) {
+      token = cookieToken;
+      isCookie = true;
     }
     if (!token) {
       return c.json(
-        {
-          error:
-            'Authorization: Bearer <token> required for TCP transport (or ?token=… query param for browser URLs)',
-        },
+        { error: 'Authorization: Bearer <token> required for TCP transport' },
         401,
       );
     }
-    const identity = await store.getIdentityForToken(token);
+    const identity = isCookie
+      ? await store.getIdentityForUiSession(token)
+      : await store.getIdentityForToken(token);
     if (!identity) {
       return c.json({ error: 'invalid token' }, 401);
     }
@@ -97,4 +100,18 @@ export function makeAuthMiddleware(
     c.set('identity', identity);
     await next();
   };
+}
+
+/** Extract the `brackish_ui` cookie value from a Cookie header. Browser-set cookies are
+ *  the ONLY UI-auth path post-0.6.0 (replacing the removed `?token=` query fallback). */
+function readBrackishUiCookie(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  for (const piece of header.split(';')) {
+    const [k, ...rest] = piece.trim().split('=');
+    if (k === 'brackish_ui' && rest.length > 0) {
+      const v = rest.join('=').trim();
+      return v.length > 0 ? v : undefined;
+    }
+  }
+  return undefined;
 }

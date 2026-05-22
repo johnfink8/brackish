@@ -121,15 +121,49 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, token });
   });
 
+  // /ui-login is a public route that consumes a one-time UI token (OTT) minted by an
+  // authenticated caller via POST /ui-sessions. Success path sets an HttpOnly cookie
+  // and 302s to the doc UI; failure path returns a plain 401. This is the ONLY way
+  // a browser obtains brackish auth after 0.6.0 (the ?token= query fallback is gone).
+  app.get('/ui-login', async (c) => {
+    const ott = c.req.query('ott');
+    const docRaw = c.req.query('doc');
+    if (!ott) return c.json({ error: '?ott=… required' }, 401);
+    const redeemed = await store.redeemUiOtt(ott);
+    if (!redeemed) return c.json({ error: 'invalid or expired OTT' }, 401);
+    const redirect = docRaw ? `/ui/${encodeURIComponent(docRaw)}` : '/ui';
+    // HttpOnly + SameSite=Strict prevent JS access and cross-site abuse. Path scoped
+    // to /ui so the cookie isn't sent on every API call; Authorization-bearer is
+    // still the auth mechanism for non-UI HTTP. Secure flag is intentionally omitted
+    // for loopback HTTP — TLS termination is the user's responsibility for non-local
+    // binds (documented in the security model section).
+    c.header(
+      'Set-Cookie',
+      `brackish_ui=${redeemed.cookieToken}; HttpOnly; SameSite=Strict; Path=/ui; Max-Age=3600`,
+    );
+    return c.redirect(redirect, 302);
+  });
+
   // --- authenticated routes ---
 
   const auth = app.use('*', async (c, next) => {
-    // /healthz and /connect are public; skip auth for them.
+    // /healthz, /connect, and /ui-login are public; skip auth for them.
+    // /ui-login is the OTT redeemer — it consumes a single-use token from the URL and
+    // sets an HttpOnly cookie; auth happens via that mechanism, not Bearer.
     const path = new URL(c.req.url).pathname;
-    if (path === '/healthz' || path === '/connect') return next();
+    if (path === '/healthz' || path === '/connect' || path === '/ui-login') return next();
     return makeAuthMiddleware(store)(c, next);
   });
   void auth;
+
+  // Authenticated endpoint to mint a OTT for browser handoff. The caller (Claude over
+  // socket, or a TCP peer via Bearer) trades a real bearer token for a single-use OTT
+  // that can ride in a URL; the browser visits /ui-login?ott=… to exchange it for a
+  // cookie. No spec body needed — the OTT inherits the caller's identity at mint time.
+  app.post('/ui-sessions', async (c) => {
+    const { ott, expiresAt } = await store.createUiOtt(c.get('identity'), 60);
+    return c.json({ ott, expiresAt }, 201);
+  });
 
   app.get('/whoami', (c) => c.json({ identity: c.get('identity'), serverVersion: SERVER_VERSION }));
 

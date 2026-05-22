@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS invite_grants (
   document_name TEXT NOT NULL,
   PRIMARY KEY (token_hash, document_name)
 );
+
+
+
+CREATE TABLE IF NOT EXISTS ui_sessions (
+  token_hash    TEXT PRIMARY KEY,
+  identity      TEXT NOT NULL REFERENCES parties(identity) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('ott','cookie')),
+  expires_at    TEXT NOT NULL,
+  consumed_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS ui_sessions_identity_idx ON ui_sessions(identity);
 `;
 
 const SCHEMA_VERSION = 3;
@@ -1523,6 +1534,65 @@ export class SqliteStore implements Store {
       )
       .get(documentName, kind, identityKey);
     return row?.v ?? null;
+  }
+
+  // --- UI sessions (browser auth: OTT → cookie) ---
+
+  async createUiOtt(identity: Identity, ttlSeconds: number): Promise<{ ott: string; expiresAt: string }> {
+    const ott = newToken();
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO ui_sessions (token_hash, identity, kind, expires_at)
+         VALUES (?, ?, 'ott', ?)`,
+      )
+      .run(hashToken(ott), identity, expiresAt);
+    return { ott, expiresAt };
+  }
+
+  async redeemUiOtt(
+    ott: string,
+  ): Promise<{ identity: Identity; cookieToken: string; cookieExpiresAt: string } | null> {
+    const ottHash = hashToken(ott);
+    let result: { identity: Identity; cookieToken: string; cookieExpiresAt: string } | null = null;
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .prepare<
+          [string],
+          { identity: string; kind: string; expires_at: string; consumed_at: string | null }
+        >('SELECT identity, kind, expires_at, consumed_at FROM ui_sessions WHERE token_hash = ?')
+        .get(ottHash);
+      if (!row || row.kind !== 'ott') return;
+      if (row.consumed_at !== null) return;
+      if (isExpired(row.expires_at)) return;
+      const consumedAt = now();
+      this.db
+        .prepare('UPDATE ui_sessions SET consumed_at = ? WHERE token_hash = ?')
+        .run(consumedAt, ottHash);
+      const cookieToken = newToken();
+      const cookieExpiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1h
+      this.db
+        .prepare(
+          `INSERT INTO ui_sessions (token_hash, identity, kind, expires_at)
+           VALUES (?, ?, 'cookie', ?)`,
+        )
+        .run(hashToken(cookieToken), row.identity, cookieExpiresAt);
+      result = { identity: row.identity, cookieToken, cookieExpiresAt };
+    });
+    tx();
+    return result;
+  }
+
+  async getIdentityForUiSession(cookieToken: string): Promise<Identity | null> {
+    const row = this.db
+      .prepare<
+        [string],
+        { identity: string; kind: string; expires_at: string; consumed_at: string | null }
+      >('SELECT identity, kind, expires_at, consumed_at FROM ui_sessions WHERE token_hash = ?')
+      .get(hashToken(cookieToken));
+    if (!row || row.kind !== 'cookie') return null;
+    if (isExpired(row.expires_at)) return null;
+    return row.identity;
   }
 
   // --- atomic batch propose ---

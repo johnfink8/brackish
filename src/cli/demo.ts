@@ -74,10 +74,19 @@ export function register(program: Command): void {
         const admin = new BrackishClient({ socketPath, identity: DEFAULT_DEMO_ADMIN });
         let url: string;
         try {
-          const invite = await admin.createInvite('viewer', ttl);
+          const invite = await admin.createInvite('viewer', ttl, [docName]);
           const tcpUrl = `http://127.0.0.1:${server.tcpAddress.port}`;
           const persistent = await redeemInvite(tcpUrl, invite.inviteToken);
-          url = `${tcpUrl}/ui/${encodeURIComponent(docName)}?token=${persistent.token}`;
+          // Mint a single-use OTT for the viewer; the browser's GET /ui-login?ott=…
+          // exchanges it for an HttpOnly cookie. The persistent bearer never appears
+          // in a URL (post-0.6.0 — `?token=` was removed for security).
+          const viewer = new BrackishClient({ server: tcpUrl, token: persistent.token });
+          try {
+            const ott = await viewer.createUiOtt();
+            url = `${tcpUrl}/ui-login?ott=${encodeURIComponent(ott.ott)}&doc=${encodeURIComponent(docName)}`;
+          } finally {
+            await viewer.close();
+          }
         } finally {
           await admin.close();
         }
