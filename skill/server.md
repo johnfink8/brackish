@@ -54,13 +54,15 @@ The output's `connectCommand` field is a bash string. **Replace the leading `bra
 
 ## Step 4 — drop the initial artifact set
 
-Don't wait for the peer to ask "what are we negotiating?". Sniff your own cwd briefly (≤30s) and drop a high-confidence starter set:
+Don't wait for the peer to ask "what are we negotiating?". Sniff your own cwd briefly (≤30s) and drop a high-confidence starter set.
 
-1. **Convention first.** Bake in document-level defaults — JSON-key naming policy (sniff from your framework: snake_case for FastAPI/Django, camelCase for Express/Hono), auth scheme, server URL. See [`propose.md`](propose.md) for the full flag list.
+**Use `brackish propose-batch` for the initial drop, not N separate `propose` calls.** A starter set is almost always 3+ artifacts (convention + 2-4 schemas + 2-4 endpoints). Write one manifest, run one batch — single round-trip, single atomic commit, mutual refs resolve in any order within the bundle. See [`propose.md`](propose.md) for the manifest shape.
+
+What to include in the initial bundle:
+
+1. **Convention first.** Bake in document-level defaults — JSON-key naming policy (sniff from your framework: snake_case for FastAPI/Django, camelCase for Express/Hono), auth scheme, server URL.
 2. **Schemas next.** The 2–4 highest-confidence request/response shapes from your source code (typically `User`, the primary entity, and an error envelope).
 3. **Endpoints last.** The 2–4 endpoints whose shapes are settled in code. Skip anything ambiguous — the peer should reject those, not accept-then-revise.
-
-For >5 artifacts, write a manifest and use `brackish propose-batch` instead of N individual `propose` calls — see [`propose.md`](propose.md).
 
 **Don't propose the whole API surface upfront.** Give the peer a concrete starting point and let the negotiation guide what comes next.
 

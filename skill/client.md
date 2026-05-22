@@ -86,7 +86,7 @@ The server-side Claude sees its own emit/handler sites and proposes from there. 
 - **Pagination + cursors.** What you actually need for an infinite-scroll UI vs what a backend might think is enough.
 - **Idempotency keys.** If your client retries a POST, you need the server to dedupe — propose with `--idempotent` and/or an explicit idempotency-key header parameter.
 
-See [`propose.md`](propose.md) for the propose flag reference (and [`patterns.md`](patterns.md) if SSE or WebSocket is in scope — those have canonical shapes you'll want to copy verbatim).
+**If you're proposing 3 or more artifacts in a single turn, use `brackish propose-batch <doc> --manifest manifest.yaml`** instead of N separate `propose` calls. One round-trip, atomic commit, mutual refs resolve within the bundle. See [`propose.md`](propose.md) for the propose flag reference + manifest shape (and [`patterns.md`](patterns.md) if SSE or WebSocket is in scope — those have canonical shapes you'll want to copy verbatim).
 
 ## Step 6 — wait between rounds
 

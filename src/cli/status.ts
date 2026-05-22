@@ -6,16 +6,22 @@
 
 import type { Command } from 'commander';
 import type { BrackishClient } from '../client/client.js';
-import type { ConventionArtifact, EndpointSummary, SchemaSummary } from '../lib/models.js';
+import type { ConventionArtifact } from '../lib/models.js';
+import { findBlockingRefs } from '../lib/refs.js';
 import { emit, emitJson, type LoadedClientCfg, withClient } from './common.js';
 
-type StatusRow = {
+export type StatusRow = {
   kind: 'endpoint' | 'schema' | 'convention';
   label: string;
   version: number | null;
   proposedVersion: number | null;
   proposedBy: string | null;
   delta: string | null;
+  /** Names of schemas this proposed artifact $refs that aren't yet accepted. Empty
+   *  array when no blocking refs (or when the row isn't in-flight). Surfaces as
+   *  `(blocked on: X, Y)` in the rendered status so neither side has to send a
+   *  plain-text explanation when accepting would fail validation. */
+  blockedOn: string[];
 };
 
 type AttentionRow = {
@@ -27,7 +33,7 @@ type AttentionRow = {
   reason: string | null;
 };
 
-type DocBuckets = {
+export type DocBuckets = {
   awaitingPeer: StatusRow[];
   awaitingMe: StatusRow[];
   accepted: StatusRow[];
@@ -100,7 +106,8 @@ async function emitSingleDocStatus(
       const v = r.proposedVersion ?? r.version ?? 0;
       const delta = r.delta ? `  ${r.delta}` : r.proposedVersion === 1 ? '  (new)' : '';
       const by = r.proposedBy && r.proposedBy !== me ? ` by ${r.proposedBy}` : '';
-      lines.push(`  ${r.kind.padEnd(10)} ${r.label.padEnd(36)} v${v}${by}${delta}`);
+      const blocked = r.blockedOn.length > 0 ? `  (blocked on: ${r.blockedOn.join(', ')})` : '';
+      lines.push(`  ${r.kind.padEnd(10)} ${r.label.padEnd(36)} v${v}${by}${delta}${blocked}`);
     }
   };
   if (buckets.needsAttention.length > 0) {
@@ -173,7 +180,9 @@ async function emitMultiDocStatus(
   emit(lines.join('\n'));
 }
 
-async function collectBuckets(
+/** Build the status buckets for a single document. Exported for tests; the CLI
+ *  entry point above calls this and then renders. */
+export async function collectBuckets(
   client: BrackishClient,
   doc: string,
   me: string,
@@ -206,6 +215,7 @@ async function collectBuckets(
       proposedVersion: latestProposedVersion,
       proposedBy: latestProposedBy,
       delta: latestDelta,
+      blockedOn: [],
     };
     const hasInFlight =
       latestProposedVersion !== null && latestProposedVersion > (currentVersion ?? 0);
@@ -217,7 +227,7 @@ async function collectBuckets(
     }
   };
 
-  for (const e of endpoints as EndpointSummary[]) {
+  for (const e of endpoints) {
     classify(
       'endpoint',
       `${e.method.toUpperCase()} ${e.path}`,
@@ -227,7 +237,7 @@ async function collectBuckets(
       e.latestDelta,
     );
   }
-  for (const s of schemas as SchemaSummary[]) {
+  for (const s of schemas) {
     classify(
       'schema',
       s.name,
@@ -252,7 +262,55 @@ async function collectBuckets(
     needsAttention.push(buildAttentionRow(conventionLatest, isWithdraw));
   }
 
+  // Fill in blockedOn for in-flight rows: pull the proposed spec, walk for $ref's,
+  // flag refs whose schema doesn't have an accepted version yet. Convention rows
+  // can't ref other artifacts so we skip them. The fetches run in parallel; a
+  // status with N in-flight rows costs N extra HTTP calls but only when something
+  // is actually in motion.
+  const acceptedSchemas = new Set(
+    schemas.filter((s) => s.currentVersion !== null).map((s) => s.name),
+  );
+  await Promise.all(
+    [...awaitingPeer, ...awaitingMe].map(async (row) => {
+      if (row.kind === 'convention') return;
+      const spec = await fetchProposedSpec(client, doc, row);
+      if (spec === null) return;
+      row.blockedOn = findBlockingRefs(spec, acceptedSchemas);
+    }),
+  );
+
   return { awaitingPeer, awaitingMe, accepted, needsAttention };
+}
+
+/** Fetch the proposed spec for an in-flight status row, or null on lookup failure
+ *  (e.g. the proposal was withdrawn between the list call and now). */
+async function fetchProposedSpec(
+  client: BrackishClient,
+  doc: string,
+  row: StatusRow,
+): Promise<unknown | null> {
+  try {
+    if (row.kind === 'endpoint') {
+      const space = row.label.indexOf(' ');
+      if (space < 0) return null;
+      const method = row.label.slice(0, space).toLowerCase();
+      const path = row.label.slice(space + 1);
+      const ep = await client.getEndpoint(
+        doc,
+        method as Parameters<BrackishClient['getEndpoint']>[1],
+        path,
+        { proposed: true },
+      );
+      return ep.spec;
+    }
+    if (row.kind === 'schema') {
+      const sch = await client.getSchema(doc, row.label, { proposed: true });
+      return sch.spec;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function buildAttentionRow(c: ConventionArtifact, isWithdraw: boolean): AttentionRow {
