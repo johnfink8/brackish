@@ -8,7 +8,14 @@
 // Run: `npx tsx harness/validate-skill.ts`
 
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -46,12 +53,39 @@ function ensureBuilt(): string {
   return distEntry;
 }
 
-function writeWrapperBin(binDir: string, distEntry: string): string {
+function writeWrapperBin(binDir: string, distEntry: string, callLogPath: string): string {
   mkdirSync(binDir, { recursive: true });
   const wrapper = join(binDir, 'brackish');
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${distEntry}" "$@"\n`, {
-    mode: 0o755,
-  });
+  // Wrapper tees each invocation + its stdout/stderr/exit to callLogPath. The model's
+  // final JSON `result` is its NARRATIVE of what it did; this log is ground truth at
+  // the CLI layer — what brackish actually saw, what it actually printed. Used to
+  // diagnose skill-setup issues (wrong flags, missing --grant, etc.) and brackish
+  // I/O surprises that the model might silently misrepresent.
+  const script = `#!/bin/sh
+set -u
+LOG="${callLogPath}"
+TS="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+ARGS_QUOTED=""
+for a in "$@"; do ARGS_QUOTED="$ARGS_QUOTED \\"$a\\""; done
+{
+  echo "===== $TS pid=$$ cwd=$PWD identity=\${BRACKISH_IDENTITY:-?} home=\${BRACKISH_HOME:-?} ====="
+  echo "+ brackish$ARGS_QUOTED"
+} >> "$LOG" 2>/dev/null
+STDOUT_FILE="$(mktemp -t brackish-stdout.XXXXXX)"
+STDERR_FILE="$(mktemp -t brackish-stderr.XXXXXX)"
+"${process.execPath}" "${distEntry}" "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+EC=$?
+{
+  if [ -s "$STDOUT_FILE" ]; then echo "--- stdout ---"; cat "$STDOUT_FILE"; fi
+  if [ -s "$STDERR_FILE" ]; then echo "--- stderr ---"; cat "$STDERR_FILE"; fi
+  echo "--- exit=$EC ---"
+} >> "$LOG" 2>/dev/null
+cat "$STDOUT_FILE"
+cat "$STDERR_FILE" >&2
+rm -f "$STDOUT_FILE" "$STDERR_FILE"
+exit $EC
+`;
+  writeFileSync(wrapper, script, { mode: 0o755 });
   chmodSync(wrapper, 0o755);
   return wrapper;
 }
@@ -65,14 +99,24 @@ async function runClaude(args: {
   budgetUsd: number;
   transcriptPath: string;
 }): Promise<TurnResult> {
+  // stream-json + --verbose: NDJSON events as the model runs (assistant messages,
+  // tool_use, tool_result, final result). Each line is appended to the transcript
+  // file as it arrives, so even if claude is SIGTERM'd at the budget cap we still
+  // have every event that landed before the kill — strictly more diagnostic value
+  // than the --output-format json single-blob shape we had previously.
   const claudeArgs = [
     '--print',
     '--permission-mode',
     'bypassPermissions',
+    // Bash to run brackish; Read so the model can actually open SKILL.md / server.md /
+    // client.md / propose.md when relevant. A real user's Claude session has Read by
+    // default — restricting it here made the trial test only the skill's description
+    // blurb (visible in the system prompt) rather than its body.
     '--allowedTools',
-    'Bash',
+    'Bash,Read,Glob,Grep',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--no-session-persistence',
     '--no-chrome',
     '--max-budget-usd',
@@ -84,10 +128,15 @@ async function runClaude(args: {
     env: args.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Open the transcript file for append-as-we-go writes so a mid-stream SIGTERM
+  // doesn't lose the events that already arrived.
+  writeFileSync(args.transcriptPath, ''); // truncate / create
   let stdout = '';
   let stderr = '';
   child.stdout?.on('data', (d) => {
-    stdout += d.toString();
+    const chunk = d.toString();
+    stdout += chunk;
+    appendFileSync(args.transcriptPath, chunk);
   });
   child.stderr?.on('data', (d) => {
     stderr += d.toString();
@@ -103,13 +152,34 @@ async function runClaude(args: {
     child.on('close', (c) => res(c ?? 0));
   });
   clearTimeout(timer);
-  writeFileSync(args.transcriptPath, stdout);
-  if (stderr) writeFileSync(args.transcriptPath.replace(/\.json$/, '.stderr.txt'), stderr);
+  if (stderr) writeFileSync(args.transcriptPath.replace(/\.ndjson$/, '.stderr.txt'), stderr);
   if (code !== 0 && !timedOut) {
     console.error(`harness: claude exited ${code}; stderr tail:\n${stderr.slice(-1500)}`);
   }
-  const parsed = ClaudeTurnSchema.safeParse(safeJson(stdout));
-  return { stdout, stderr, data: parsed.success ? parsed.data : {} };
+  const data = extractResultFromStream(stdout);
+  return { stdout, stderr, data };
+}
+
+/** Walk the NDJSON stream and pull the final `result` event's payload. If the
+ *  stream was truncated mid-flight (SIGTERM at budget cap), the last result event
+ *  may not exist — we return an empty object and let the caller treat it as a
+ *  failed turn. We tolerate non-JSON lines (some claude versions interleave
+ *  banner text in --verbose mode). */
+function extractResultFromStream(stream: string): z.infer<typeof ClaudeTurnSchema> {
+  let lastResult: z.infer<typeof ClaudeTurnSchema> = {};
+  for (const line of stream.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line) as { type?: string };
+      if (obj.type === 'result') {
+        const parsed = ClaudeTurnSchema.safeParse(obj);
+        if (parsed.success) lastResult = parsed.data;
+      }
+    } catch {
+      // skip non-JSON lines
+    }
+  }
+  return lastResult;
 }
 
 function safeJson(s: string): unknown {
@@ -167,7 +237,9 @@ async function main(): Promise<void> {
   for (const d of [trialDir, serverDir, clientDir, serverHome, clientHome, binDir, transcriptDir]) {
     mkdirSync(d, { recursive: true });
   }
-  const brackishBin = writeWrapperBin(binDir, distEntry);
+  const callLogPath = join(trialDir, 'brackish-calls.log');
+  writeFileSync(callLogPath, ''); // create so the wrapper's append is unconditional
+  const brackishBin = writeWrapperBin(binDir, distEntry, callLogPath);
 
   // --- ROUND 1: server side ---
 
@@ -192,7 +264,7 @@ async function main(): Promise<void> {
     env: serverEnv,
     prompt: serverPrompt,
     budgetUsd: SERVER_BUDGET_USD,
-    transcriptPath: join(transcriptDir, 'server.json'),
+    transcriptPath: join(transcriptDir, 'server.ndjson'),
   });
   console.error(
     `harness:   done in ${((Date.now() - t0) / 1000).toFixed(1)}s ($${(serverTurn.data.total_cost_usd ?? 0).toFixed(3)}, ${serverTurn.data.num_turns ?? 0} model-turns)`,
@@ -237,7 +309,7 @@ async function main(): Promise<void> {
     env: clientEnv,
     prompt: slashConnect,
     budgetUsd: CLIENT_BUDGET_USD,
-    transcriptPath: join(transcriptDir, 'client.json'),
+    transcriptPath: join(transcriptDir, 'client.ndjson'),
   });
   console.error(
     `harness:   done in ${((Date.now() - t1) / 1000).toFixed(1)}s ($${(clientTurn.data.total_cost_usd ?? 0).toFixed(3)}, ${clientTurn.data.num_turns ?? 0} model-turns)`,
@@ -273,26 +345,29 @@ async function main(): Promise<void> {
     }
   }
 
-  // 3. End-to-end: client creates a doc, server-side observer reads it.
-  const createDoc = brackishCall(brackishBin, clientEnv, ['doc', 'new', 'validation']);
-  if (createDoc.code !== 0) {
-    failures.push(`client failed to create doc: ${createDoc.stderr.trim()}`);
+  // 3. End-to-end: the server-side Claude (per the skill) creates the doc and grants
+  // membership via the invite. After redeem, the client should see `validation` in its
+  // doc list AND be able to read it. Per fix #8's TCP ACL, a member-less peer would
+  // get 403 here — so this check directly validates that the skill's invite included
+  // `--grant <doc>` (otherwise the client is locked out post-redeem).
+  const listDocs = brackishCall(brackishBin, clientEnv, ['documents', '--json']);
+  if (listDocs.code !== 0) {
+    failures.push(`client failed to list docs: ${listDocs.stderr.trim()}`);
   } else {
-    const observerEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      BRACKISH_HOME: serverHome,
-      BRACKISH_IDENTITY: 'observer',
-    };
-    const listDocs = brackishCall(brackishBin, observerEnv, ['documents', '--json']);
-    if (listDocs.code !== 0) {
-      failures.push(`server-side document list failed: ${listDocs.stderr.trim()}`);
+    const docs = safeJson(listDocs.stdout) as { documents?: Array<{ name?: string }> };
+    const names = (docs?.documents ?? []).map((d) => d.name);
+    if (!names.includes('validation')) {
+      failures.push(
+        `client doesn't see doc 'validation' (skill likely did not mint invite with --grant validation); saw ${JSON.stringify(names)}`,
+      );
     } else {
-      const docs = safeJson(listDocs.stdout) as { documents?: Array<{ name?: string }> };
-      const names = (docs?.documents ?? []).map((d) => d.name);
-      if (!names.includes('validation')) {
-        failures.push(`server didn't see doc 'validation'; saw ${JSON.stringify(names)}`);
+      const statusRes = brackishCall(brackishBin, clientEnv, ['status', 'validation', '--json']);
+      if (statusRes.code !== 0) {
+        failures.push(
+          `client sees doc 'validation' in list but can't status it (ACL likely missing): ${statusRes.stderr.trim()}`,
+        );
       } else {
-        console.error('--- round-trip confirmed: server sees doc "validation" ---');
+        console.error('--- round-trip confirmed: client sees + can read doc "validation" ---');
       }
     }
   }

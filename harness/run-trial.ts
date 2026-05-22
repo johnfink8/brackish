@@ -63,11 +63,39 @@ function ensureBrackishBuilt(): string {
   return join(REPO_ROOT, 'dist', 'cli.js');
 }
 
-function writeWrapperBin(binDir: string, brackishEntry: string): string {
+function writeWrapperBin(binDir: string, brackishEntry: string, callLogPath: string): string {
   mkdirSync(binDir, { recursive: true });
   const wrapper = join(binDir, 'brackish');
   const node = process.execPath;
-  writeFileSync(wrapper, `#!/bin/sh\nexec "${node}" "${brackishEntry}" "$@"\n`, { mode: 0o755 });
+  // Tee every brackish invocation + its stdout/stderr/exit to callLogPath. The model's
+  // streamed transcript is its narrative; this log is ground truth at the CLI layer.
+  // Used to diagnose skill-setup issues (wrong flags, missing --grant, ordering bugs)
+  // and brackish I/O the model might silently misrepresent.
+  const script = `#!/bin/sh
+set -u
+LOG="${callLogPath}"
+TS="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+ARGS_QUOTED=""
+for a in "$@"; do ARGS_QUOTED="$ARGS_QUOTED \\"$a\\""; done
+{
+  echo "===== $TS pid=$$ cwd=$PWD identity=\${BRACKISH_IDENTITY:-?} home=\${BRACKISH_HOME:-?} ====="
+  echo "+ brackish$ARGS_QUOTED"
+} >> "$LOG" 2>/dev/null
+STDOUT_FILE="$(mktemp -t brackish-stdout.XXXXXX)"
+STDERR_FILE="$(mktemp -t brackish-stderr.XXXXXX)"
+"${node}" "${brackishEntry}" "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+EC=$?
+{
+  if [ -s "$STDOUT_FILE" ]; then echo "--- stdout ---"; cat "$STDOUT_FILE"; fi
+  if [ -s "$STDERR_FILE" ]; then echo "--- stderr ---"; cat "$STDERR_FILE"; fi
+  echo "--- exit=$EC ---"
+} >> "$LOG" 2>/dev/null
+cat "$STDOUT_FILE"
+cat "$STDERR_FILE" >&2
+rm -f "$STDOUT_FILE" "$STDERR_FILE"
+exit $EC
+`;
+  writeFileSync(wrapper, script, { mode: 0o755 });
   chmodSync(wrapper, 0o755);
   return wrapper;
 }
@@ -234,17 +262,20 @@ async function runOneTurn(args: {
     PATH: `${args.pathBinDir}:${process.env.PATH ?? ''}`,
   };
 
-  // `claude -p` defaults: bypass permissions, allow only Bash, JSON output, no session persistence.
-  // We *don't* use --bare because that disables OAuth/keychain auth. Instead we accept that the
-  // user's ~/.claude/CLAUDE.md gets inherited — it's about style preferences, not negotiation behavior.
+  // `claude -p` defaults: bypass permissions, allowed tools = Bash (run brackish) + Read/Glob/Grep
+  // (open SKILL.md and subfiles). Without Read, the model only sees the skill's description blurb
+  // and never the body — observed in skill-validate trials before this widening. stream-json
+  // captures every assistant text + tool_use + tool_result as it arrives so a mid-flight SIGTERM
+  // doesn't lose the partial transcript. We *don't* use --bare because that disables OAuth.
   const claudeArgs = [
     '--print',
     '--permission-mode',
     'bypassPermissions',
     '--allowedTools',
-    'Bash',
+    'Bash,Read,Glob,Grep',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--no-session-persistence',
     '--no-chrome',
     '--max-budget-usd',
@@ -258,10 +289,14 @@ async function runOneTurn(args: {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  // Append-as-it-arrives so a budget-cap SIGTERM still leaves us a partial transcript.
+  writeFileSync(args.transcriptPath, '');
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (d) => {
-    stdout += d.toString();
+    const chunk = d.toString();
+    stdout += chunk;
+    appendFileSync(args.transcriptPath, chunk);
   });
   child.stderr.on('data', (d) => {
     stderr += d.toString();
@@ -272,7 +307,6 @@ async function runOneTurn(args: {
     timedOut = true;
     console.error(`harness: ${args.side} turn exceeded ${args.timeoutMs}ms wall clock — SIGTERM`);
     child.kill('SIGTERM');
-    // Escalate if it doesn't die quickly.
     setTimeout(() => child.kill('SIGKILL'), 5000).unref();
   }, args.timeoutMs);
 
@@ -282,10 +316,8 @@ async function runOneTurn(args: {
   });
   clearTimeout(timer);
 
-  // Write the raw transcript file regardless of outcome.
-  writeFileSync(args.transcriptPath, stdout);
   if (stderr) {
-    writeFileSync(args.transcriptPath.replace(/\.json$/, '.stderr.txt'), stderr);
+    writeFileSync(args.transcriptPath.replace(/\.ndjson$/, '.stderr.txt'), stderr);
   }
 
   if (code !== 0 && !timedOut) {
@@ -294,8 +326,7 @@ async function runOneTurn(args: {
     );
   }
 
-  const parsed = ClaudeTurnResultSchema.safeParse(safeJsonUnknown(stdout));
-  const data = parsed.success ? parsed.data : {};
+  const data = extractResultFromStream(stdout);
   const finalText = data.result ?? '';
   const costUsd = data.total_cost_usd ?? 0;
   const durationMs = data.duration_ms ?? 0;
@@ -303,6 +334,26 @@ async function runOneTurn(args: {
   const saidStandDown = /\bSTAND_?DOWN\b/i.test(finalText);
 
   return { finalText, costUsd, durationMs, numTurns, saidStandDown, raw: data };
+}
+
+/** Walk the NDJSON stream and pull the final `result` event's payload. Tolerates
+ *  non-JSON lines (some claude versions interleave banner text in --verbose mode)
+ *  and missing-result-event (truncation from budget-cap SIGTERM). */
+function extractResultFromStream(stream: string): z.infer<typeof ClaudeTurnResultSchema> {
+  let lastResult: z.infer<typeof ClaudeTurnResultSchema> = {};
+  for (const line of stream.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line) as { type?: string };
+      if (obj.type === 'result') {
+        const parsed = ClaudeTurnResultSchema.safeParse(obj);
+        if (parsed.success) lastResult = parsed.data;
+      }
+    } catch {
+      // skip non-JSON lines
+    }
+  }
+  return lastResult;
 }
 
 function meetsSuccessCriterion(summary: DocumentSummary, scenario: Scenario): boolean {
@@ -477,8 +528,11 @@ async function main(): Promise<void> {
   );
 
   // Wrapper bin: ensures the sub-claudes' `brackish` resolves to *our* dist build, not whatever
-  // global install might be on the user's PATH.
-  const brackishBin = writeWrapperBin(binDir, brackishEntry);
+  // global install might be on the user's PATH. Wrapper also tees every invocation +
+  // stdout/stderr/exit to brackish-calls.log for ground-truth diagnosis.
+  const callLogPath = join(trialDir, 'brackish-calls.log');
+  writeFileSync(callLogPath, '');
+  const brackishBin = writeWrapperBin(binDir, brackishEntry, callLogPath);
 
   // Install the brackish skill into each side's project-scope `.claude/`. Mirrors validate-skill.
   const installEnv = (home: string): NodeJS.ProcessEnv => ({
@@ -559,7 +613,7 @@ async function main(): Promise<void> {
       const prompt = isStarter ? scenario.starterPrompts[nextSide] : scenario.wakePrompt;
       const transcriptPath = join(
         transcriptDir,
-        `round-${String(round).padStart(3, '0')}-${nextSide}.json`,
+        `round-${String(round).padStart(3, '0')}-${nextSide}.ndjson`,
       );
 
       console.error(`harness: round ${round} — ${nextSide} ${isStarter ? '(starter)' : '(wake)'}`);
@@ -650,7 +704,7 @@ async function main(): Promise<void> {
           budgetUsd: CRITIQUE_BUDGET_USD,
           timeoutMs: scenario.perTurnTimeoutMs,
           pathBinDir: binDir,
-          transcriptPath: join(transcriptDir, `critique-${side}.json`),
+          transcriptPath: join(transcriptDir, `critique-${side}.ndjson`),
         }),
       ),
     );
