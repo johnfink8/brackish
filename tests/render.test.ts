@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RationaleEntry } from '../src/daemon/store/index.js';
+import type { Event } from '../src/lib/models.js';
 import type { OpenAPIDocument } from '../src/lib/openapi.js';
 import {
   renderHtml,
@@ -212,5 +213,40 @@ describe('renderHtml', () => {
     const html = renderHtml({ document: fixtureDoc }, { documentName: 'evil<script>' });
     expect(html).not.toContain('evil<script>');
     expect(html).toContain('evil&lt;script&gt;');
+  });
+
+  // Targeted red test for the XSS via script-tag breakout: when peer-supplied text is
+  // inlined into a <script> block via JSON.stringify, `</script>` inside the string
+  // closes the script element prematurely and anything after it becomes parseable HTML.
+  // The legitimate HTML emits exactly two </script> closers (Swagger UI loader + the
+  // bootstrap script). Any third closer means a peer string broke out.
+  it('peer-supplied message text cannot break out of the bootstrap <script> tag', () => {
+    const events: Event[] = [
+      {
+        id: 1,
+        documentName: 'orders',
+        createdAt: '2026-05-19T10:00:00Z',
+        kind: 'message',
+        from: 'host',
+        text: '</script><script>window.__pwned=true</script>',
+      },
+    ];
+    const html = renderHtml(
+      { document: fixtureDoc, events },
+      { documentName: 'orders-api' },
+    );
+    const closers = (html.match(/<\/script>/g) ?? []).length;
+    expect(closers).toBe(2);
+  });
+
+  it('peer-supplied schema description cannot break out of the bootstrap <script> tag', () => {
+    const doc: OpenAPIDocument = {
+      openapi: '3.1.0',
+      info: { title: 'x', version: '0', description: '</script><script>alert(1)</script>' },
+      paths: {},
+    };
+    const html = renderHtml({ document: doc }, { documentName: 'orders-api' });
+    const closers = (html.match(/<\/script>/g) ?? []).length;
+    expect(closers).toBe(2);
   });
 });
