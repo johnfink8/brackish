@@ -26,6 +26,7 @@ import {
   IdentitySchema,
   type JSONSchema,
   type OperationSpec,
+  operationIdentityKey,
   ProposeBatchRequestSchema,
   ProposeConventionRequestSchema,
   ProposeEndpointRequestSchema,
@@ -487,7 +488,10 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       c.req.query('from'),
       c.req.query('to'),
       async (v) => store.getEndpointByVersion(docName, method, path, v),
-      () => store.latestVersion(docName, 'operation', operationKey(method, path)),
+      // `operationIdentityKey` (uppercase method) is the store's keying scheme — must match
+      // the keys used by every other endpoint store call. The projection's `operationKey`
+      // is lowercase and applies only to projection-internal overlay maps.
+      () => store.latestVersion(docName, 'operation', operationIdentityKey(method, path)),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
