@@ -15,6 +15,8 @@ import {
   type DiffResponse,
   DiffResponseSchema,
   type Document,
+  type DocumentMember,
+  DocumentMemberSchema,
   type DocumentName,
   DocumentSchema,
   type EndpointListResponse,
@@ -490,11 +492,50 @@ export class BrackishClient {
 
   // --- parties, invites, connect ---
 
-  createInvite(identity: Identity, ttlSeconds: number): Promise<InviteCreatedResponse> {
+  createInvite(
+    identity: Identity,
+    ttlSeconds: number,
+    grantDocs: DocumentName[] = [],
+  ): Promise<InviteCreatedResponse> {
+    const body: { identity: Identity; ttlSeconds: number; grantDocs?: DocumentName[] } = {
+      identity,
+      ttlSeconds,
+    };
+    if (grantDocs.length > 0) body.grantDocs = grantDocs;
     return this.fetchAndParse('/invites', InviteCreatedResponseSchema, {
       method: 'POST',
-      body: { identity, ttlSeconds },
+      body,
     });
+  }
+
+  // --- per-document ACL ---
+
+  listMembers(document: DocumentName): Promise<DocumentMember[]> {
+    return this.fetchAndParseField(
+      `/documents/${encodeURIComponent(document)}/members`,
+      'members',
+      DocumentMemberSchema.array(),
+    );
+  }
+
+  async addMember(
+    document: DocumentName,
+    identity: Identity,
+    role: 'owner' | 'member',
+  ): Promise<void> {
+    const res = await this.request(`/documents/${encodeURIComponent(document)}/members`, {
+      method: 'POST',
+      body: { identity, role },
+    });
+    await okJson(res);
+  }
+
+  async removeMember(document: DocumentName, identity: Identity): Promise<void> {
+    const res = await this.request(
+      `/documents/${encodeURIComponent(document)}/members/${encodeURIComponent(identity)}`,
+      { method: 'DELETE' },
+    );
+    await okJson(res);
   }
 
   /** /connect doesn't require auth, but it's still exposed here for convenience when the caller

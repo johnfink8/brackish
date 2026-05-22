@@ -127,9 +127,30 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Per-document ACL. Socket peers (peer-trust) bypass this; TCP peers must be members.
+-- Document creators are inserted as 'owner' by createDocument; additional members can be
+-- added via the membership API or auto-granted at invite redemption.
+CREATE TABLE IF NOT EXISTS document_members (
+  document_name TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+  identity      TEXT NOT NULL,
+  role          TEXT NOT NULL CHECK (role IN ('owner','member')),
+  granted_by    TEXT NOT NULL,
+  granted_at    TEXT NOT NULL,
+  PRIMARY KEY (document_name, identity)
+);
+CREATE INDEX IF NOT EXISTS document_members_identity_idx ON document_members(identity);
+
+-- Optional document grants attached to an invite. Redeeming the invite inserts the
+-- new party as a 'member' of each named doc.
+CREATE TABLE IF NOT EXISTS invite_grants (
+  token_hash    TEXT NOT NULL,
+  document_name TEXT NOT NULL,
+  PRIMARY KEY (token_hash, document_name)
+);
 `;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const hashToken = (raw: string): string => createHash('sha256').update(raw).digest('hex');
 
@@ -205,8 +226,36 @@ export class SqliteStore implements Store {
     // the rebuild on an existing DB, and we need the old shape readable to migrate it.
     this.migrateLegacyTokenColumns();
     this.db.exec(SCHEMA);
+    this.migrateOwnershipFromCreatedBy();
     this.recordSchemaVersion();
     this.notifier = opts.notifier;
+  }
+
+  /** v2 → v3 ACL migration: each existing document gets its `created_by` recorded as an
+   *  owner in document_members. Pre-existing TCP peers who were globally-trusted before
+   *  must now be granted explicitly — a breaking change documented in 0.6.0 CHANGELOG. */
+  private migrateOwnershipFromCreatedBy(): void {
+    const versionRow = this.db
+      .prepare<[], { value: string }>("SELECT value FROM meta WHERE key = 'schema_version'")
+      .get();
+    const current = versionRow ? Number.parseInt(versionRow.value, 10) : 0;
+    if (current >= 3) return;
+    const docs = this.db
+      .prepare<[], { name: string; created_by: string; created_at: string }>(
+        'SELECT name, created_by, created_at FROM documents',
+      )
+      .all();
+    const insert = this.db.prepare(
+      `INSERT INTO document_members (document_name, identity, role, granted_by, granted_at)
+       VALUES (?, ?, 'owner', ?, ?)
+       ON CONFLICT(document_name, identity) DO NOTHING`,
+    );
+    const tx = this.db.transaction(() => {
+      for (const d of docs) {
+        insert.run(d.name, d.created_by, d.created_by, d.created_at);
+      }
+    });
+    tx();
   }
 
   /** v1 → v2 token migration: rebuild party_tokens and invites with hashed primary keys,
@@ -749,9 +798,17 @@ export class SqliteStore implements Store {
       throw new StoreError('document_exists', `document "${name}" already exists`);
     }
     const tx = this.db.transaction(() => {
+      const createdAt = now();
       this.db
         .prepare('INSERT INTO documents (name, created_by, created_at) VALUES (?, ?, ?)')
-        .run(name, by, now());
+        .run(name, by, createdAt);
+      // Creator becomes owner; TCP-side ACL gating uses this row.
+      this.db
+        .prepare(
+          `INSERT INTO document_members (document_name, identity, role, granted_by, granted_at)
+           VALUES (?, ?, 'owner', ?, ?)`,
+        )
+        .run(name, by, by, createdAt);
       this.insertEvent(name, 'document_created', { by });
     });
     tx();
@@ -760,6 +817,79 @@ export class SqliteStore implements Store {
       .get(name);
     if (!row) throw new Error('createDocument: row missing after insert');
     return this.rowToDocument(row);
+  }
+
+  // --- ACL ---
+
+  async isMember(documentName: DocumentName, identity: Identity): Promise<boolean> {
+    const row = this.db
+      .prepare<[string, string], { c: number }>(
+        'SELECT COUNT(*) AS c FROM document_members WHERE document_name = ? AND identity = ?',
+      )
+      .get(documentName, identity);
+    return (row?.c ?? 0) > 0;
+  }
+
+  async listDocumentsForMember(identity: Identity): Promise<Document[]> {
+    const rows = this.db
+      .prepare<[string], DocumentRow>(
+        `SELECT d.* FROM documents d
+         JOIN document_members m ON m.document_name = d.name
+         WHERE m.identity = ?
+         ORDER BY d.created_at`,
+      )
+      .all(identity);
+    return rows.map((r) => this.rowToDocument(r));
+  }
+
+  async addDocumentMember(
+    documentName: DocumentName,
+    identity: Identity,
+    role: 'owner' | 'member',
+    grantedBy: Identity,
+  ): Promise<void> {
+    const document = await this.getDocument(documentName);
+    if (!document) {
+      throw new StoreError('document_not_found', `document "${documentName}" not found`);
+    }
+    this.db
+      .prepare(
+        `INSERT INTO document_members (document_name, identity, role, granted_by, granted_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(document_name, identity) DO UPDATE SET
+           role = excluded.role,
+           granted_by = excluded.granted_by,
+           granted_at = excluded.granted_at`,
+      )
+      .run(documentName, identity, role, grantedBy, now());
+  }
+
+  async removeDocumentMember(
+    documentName: DocumentName,
+    identity: Identity,
+  ): Promise<void> {
+    this.db
+      .prepare('DELETE FROM document_members WHERE document_name = ? AND identity = ?')
+      .run(documentName, identity);
+  }
+
+  async listDocumentMembers(
+    documentName: DocumentName,
+  ): Promise<Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>> {
+    const rows = this.db
+      .prepare<
+        [string],
+        { identity: string; role: 'owner' | 'member'; granted_by: string; granted_at: string }
+      >(
+        'SELECT identity, role, granted_by, granted_at FROM document_members WHERE document_name = ? ORDER BY granted_at',
+      )
+      .all(documentName);
+    return rows.map((r) => ({
+      identity: r.identity,
+      role: r.role,
+      grantedBy: r.granted_by,
+      grantedAt: r.granted_at,
+    }));
   }
 
   async getDocument(name: DocumentName): Promise<Document | null> {
@@ -1211,15 +1341,29 @@ export class SqliteStore implements Store {
 
   // --- invites ---
 
-  async createInvite(identity: Identity, ttlSeconds: number): Promise<Invite> {
+  async createInvite(
+    identity: Identity,
+    ttlSeconds: number,
+    grantDocs: DocumentName[] = [],
+  ): Promise<Invite> {
     const token = newToken();
     const createdAt = now();
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    this.db
-      .prepare(
-        'INSERT INTO invites (token_hash, identity, created_at, expires_at) VALUES (?, ?, ?, ?)',
-      )
-      .run(hashToken(token), identity, createdAt, expiresAt);
+    const tokenHash = hashToken(token);
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          'INSERT INTO invites (token_hash, identity, created_at, expires_at) VALUES (?, ?, ?, ?)',
+        )
+        .run(tokenHash, identity, createdAt, expiresAt);
+      if (grantDocs.length > 0) {
+        const ins = this.db.prepare(
+          'INSERT INTO invite_grants (token_hash, document_name) VALUES (?, ?)',
+        );
+        for (const doc of grantDocs) ins.run(tokenHash, doc);
+      }
+    });
+    tx();
     return { token, identity, createdAt, expiresAt };
   }
 
@@ -1253,6 +1397,27 @@ export class SqliteStore implements Store {
       this.db
         .prepare('UPDATE invites SET redeemed_at = ? WHERE token_hash = ?')
         .run(now(), inviteHash);
+      // Apply any doc grants attached to the invite — the new peer becomes a member of
+      // each one. Skip silently if a granted doc no longer exists.
+      const grants = this.db
+        .prepare<[string], { document_name: string }>(
+          'SELECT document_name FROM invite_grants WHERE token_hash = ?',
+        )
+        .all(inviteHash);
+      const grantedAt = now();
+      const addMember = this.db.prepare(
+        `INSERT INTO document_members (document_name, identity, role, granted_by, granted_at)
+         VALUES (?, ?, 'member', ?, ?)
+         ON CONFLICT(document_name, identity) DO NOTHING`,
+      );
+      for (const g of grants) {
+        const docExists = this.db
+          .prepare<[string], { c: number }>('SELECT COUNT(*) AS c FROM documents WHERE name = ?')
+          .get(g.document_name);
+        if ((docExists?.c ?? 0) > 0) {
+          addMember.run(g.document_name, row.identity, row.identity, grantedAt);
+        }
+      }
       issued = { identity: row.identity, token: persistentToken };
     });
     tx();

@@ -13,6 +13,7 @@ import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/c
 import { generatePatch } from '../lib/diff.js';
 import {
   AcceptArtifactRequestSchema,
+  AddMemberRequestSchema,
   type ConventionSpec,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
@@ -25,7 +26,6 @@ import {
   type JSONSchema,
   type OperationSpec,
   ProposeBatchRequestSchema,
-  type ProposeBatchResponse,
   ProposeConventionRequestSchema,
   ProposeEndpointRequestSchema,
   ProposeSchemaRequestSchema,
@@ -65,6 +65,30 @@ export type BuildAppOptions = {
 export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
+
+  /** Doc-scoped ACL gate. Sock transport bypasses (peer-trust); TCP enforces membership.
+   *  Returns null when access is allowed, or a Response (404/403) to short-circuit. */
+  const requireMember = async (
+    c: import('hono').Context<AppEnv>,
+    docName: DocumentName,
+  ): Promise<Response | null> => {
+    if (c.get('transport') === 'sock') return null;
+    const doc = await store.getDocument(docName);
+    if (!doc) {
+      return c.json(
+        { error: `document "${docName}" not found`, code: 'document_not_found' },
+        404,
+      );
+    }
+    const ok = await store.isMember(docName, c.get('identity'));
+    if (!ok) {
+      return c.json(
+        { error: `not a member of "${docName}"`, code: 'forbidden' },
+        403,
+      );
+    }
+    return null;
+  };
 
   // Centralized error mapping. Three classes get specific status codes; everything
   // else is logged and surfaces as 500.
@@ -111,7 +135,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.post('/invites', async (c) => {
     const body = CreateInviteRequestSchema.parse(await c.req.json());
-    const invite = await store.createInvite(body.identity, body.ttlSeconds);
+    const invite = await store.createInvite(body.identity, body.ttlSeconds, body.grantDocs ?? []);
     return c.json({
       inviteToken: invite.token,
       identity: invite.identity,
@@ -133,7 +157,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   // --- documents ---
 
   app.get('/documents', async (c) => {
-    const documents = await store.listDocuments();
+    // TCP callers see only docs they're a member of; sock peers (peer-trust) see all.
+    const documents =
+      c.get('transport') === 'sock'
+        ? await store.listDocuments()
+        : await store.listDocumentsForMember(c.get('identity'));
     return c.json({ documents });
   });
 
@@ -143,8 +171,20 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(document, 201);
   });
 
+  // Middleware: every doc-scoped route (everything matching /documents/:name/*) is
+  // gated on ACL membership for TCP callers; sock callers bypass (peer-trust). We
+  // attach this BEFORE the routes themselves so per-handler bodies stay clean.
+  app.use('/documents/:name/*', async (c, next) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const denied = await requireMember(c, docName);
+    if (denied) return denied;
+    await next();
+  });
+
   app.get('/documents/:name', async (c) => {
     const name = DocumentNameSchema.parse(c.req.param('name'));
+    const denied = await requireMember(c, name);
+    if (denied) return denied;
     const t = await store.getDocument(name);
     if (!t)
       return c.json({ error: `document "${name}" not found`, code: 'document_not_found' }, 404);
@@ -682,6 +722,46 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ fromVersion: from.version, toVersion: to.version, patch });
   });
 
+  // --- membership management ---
+  //
+  // Sock callers (peer-trust) can manage any doc's membership. TCP callers need to be
+  // an owner of the doc to grant/revoke; reading the member list requires membership.
+
+  const isOwner = async (
+    c: import('hono').Context<AppEnv>,
+    docName: DocumentName,
+  ): Promise<boolean> => {
+    if (c.get('transport') === 'sock') return true;
+    const members = await store.listDocumentMembers(docName);
+    return members.some((m) => m.identity === c.get('identity') && m.role === 'owner');
+  };
+
+  app.get('/documents/:name/members', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const members = await store.listDocumentMembers(docName);
+    return c.json({ members });
+  });
+
+  app.post('/documents/:name/members', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    if (!(await isOwner(c, docName))) {
+      return c.json({ error: 'owner-only', code: 'forbidden' }, 403);
+    }
+    const body = AddMemberRequestSchema.parse(await c.req.json());
+    await store.addDocumentMember(docName, body.identity, body.role, c.get('identity'));
+    return c.json({ ok: true }, 201);
+  });
+
+  app.delete('/documents/:name/members/:identity', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    if (!(await isOwner(c, docName))) {
+      return c.json({ error: 'owner-only', code: 'forbidden' }, 403);
+    }
+    const target = IdentitySchema.parse(c.req.param('identity'));
+    await store.removeDocumentMember(docName, target);
+    return c.json({ ok: true });
+  });
+
   // --- render routes (used by visualize CLI + browser UI) ---
 
   app.get('/documents/:name/openapi.yaml', async (c) => {
@@ -747,6 +827,7 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     case 'cannot_accept_own':
     case 'cannot_reject_own':
     case 'cannot_withdraw_others':
+    case 'forbidden':
       return 403;
     default:
       return 400;

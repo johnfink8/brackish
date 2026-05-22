@@ -10,39 +10,58 @@ import {
 } from '../io/config.js';
 import { IdentitySchema } from '../lib/models.js';
 import { formatParties } from '../render/output.js';
-import { emit, emitJson, errExit, inferReachableHost, withClient } from './common.js';
+import { collect, emit, emitJson, errExit, inferReachableHost, withClient } from './common.js';
 
 export function register(program: Command): void {
   program
     .command('invite <identity>')
     .description('server-side: mint a one-time invite for <identity> (TCP transport only)')
     .option('--ttl <seconds>', 'invite lifetime in seconds (default 3600)', '3600')
+    .option(
+      '--grant <doc>',
+      'auto-grant the redeeming party membership of <doc> (repeatable; comma-separated also accepted). Without --grant, the peer redeems an account but has no document access until you explicitly run `brackish doc grant`.',
+      collect,
+      [] as string[],
+    )
     .option('--json', 'output JSON')
-    .action(async (identity: string, opts: { ttl: string; json?: boolean }) =>
-      withClient(async (client) => {
-        const ttl = Number.parseInt(opts.ttl, 10);
-        if (!Number.isFinite(ttl) || ttl < 1)
-          errExit(2, 'invite: --ttl must be a positive integer');
-        IdentitySchema.parse(identity);
-        const inv = await client.createInvite(identity, ttl);
-        const cfg = await loadServerAddrForInvite();
-        const url = cfg.tcpUrl;
-        if (opts.json) {
-          emitJson({
-            inviteToken: inv.inviteToken,
-            identity: inv.identity,
-            expiresAt: inv.expiresAt,
-            connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
-            ...(cfg.hint ? { hint: cfg.hint } : {}),
-          });
-        } else {
-          const hintLine = cfg.hint ? `\n  ${cfg.hint}` : '';
-          emit(
-            `invite issued: identity=${identity}, expires=${inv.expiresAt}\n` +
-              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
-          );
-        }
-      }),
+    .action(
+      async (
+        identity: string,
+        opts: { ttl: string; grant: string[]; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const ttl = Number.parseInt(opts.ttl, 10);
+          if (!Number.isFinite(ttl) || ttl < 1)
+            errExit(2, 'invite: --ttl must be a positive integer');
+          IdentitySchema.parse(identity);
+          // Accept both repeated --grant and comma-separated values within a single flag.
+          const grantDocs = opts.grant.flatMap((s) => s.split(','))
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+          const inv = await client.createInvite(identity, ttl, grantDocs);
+          const cfg = await loadServerAddrForInvite();
+          const url = cfg.tcpUrl;
+          if (opts.json) {
+            emitJson({
+              inviteToken: inv.inviteToken,
+              identity: inv.identity,
+              expiresAt: inv.expiresAt,
+              grantDocs,
+              connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
+              ...(cfg.hint ? { hint: cfg.hint } : {}),
+            });
+          } else {
+            const hintLine = cfg.hint ? `\n  ${cfg.hint}` : '';
+            const grantLine =
+              grantDocs.length > 0
+                ? `\n  on redeem: ${identity} becomes a member of ${grantDocs.join(', ')}`
+                : `\n  (no docs granted — run \`brackish doc grant <doc> ${identity}\` after redeem)`;
+            emit(
+              `invite issued: identity=${identity}, expires=${inv.expiresAt}${grantLine}\n` +
+                `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
+            );
+          }
+        }),
     );
 
   program

@@ -204,8 +204,26 @@ export interface Store {
   touchPartySeen(identity: Identity): Promise<void>;
 
   // --- invites ---
-  createInvite(identity: Identity, ttlSeconds: number): Promise<Invite>;
+  createInvite(
+    identity: Identity,
+    ttlSeconds: number,
+    grantDocs?: DocumentName[],
+  ): Promise<Invite>;
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
+
+  // --- per-document ACL (TCP-only enforcement; socket transport bypasses) ---
+  isMember(documentName: DocumentName, identity: Identity): Promise<boolean>;
+  listDocumentsForMember(identity: Identity): Promise<Document[]>;
+  addDocumentMember(
+    documentName: DocumentName,
+    identity: Identity,
+    role: 'owner' | 'member',
+    grantedBy: Identity,
+  ): Promise<void>;
+  removeDocumentMember(documentName: DocumentName, identity: Identity): Promise<void>;
+  listDocumentMembers(documentName: DocumentName): Promise<
+    Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>
+  >;
 
   // --- cursors (server-tracked per (identity, document)) ---
   getLastSeenCursor(identity: Identity, documentName: DocumentName): Promise<Cursor>;

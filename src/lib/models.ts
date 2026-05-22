@@ -507,8 +507,25 @@ export const CreateInviteRequestSchema = z.object({
     .int()
     .positive()
     .max(60 * 60 * 24 * 30),
+  /** Optional list of documents the redeeming party is automatically granted membership of. */
+  grantDocs: z.array(DocumentNameSchema).optional(),
 });
 export type CreateInviteRequest = z.infer<typeof CreateInviteRequestSchema>;
+
+/** Add a member to a document. Role is mandatory ('owner' for co-owner; 'member' for read+propose). */
+export const AddMemberRequestSchema = z.object({
+  identity: IdentitySchema,
+  role: z.enum(['owner', 'member']),
+});
+export type AddMemberRequest = z.infer<typeof AddMemberRequestSchema>;
+
+export const DocumentMemberSchema = z.object({
+  identity: IdentitySchema,
+  role: z.enum(['owner', 'member']),
+  grantedBy: IdentitySchema,
+  grantedAt: z.string().datetime(),
+});
+export type DocumentMember = z.infer<typeof DocumentMemberSchema>;
 
 export const RedeemInviteRequestSchema = z.object({
   inviteToken: TokenSchema,

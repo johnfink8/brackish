@@ -749,4 +749,83 @@ describe('server (TCP transport + invite/connect)', () => {
     });
     expect(res.status).toBe(401);
   });
+
+  describe('per-document ACLs (TCP)', () => {
+    // Helper: mint an invite over socket for an identity, redeem it over TCP, return the bearer.
+    const mintTokenForPeer = async (peerIdentity: string): Promise<string> => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        const inv = await undiciFetch('http://localhost/invites', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'admin',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ identity: peerIdentity, ttlSeconds: 60 }),
+          dispatcher: sockAgent,
+        });
+        const invData = (await inv.json()) as { inviteToken: string };
+        const con = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invData.inviteToken }),
+        });
+        const conData = (await con.json()) as { token: string };
+        return conData.token;
+      } finally {
+        await sockAgent.close();
+      }
+    };
+
+    it('denies a non-member TCP peer access to a doc-scoped GET (403)', async () => {
+      // host creates `private` over socket (host implicit owner).
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        await undiciFetch('http://localhost/documents', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'host',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: 'private' }),
+          dispatcher: sockAgent,
+        });
+      } finally {
+        await sockAgent.close();
+      }
+      // peer redeems an invite over TCP — registered party but NOT a member of `private`.
+      const peerToken = await mintTokenForPeer('peer');
+      const res = await fetch(`${tcpUrl}/documents/private/endpoints`, {
+        headers: { Authorization: `Bearer ${peerToken}` },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('GET /documents only lists docs the TCP caller is a member of', async () => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        for (const name of ['alpha', 'beta']) {
+          await undiciFetch('http://localhost/documents', {
+            method: 'POST',
+            headers: {
+              'X-Brackish-Identity': 'host',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ name }),
+            dispatcher: sockAgent,
+          });
+        }
+      } finally {
+        await sockAgent.close();
+      }
+      const peerToken = await mintTokenForPeer('peer');
+      const res = await fetch(`${tcpUrl}/documents`, {
+        headers: { Authorization: `Bearer ${peerToken}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { documents: Array<{ name: string }> };
+      // peer is a member of neither; list is empty for them.
+      expect(body.documents.map((d) => d.name)).toEqual([]);
+    });
+  });
 });
