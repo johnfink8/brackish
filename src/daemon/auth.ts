@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context, MiddlewareHandler } from 'hono';
 import { type Identity, IdentitySchema } from '../lib/models.js';
+import type { RateLimiter } from './limiter.js';
 import type { Store } from './store/index.js';
 
 export type Transport = 'sock' | 'tcp';
@@ -49,6 +50,7 @@ const HEADER_IDENTITY = 'X-Brackish-Identity';
  */
 export function makeAuthMiddleware(
   store: Store,
+  opts: { failedAuthLimiter?: RateLimiter } = {},
 ): MiddlewareHandler<{ Variables: AppVariables; Bindings: AppBindings }> {
   return async (c, next) => {
     const transport = detectTransport(c.env.incoming.socket);
@@ -84,17 +86,32 @@ export function makeAuthMiddleware(
       token = cookieToken;
       isCookie = true;
     }
+    const ip = c.env.incoming.socket.remoteAddress ?? 'unknown';
+    const limiter = opts.failedAuthLimiter;
+    const limiterKey = `auth:${ip}`;
+    // The limiter throttles FAILED auths only — successful Bearer requests don't
+    // consume a slot. If prior failures already filled the bucket, deny up front.
+    if (limiter && limiter.isExhausted(limiterKey)) {
+      const retry = limiter.retryAfterSeconds(limiterKey);
+      c.header('Retry-After', String(retry));
+      console.warn(`[brackish] rate-limited TCP auth from ${ip}`);
+      return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
+    }
+    const failAuth = (msg: string, errBody: object): Response => {
+      if (limiter) limiter.tryConsume(limiterKey);
+      console.warn(`[brackish] ${msg} from ${ip}`);
+      return c.json(errBody, 401);
+    };
     if (!token) {
-      return c.json(
-        { error: 'Authorization: Bearer <token> required for TCP transport' },
-        401,
-      );
+      return failAuth('missing bearer', {
+        error: 'Authorization: Bearer <token> required for TCP transport',
+      });
     }
     const identity = isCookie
       ? await store.getIdentityForUiSession(token)
       : await store.getIdentityForToken(token);
     if (!identity) {
-      return c.json({ error: 'invalid token' }, 401);
+      return failAuth('invalid bearer', { error: 'invalid token' });
     }
     await store.touchPartySeen(identity);
     c.set('identity', identity);

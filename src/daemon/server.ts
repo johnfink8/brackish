@@ -36,6 +36,7 @@ import {
   SendMessageRequestSchema,
 } from '../lib/models.js';
 import { EventNotifier } from '../lib/notifier.js';
+import { RateLimiter } from './limiter.js';
 import type { assembleDocument } from '../lib/openapi.js';
 import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
@@ -65,6 +66,21 @@ export type BuildAppOptions = {
 export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
+
+  // Three TCP-only rate limiters. Socket callers bypass each one (peer-trust + the
+  // filesystem permission on the socket already gate access). Keys are source IP for
+  // network-facing endpoints and identity for the authenticated OTT mint.
+  const connectLimiter = new RateLimiter({ burst: 10, windowSeconds: 60 });
+  const failedAuthLimiter = new RateLimiter({ burst: 20, windowSeconds: 60 });
+  const ottMintLimiter = new RateLimiter({ burst: 30, windowSeconds: 60 });
+
+  const sourceIp = (c: import('hono').Context<AppEnv>): string =>
+    c.env.incoming.socket.remoteAddress ?? 'unknown';
+
+  const isTcp = (c: import('hono').Context<AppEnv>): boolean => {
+    const addr = c.env.incoming.socket.address?.();
+    return Boolean(addr && typeof addr === 'object' && 'port' in addr);
+  };
 
   /** Doc-scoped ACL gate. Sock transport bypasses (peer-trust); TCP enforces membership.
    *  Returns null when access is allowed, or a Response (404/403) to short-circuit. */
@@ -116,6 +132,15 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/healthz', (c) => c.json({ ok: true, version: SERVER_VERSION }));
 
   app.post('/connect', async (c) => {
+    if (isTcp(c)) {
+      const key = `connect:${sourceIp(c)}`;
+      if (!connectLimiter.tryConsume(key)) {
+        const retry = connectLimiter.retryAfterSeconds(key);
+        c.header('Retry-After', String(retry));
+        console.warn(`[brackish] rate-limited /connect from ${sourceIp(c)}`);
+        return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
+      }
+    }
     const body = RedeemInviteRequestSchema.parse(await c.req.json());
     const { identity, token } = await store.redeemInvite(body.inviteToken);
     return c.json({ identity, token });
@@ -146,13 +171,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   // --- authenticated routes ---
 
+  const authMiddleware = makeAuthMiddleware(store, { failedAuthLimiter });
   const auth = app.use('*', async (c, next) => {
     // /healthz, /connect, and /ui-login are public; skip auth for them.
     // /ui-login is the OTT redeemer — it consumes a single-use token from the URL and
     // sets an HttpOnly cookie; auth happens via that mechanism, not Bearer.
     const path = new URL(c.req.url).pathname;
     if (path === '/healthz' || path === '/connect' || path === '/ui-login') return next();
-    return makeAuthMiddleware(store)(c, next);
+    return authMiddleware(c, next);
   });
   void auth;
 
@@ -161,6 +187,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   // that can ride in a URL; the browser visits /ui-login?ott=… to exchange it for a
   // cookie. No spec body needed — the OTT inherits the caller's identity at mint time.
   app.post('/ui-sessions', async (c) => {
+    if (c.get('transport') === 'tcp') {
+      const key = `ott:${c.get('identity')}`;
+      if (!ottMintLimiter.tryConsume(key)) {
+        const retry = ottMintLimiter.retryAfterSeconds(key);
+        c.header('Retry-After', String(retry));
+        return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
+      }
+    }
     const { ott, expiresAt } = await store.createUiOtt(c.get('identity'), 60);
     return c.json({ ott, expiresAt }, 201);
   });

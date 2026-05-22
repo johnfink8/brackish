@@ -750,6 +750,28 @@ describe('server (TCP transport + invite/connect)', () => {
     expect(res.status).toBe(401);
   });
 
+  describe('rate limiting', () => {
+    it('429s after the burst cap on repeated /connect with bogus tokens', async () => {
+      // Pre-fix: every bogus /connect returns 404 (invite_invalid) with no throttling,
+      // so an attacker can churn through token guesses (or simply DoS the endpoint).
+      // The fix admits a small burst (≤10/min), then 429s subsequent attempts from the
+      // same source IP. The 11th request in a tight loop must be 429.
+      const statuses: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        const r = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inviteToken: `bogus-padding-token-${i.toString().padStart(20, '0')}` }),
+        });
+        statuses.push(r.status);
+      }
+      // Up to the burst cap should fail-auth (404 invite_invalid); past the cap should 429.
+      expect(statuses).toContain(429);
+      // First request must NOT be 429 — confirms the limiter has a burst window.
+      expect(statuses[0]).not.toBe(429);
+    });
+  });
+
   describe('no token-in-query fallback', () => {
     // Pre-fix code accepted `?token=<valid>` as a TCP auth fallback (used by browser
     // UI URLs). Tokens in query strings leak via Referer, server access logs, browser
