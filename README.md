@@ -18,6 +18,22 @@ brackish is a small message bus + propose/accept artifact lifecycle. You don't t
 Same machine: Unix-socket transport, peer-trust, zero ceremony.
 Cross-machine: TCP with invite/connect token bootstrap.
 
+## Security model
+
+brackish is local-coordination tooling, **not production-hardened multi-tenant infrastructure**. The trust model:
+
+- **Unix socket (same machine):** peer-trust. Anyone who can write to `~/.brackish/brackish.sock` is treated as a trusted local peer; the filesystem permission (`0600`) is the gate. The self-declared `X-Brackish-Identity` header is taken at face value. Use this for local Claude pairs.
+- **TCP (cross machine):** bearer-token auth via `Authorization: Bearer <token>`. Tokens are 256-bit random, hashed at rest (sha256), and minted only by redeeming a one-time invite. Per-document ACLs gate every doc-scoped endpoint — TCP peers see only docs they've been explicitly granted. Failed-bearer attempts are rate-limited (20/min per source IP), as are invite-redemption attempts (10/min per IP).
+- **Browser UI:** one-time tokens (OTT, 60s) exchange for an `HttpOnly; SameSite=Strict` cookie at `GET /ui-login`. No tokens in URL query strings.
+
+What this does **not** give you:
+
+- TLS. Bearer tokens travel in plaintext on the TCP socket. Default `--bind` is loopback (`127.0.0.1:11442`) for a reason; pass `--bind 0.0.0.0` only on networks you trust, or place brackish behind an upstream TLS-terminating proxy.
+- Defense against a compromised peer machine. A peer with valid tokens is trusted within the scope of their grants.
+- An audit log / SIEM hookup. Rate-limit refusals log to `serve.log`; everything else stays in the daemon's normal logs.
+
+If you want a multi-tenant API contract server with real auth — brackish isn't it. If you want two Claudes on adjacent machines to converge on an OpenAPI doc without stomping on each other — brackish.
+
 ## Install
 
 ```sh

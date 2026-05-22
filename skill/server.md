@@ -8,9 +8,11 @@ You're the source of truth for what the API actually emits. Your job is to drop 
 
 **Cross-machine** (peer is on a different host):
 ```
-brackish up --bind
+brackish up --bind 0.0.0.0           # LAN-reachable — ONLY on networks you trust
 ```
-Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind`.
+Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind 0.0.0.0`. The bare `--bind` form (without an address) defaults to `127.0.0.1` since 0.6.0, which is loopback-only and the peer on another host CANNOT reach it. brackish will print a warning banner when you bind non-loopback — surface that to the human.
+
+Before running this, confirm with the human (via AskUserQuestion) that LAN exposure is what they want. If they want broader reach, suggest a TLS-terminating reverse proxy rather than direct `--bind 0.0.0.0`.
 
 **Same-machine** (peer Claude is on the same host):
 ```

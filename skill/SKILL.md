@@ -19,11 +19,13 @@ Skip brackish if the contract is purely internal, the API is already shipped, or
 
 1. **What scope is the other Claude implementing — what should this API negotiation cover?** (e.g. "the full data pipeline", "just the auth endpoints", "everything under /v2/orders/*")
 2. **What name should the OpenAPI document use?** (typically the API name or the cwd repo name — e.g. `orders-api`, `payments-api`)
-3. **Where is the other Claude running?** ("same machine" → use socket transport, no invite needed; "different machine" → mint a `/brackish connect` line)
+3. **Where is the other Claude running?** ("same machine" → use socket transport, no invite needed; "different machine" → ask which bind address: loopback only works if the peer is on the same host; LAN-reachable needs `--bind 0.0.0.0` and ONLY if the network is trusted)
 
 Wait for the answers before running anything — don't `brackish up`, don't `brackish doc new`, don't invite a peer until you have them. The scope answer becomes the chat message you send right after creating the doc; both sides refer back to it for "is this in scope?" decisions.
 
 If the human's invocation already supplies an answer (e.g. `/brackish invite mac2 — just the chat endpoints`), paraphrase back and skip that question.
+
+**Bind default changed in 0.6.0.** Bare `brackish serve --bind` and `brackish up --bind` now default to `127.0.0.1:11442` (loopback) — a peer on a different machine **cannot reach** that. If the human says "different machine", confirm with them whether `--bind 0.0.0.0` (LAN-reachable, trusted networks only) is what they want before running it. brackish prints a security warning when you bind non-loopback; surface that to the human.
 
 ## Pick your role + load the matching subfile
 
