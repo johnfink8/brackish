@@ -97,7 +97,7 @@ export function register(program: Command): void {
     .description('start the brackish daemon (Unix socket always; --bind also opens TCP)')
     .option(
       '--bind [addr]',
-      'enable TCP. Bare `--bind` → 0.0.0.0:11442; `--bind 0.0.0.0` → default port; `--bind 0.0.0.0:8080` → exact',
+      'enable TCP. Bare `--bind` → 127.0.0.1:11442 (loopback); pass `--bind 0.0.0.0` to expose on the LAN; `--bind 0.0.0.0:8080` → exact host+port',
     )
     .option('--socket <path>', 'override socket path')
     .option('--data <path>', 'override sqlite db path')
@@ -222,7 +222,7 @@ export function register(program: Command): void {
     )
     .option(
       '--bind [addr]',
-      'enable TCP on the spawned daemon; bare `--bind` defaults to 0.0.0.0:11442',
+      'enable TCP on the spawned daemon; bare `--bind` defaults to 127.0.0.1:11442 (loopback)',
     )
     .option(
       '--identity <name>',
