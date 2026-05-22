@@ -7,6 +7,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import { stringify as yamlStringify } from 'yaml';
+import { ZodError } from 'zod';
 import pkg from '../../package.json' with { type: 'json' };
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
 import { generatePatch } from '../lib/diff.js';
@@ -65,11 +66,22 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
 
-  // Centralized error mapping for StoreError -> HTTP status.
+  // Centralized error mapping. Three classes get specific status codes; everything
+  // else is logged and surfaces as 500.
   app.onError((err, c) => {
     if (err instanceof StoreError) {
       const status = storeErrorStatus(err.code);
       return c.json({ error: err.message, code: err.code }, status);
+    }
+    if (err instanceof HttpError) {
+      return c.json({ error: err.message }, err.status);
+    }
+    if (err instanceof ZodError) {
+      const issues = err.issues.map((i) => ({
+        field: i.path.join('.') || '(root)',
+        message: i.message,
+      }));
+      return c.json({ error: 'validation failed', code: 'bad_request', issues }, 400);
     }
     console.error('[brackish] unhandled error:', err);
     return c.json({ error: 'internal server error' }, 500);

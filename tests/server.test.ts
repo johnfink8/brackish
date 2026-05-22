@@ -165,6 +165,34 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('error mapping', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 't' } });
+    });
+
+    it('returns 400 (not 500) when a query param fails HttpError validation', async () => {
+      // `since=abc` triggers HttpError(400) inside parseSince. Currently that error
+      // class isn't caught by app.onError, so the handler falls through to the generic
+      // 500 path — the targeted bug.
+      const res = await call('GET', '/documents/t/events?since=abc');
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('since');
+    });
+
+    it('returns 400 (not 500) when a request body fails zod validation', async () => {
+      // Empty message text fails SendMessageRequestSchema (min(1)). The ZodError isn't
+      // a StoreError, so the current code returns 500.
+      const res = await call('POST', '/documents/t/messages', { body: { text: '' } });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 (not 500) when a path param fails identity validation', async () => {
+      const res = await call('GET', '/documents/NOT-VALID');
+      expect(res.status).toBe(400);
+    });
+  });
+
   describe('long-poll wait', () => {
     beforeEach(async () => {
       await call('POST', '/documents', { body: { name: 't' } });
