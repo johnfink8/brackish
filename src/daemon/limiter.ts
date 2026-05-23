@@ -1,8 +1,8 @@
 // In-process token-bucket rate limiter for the brackish daemon's TCP attack surface.
 //
-// Three integration points (see server.ts): /connect (invite redemption) keyed by IP,
-// failed bearer-auth lookups keyed by IP, and POST /ui-sessions keyed by identity.
-// Socket-transport callers bypass — peer-trust + filesystem perms already gate access.
+// Two integration points (see server.ts): /connect (invite redemption) keyed by IP, and
+// failed bearer-auth lookups keyed by IP. Socket-transport callers bypass — peer-trust
+// + filesystem perms already gate access.
 //
 // The limiter is deliberately simple: a Map<key, bucket> with periodic sweep. No Redis,
 // no external state — the brackish daemon is a single-process node service, and adding
