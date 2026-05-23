@@ -6,12 +6,15 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { stringify as yamlStringify } from 'yaml';
+import { ZodError } from 'zod';
 import pkg from '../../package.json' with { type: 'json' };
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
 import { generatePatch } from '../lib/diff.js';
 import {
   AcceptArtifactRequestSchema,
+  AddMemberRequestSchema,
   type ConventionSpec,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
@@ -23,8 +26,8 @@ import {
   IdentitySchema,
   type JSONSchema,
   type OperationSpec,
+  operationIdentityKey,
   ProposeBatchRequestSchema,
-  type ProposeBatchResponse,
   ProposeConventionRequestSchema,
   ProposeEndpointRequestSchema,
   ProposeSchemaRequestSchema,
@@ -39,6 +42,7 @@ import type { assembleDocument } from '../lib/openapi.js';
 import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
+import { RateLimiter } from './limiter.js';
 import { operationKey, projectDocument } from './projection.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
@@ -65,11 +69,53 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
 
-  // Centralized error mapping for StoreError -> HTTP status.
+  // TCP-only rate limiters. Socket callers bypass each one (peer-trust + the
+  // filesystem permission on the socket already gate access). Keys are source IP.
+  const connectLimiter = new RateLimiter({ burst: 10, windowSeconds: 60 });
+  const failedAuthLimiter = new RateLimiter({ burst: 20, windowSeconds: 60 });
+
+  const sourceIp = (c: import('hono').Context<AppEnv>): string =>
+    c.env.incoming.socket.remoteAddress ?? 'unknown';
+
+  const isTcp = (c: import('hono').Context<AppEnv>): boolean => {
+    const addr = c.env.incoming.socket.address?.();
+    return Boolean(addr && typeof addr === 'object' && 'port' in addr);
+  };
+
+  /** Doc-scoped ACL gate. Sock transport bypasses (peer-trust); TCP enforces membership.
+   *  Returns null when access is allowed, or a Response (404/403) to short-circuit. */
+  const requireMember = async (
+    c: import('hono').Context<AppEnv>,
+    docName: DocumentName,
+  ): Promise<Response | null> => {
+    if (c.get('transport') === 'sock') return null;
+    const doc = await store.getDocument(docName);
+    if (!doc) {
+      return c.json({ error: `document "${docName}" not found`, code: 'document_not_found' }, 404);
+    }
+    const ok = await store.isMember(docName, c.get('identity'));
+    if (!ok) {
+      return c.json({ error: `not a member of "${docName}"`, code: 'forbidden' }, 403);
+    }
+    return null;
+  };
+
+  // Centralized error mapping. Three classes get specific status codes; everything
+  // else is logged and surfaces as 500.
   app.onError((err, c) => {
     if (err instanceof StoreError) {
       const status = storeErrorStatus(err.code);
       return c.json({ error: err.message, code: err.code }, status);
+    }
+    if (err instanceof HttpError) {
+      return c.json({ error: err.message }, err.status);
+    }
+    if (err instanceof ZodError) {
+      const issues = err.issues.map((i) => ({
+        field: i.path.join('.') || '(root)',
+        message: i.message,
+      }));
+      return c.json({ error: 'validation failed', code: 'bad_request', issues }, 400);
     }
     console.error('[brackish] unhandled error:', err);
     return c.json({ error: 'internal server error' }, 500);
@@ -80,6 +126,15 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/healthz', (c) => c.json({ ok: true, version: SERVER_VERSION }));
 
   app.post('/connect', async (c) => {
+    if (isTcp(c)) {
+      const key = `connect:${sourceIp(c)}`;
+      if (!connectLimiter.tryConsume(key)) {
+        const retry = connectLimiter.retryAfterSeconds(key);
+        c.header('Retry-After', String(retry));
+        console.warn(`[brackish] rate-limited /connect from ${sourceIp(c)}`);
+        return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
+      }
+    }
     const body = RedeemInviteRequestSchema.parse(await c.req.json());
     const { identity, token } = await store.redeemInvite(body.inviteToken);
     return c.json({ identity, token });
@@ -87,11 +142,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   // --- authenticated routes ---
 
+  const authMiddleware = makeAuthMiddleware(store, { failedAuthLimiter });
   const auth = app.use('*', async (c, next) => {
-    // /healthz and /connect are public; skip auth for them.
+    // /healthz and /connect are public; skip auth for them. Browser UI access at
+    // /ui/* is handled inside the auth middleware itself (public on loopback TCP).
     const path = new URL(c.req.url).pathname;
     if (path === '/healthz' || path === '/connect') return next();
-    return makeAuthMiddleware(store)(c, next);
+    return authMiddleware(c, next);
   });
   void auth;
 
@@ -99,7 +156,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.post('/invites', async (c) => {
     const body = CreateInviteRequestSchema.parse(await c.req.json());
-    const invite = await store.createInvite(body.identity, body.ttlSeconds);
+    const invite = await store.createInvite(body.identity, body.ttlSeconds, body.grantDocs ?? []);
     return c.json({
       inviteToken: invite.token,
       identity: invite.identity,
@@ -121,7 +178,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   // --- documents ---
 
   app.get('/documents', async (c) => {
-    const documents = await store.listDocuments();
+    // TCP callers see only docs they're a member of; sock peers (peer-trust) see all.
+    const documents =
+      c.get('transport') === 'sock'
+        ? await store.listDocuments()
+        : await store.listDocumentsForMember(c.get('identity'));
     return c.json({ documents });
   });
 
@@ -131,8 +192,20 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json(document, 201);
   });
 
+  // Middleware: every doc-scoped route (everything matching /documents/:name/*) is
+  // gated on ACL membership for TCP callers; sock callers bypass (peer-trust). We
+  // attach this BEFORE the routes themselves so per-handler bodies stay clean.
+  app.use('/documents/:name/*', async (c, next) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const denied = await requireMember(c, docName);
+    if (denied) return denied;
+    await next();
+  });
+
   app.get('/documents/:name', async (c) => {
     const name = DocumentNameSchema.parse(c.req.param('name'));
+    const denied = await requireMember(c, name);
+    if (denied) return denied;
     const t = await store.getDocument(name);
     if (!t)
       return c.json({ error: `document "${name}" not found`, code: 'document_not_found' }, 404);
@@ -230,58 +303,49 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       );
     }
 
-    // All-or-nothing commit. The store doesn't have a transaction primitive exposed across
-    // artifact kinds, so we issue the proposes sequentially in convention → schemas →
-    // endpoints order. Since the doc is already meta-schema-valid as a whole, individual
-    // proposes can land in any order without ref errors.
+    // Atomic commit via Store.batchPropose: one outer SQLite transaction wraps the
+    // per-artifact proposes as savepoints. Any failure mid-batch rolls back every
+    // earlier propose, so partial state is impossible. The doc was already validated
+    // as a whole above, so individual proposes resolve refs correctly.
     const identity = c.get('identity');
-    const succeeded: ProposeBatchResponse['succeeded'] = [];
+    const input: import('./store/index.js').BatchProposeInput = {};
+    if (body.convention) {
+      input.convention = { spec: body.convention.spec };
+      const opts = toProposeOptions(body.convention.options);
+      if (Object.keys(opts).length > 0) input.convention.opts = opts;
+    }
+    if (body.schemas) {
+      input.schemas = body.schemas.map((s) => {
+        const item: NonNullable<typeof input.schemas>[number] = { name: s.name, spec: s.spec };
+        const opts = toProposeOptions(s.options);
+        if (Object.keys(opts).length > 0) item.opts = opts;
+        return item;
+      });
+    }
+    if (body.endpoints) {
+      input.endpoints = body.endpoints.map((e) => {
+        const item: NonNullable<typeof input.endpoints>[number] = {
+          method: e.method,
+          path: e.path,
+          spec: e.spec,
+        };
+        const opts = toProposeOptions(e.options);
+        if (Object.keys(opts).length > 0) item.opts = opts;
+        return item;
+      });
+    }
     try {
-      if (body.convention) {
-        const env = await store.proposeConvention(
-          docName,
-          body.convention.spec,
-          identity,
-          toProposeOptions(body.convention.options),
-        );
-        succeeded.push({ kind: 'convention', envelope: env });
-      }
-      if (body.schemas) {
-        for (const s of body.schemas) {
-          const env = await store.proposeSchema(
-            docName,
-            s.name,
-            s.spec,
-            identity,
-            toProposeOptions(s.options),
-          );
-          succeeded.push({ kind: 'schema', name: s.name, envelope: env });
-        }
-      }
-      if (body.endpoints) {
-        for (const e of body.endpoints) {
-          const env = await store.proposeEndpoint(
-            docName,
-            e.method,
-            e.path,
-            e.spec,
-            identity,
-            toProposeOptions(e.options),
-          );
-          succeeded.push({ kind: 'endpoint', method: e.method, path: e.path, envelope: env });
-        }
-      }
+      const succeeded = await store.batchPropose(docName, input, identity);
+      return c.json({ succeeded }, 201);
     } catch (err) {
-      // A propose mid-batch failed (almost always a concurrency conflict: another peer raced
-      // a write between our validation pass and this commit). Surface what we did write so the
-      // caller can reconcile, plus the failure shape that mirrors the per-propose error
-      // envelope.
+      // The whole batch rolled back. Surface the failure shape (mirroring per-propose
+      // errors) so the caller can reconcile, with no `succeeded` field — atomic means
+      // there is nothing partial to report.
       const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
       const message = err instanceof Error ? err.message : String(err);
       const code = err instanceof StoreError ? err.code : null;
-      return c.json({ error: message, code, succeeded }, status);
+      return c.json({ error: message, code }, status);
     }
-    return c.json({ succeeded }, 201);
   });
 
   // --- endpoints (operation artifacts) ---
@@ -420,8 +484,14 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/documents/:name/endpoints/:id/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const { method, path } = decodeEndpointId(c.req.param('id'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getEndpointByVersion(docName, method, path, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getEndpointByVersion(docName, method, path, v),
+      // `operationIdentityKey` (uppercase method) is the store's keying scheme — must match
+      // the keys used by every other endpoint store call. The projection's `operationKey`
+      // is lowercase and applies only to projection-internal overlay maps.
+      () => store.latestVersion(docName, 'operation', operationIdentityKey(method, path)),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
@@ -554,8 +624,11 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   app.get('/documents/:name/schemas/:schemaName/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const schemaName = SchemaNameSchema.parse(c.req.param('schemaName'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getSchemaByVersion(docName, schemaName, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getSchemaByVersion(docName, schemaName, v),
+      () => store.latestVersion(docName, 'schema', schemaName),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
@@ -662,12 +735,55 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
 
   app.get('/documents/:name/convention/diff', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
-    const { from, to } = await resolveDiffRange(c.req.query('from'), c.req.query('to'), async (v) =>
-      store.getConventionByVersion(docName, v),
+    const { from, to } = await resolveDiffRange(
+      c.req.query('from'),
+      c.req.query('to'),
+      async (v) => store.getConventionByVersion(docName, v),
+      () => store.latestVersion(docName, 'convention', 'convention'),
     );
     if (!from || !to) return c.json({ error: 'not enough versions to diff' }, 404);
     const patch = generatePatch(from.spec, to.spec);
     return c.json({ fromVersion: from.version, toVersion: to.version, patch });
+  });
+
+  // --- membership management ---
+  //
+  // Sock callers (peer-trust) can manage any doc's membership. TCP callers need to be
+  // an owner of the doc to grant/revoke; reading the member list requires membership.
+
+  const isOwner = async (
+    c: import('hono').Context<AppEnv>,
+    docName: DocumentName,
+  ): Promise<boolean> => {
+    if (c.get('transport') === 'sock') return true;
+    const members = await store.listDocumentMembers(docName);
+    return members.some((m) => m.identity === c.get('identity') && m.role === 'owner');
+  };
+
+  app.get('/documents/:name/members', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const members = await store.listDocumentMembers(docName);
+    return c.json({ members });
+  });
+
+  app.post('/documents/:name/members', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    if (!(await isOwner(c, docName))) {
+      return c.json({ error: 'owner-only', code: 'forbidden' }, 403);
+    }
+    const body = AddMemberRequestSchema.parse(await c.req.json());
+    await store.addDocumentMember(docName, body.identity, body.role, c.get('identity'));
+    return c.json({ ok: true }, 201);
+  });
+
+  app.delete('/documents/:name/members/:identity', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    if (!(await isOwner(c, docName))) {
+      return c.json({ error: 'owner-only', code: 'forbidden' }, 403);
+    }
+    const target = IdentitySchema.parse(c.req.param('identity'));
+    await store.removeDocumentMember(docName, target);
+    return c.json({ ok: true });
   });
 
   // --- render routes (used by visualize CLI + browser UI) ---
@@ -735,6 +851,7 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     case 'cannot_accept_own':
     case 'cannot_reject_own':
     case 'cannot_withdraw_others':
+    case 'forbidden':
       return 403;
     default:
       return 400;
@@ -890,6 +1007,7 @@ async function resolveDiffRange<T extends VersionedSpec | null>(
   fromRaw: string | undefined,
   toRaw: string | undefined,
   fetchByVersion: (v: number) => Promise<T>,
+  latestVersion: () => Promise<number | null>,
 ): Promise<{ from: VersionedSpec | null; to: VersionedSpec | null }> {
   // Defaults: --to is the latest existing version; --from is to-1 if not given.
   const toV = toRaw !== undefined ? Number.parseInt(toRaw, 10) : NaN;
@@ -900,13 +1018,10 @@ async function resolveDiffRange<T extends VersionedSpec | null>(
     const v = await fetchByVersion(toV);
     if (v) to = { version: v.version, spec: v.spec };
   } else {
-    // Walk down from a high version until we find one. For typical use the agent will pass --to.
-    for (let v = 50; v >= 1; v--) {
-      const found = await fetchByVersion(v);
-      if (found) {
-        to = { version: found.version, spec: found.spec };
-        break;
-      }
+    const max = await latestVersion();
+    if (max !== null) {
+      const v = await fetchByVersion(max);
+      if (v) to = { version: v.version, spec: v.spec };
     }
   }
   if (!to) return { from: null, to: null };
@@ -1007,7 +1122,7 @@ async function advanceCursorForRead(
 
 export class HttpError extends Error {
   constructor(
-    readonly status: number,
+    readonly status: ContentfulStatusCode,
     message: string,
   ) {
     super(message);

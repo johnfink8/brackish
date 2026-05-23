@@ -142,7 +142,7 @@ description: |
 
 Two agents can independently decide to propose the same identity at roughly the same time. Three opt-in flags guard every `propose`:
 
-- **`--expected-new`** — use for any first proposal. Refuses if any version exists. On 409: the other side already proposed; read with `brackish <kind> show <id> --proposed` and react.
+- **`--expected-new`** — use for any first proposal. Refuses if any version exists. On 409: the other side already proposed; read with `brackish <kind> show <id>` and react.
 - **`--expected-version <N>`** — use for revisions. Refuses unless latest is exactly N (any status). On 409 `version_mismatch`: the peer slipped in their own N+1; re-read and reconcile.
 - **`--force`** — only meaningful without `--expected-*`. Lets you stack a counter-proposal on top of an unresolved `proposed` version. Normal counter-proposal recipe is **reject first, then propose** with `--expected-new`; `--force` is for the rare case where you want both versions visible side-by-side.
 

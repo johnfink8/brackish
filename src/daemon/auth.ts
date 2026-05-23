@@ -7,10 +7,16 @@
 //
 // TCP transport (bearer-token): require `Authorization: Bearer <token>`; look up the identity
 // via the parties/party_tokens tables. Identity is unspoofable on this path.
+//
+// `/ui/*` is a narrow exception on loopback TCP: browser navigations to localhost don't carry
+// Authorization headers, so requiring bearer there would make the local browser UI unusable.
+// Loopback is the trust boundary — anyone who can connect to 127.0.0.1 is already a local user.
+// Cross-machine browser UI is an explicit non-goal; ssh-forward to loopback, or use the CLI.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context, MiddlewareHandler } from 'hono';
 import { type Identity, IdentitySchema } from '../lib/models.js';
+import type { RateLimiter } from './limiter.js';
 import type { Store } from './store/index.js';
 
 export type Transport = 'sock' | 'tcp';
@@ -41,6 +47,17 @@ export function detectTransport(socket: SocketLike): Transport {
   return 'sock';
 }
 
+/** True if the remote address is on the local loopback (IPv4 127/8 or IPv6 ::1).
+ *  Used to gate the `/ui/*` no-auth bypass: only requests sourced from the same host
+ *  qualify, so cross-machine browser UI is not reachable without explicit bearer auth. */
+export function isLoopbackAddress(remoteAddress: string | undefined): boolean {
+  if (!remoteAddress) return false;
+  // node:net normalizes ::ffff:127.0.0.1 for IPv4-mapped clients; handle both forms.
+  const addr = remoteAddress.replace(/^::ffff:/, '');
+  if (addr === '::1') return true;
+  return addr.startsWith('127.');
+}
+
 const HEADER_IDENTITY = 'X-Brackish-Identity';
 
 /**
@@ -49,6 +66,7 @@ const HEADER_IDENTITY = 'X-Brackish-Identity';
  */
 export function makeAuthMiddleware(
   store: Store,
+  opts: { failedAuthLimiter?: RateLimiter } = {},
 ): MiddlewareHandler<{ Variables: AppVariables; Bindings: AppBindings }> {
   return async (c, next) => {
     const transport = detectTransport(c.env.incoming.socket);
@@ -70,28 +88,47 @@ export function makeAuthMiddleware(
       return;
     }
 
-    // TCP path: bearer token (Authorization header preferred; ?token=… query param accepted as
-    // a fallback so browsers visiting /ui/<doc> can authenticate from a URL).
-    const authHeader = c.req.header('Authorization');
-    const queryToken = c.req.query('token');
-    let token: string | undefined;
-    if (authHeader?.startsWith('Bearer ')) {
-      token = authHeader.slice('Bearer '.length).trim();
-    } else if (queryToken && queryToken.length > 0) {
-      token = queryToken;
+    // TCP path. Browser-UI exception: /ui/* is public on loopback. The `/ui/<doc>`
+    // handler inlines the spec/rationale/events into the rendered HTML, so the page
+    // is self-contained — no follow-up API calls leave the browser, so no further
+    // auth surface is exposed by this bypass.
+    const path = new URL(c.req.url).pathname;
+    if (path.startsWith('/ui') && isLoopbackAddress(c.env.incoming.socket.remoteAddress)) {
+      await next();
+      return;
     }
+
+    // TCP path, bearer-only via Authorization header. The legacy `?token=` query-string
+    // fallback was removed — query tokens leak via Referer, access logs, browser
+    // history, and shared URLs.
+    const authHeader = c.req.header('Authorization');
+    const token = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : undefined;
+    const ip = c.env.incoming.socket.remoteAddress ?? 'unknown';
+    const limiter = opts.failedAuthLimiter;
+    const limiterKey = `auth:${ip}`;
+    // The limiter throttles FAILED auths only — successful Bearer requests don't
+    // consume a slot. If prior failures already filled the bucket, deny up front.
+    if (limiter?.isExhausted(limiterKey)) {
+      const retry = limiter.retryAfterSeconds(limiterKey);
+      c.header('Retry-After', String(retry));
+      console.warn(`[brackish] rate-limited TCP auth from ${ip}`);
+      return c.json({ error: 'too many requests', code: 'rate_limited' }, 429);
+    }
+    const failAuth = (msg: string, errBody: object): Response => {
+      if (limiter) limiter.tryConsume(limiterKey);
+      console.warn(`[brackish] ${msg} from ${ip}`);
+      return c.json(errBody, 401);
+    };
     if (!token) {
-      return c.json(
-        {
-          error:
-            'Authorization: Bearer <token> required for TCP transport (or ?token=… query param for browser URLs)',
-        },
-        401,
-      );
+      return failAuth('missing bearer', {
+        error: 'Authorization: Bearer <token> required for TCP transport',
+      });
     }
     const identity = await store.getIdentityForToken(token);
     if (!identity) {
-      return c.json({ error: 'invalid token' }, 401);
+      return failAuth('invalid bearer', { error: 'invalid token' });
     }
     await store.touchPartySeen(identity);
     c.set('identity', identity);

@@ -148,8 +148,9 @@ export function saveServerConfig(
 /** Default TCP port used when --bind is given without one (e.g. `--bind 0.0.0.0` → 0.0.0.0:11442). */
 export const DEFAULT_BIND_PORT = 11442;
 
-/** Default `--bind` value used when the flag is passed alone (e.g. `--bind` → 0.0.0.0:11442). */
-export const DEFAULT_BIND_ADDR = `0.0.0.0:${DEFAULT_BIND_PORT}`;
+/** Default `--bind` value used when the flag is passed alone (e.g. `--bind` → 127.0.0.1:11442).
+ *  Loopback-only — pass `--bind 0.0.0.0` explicitly to expose on the LAN. */
+export const DEFAULT_BIND_ADDR = `127.0.0.1:${DEFAULT_BIND_PORT}`;
 
 /**
  * Parse a bind spec into structured form. Accepts:

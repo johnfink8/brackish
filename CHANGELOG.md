@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-05-22
+
+Security-and-correctness pass plus a CLI refresh driven by real chat-app trials. The eleven security fixes are the headline — XSS, prompt-injection, default-bind exposure, error-mapping holes, partial-commit semantics, capped diff resolution, plaintext token storage, missing per-document ACLs, query-string token leakage, missing rate limiting, and the absence of explicit "not production-hardened" framing. Each has a red test that demonstrates the targeted exploit/bug before the change and turns green after. After the security pass, seven trial runs surfaced a second batch of model-facing CLI polish — `show` simplified, `--rationale` symmetric on reject, status annotates blocked-on refs, skill ships a verb cheat sheet.
+
+### Security
+
+- XSS in `/ui/<doc>` (script-tag breakout): inlined spec/rationale/events JSON now escapes `<` and U+2028/U+2029 so peer-supplied strings can't close the outer `<script>` and execute as HTML.
+- Prompt-injection of the local Claude via the UserPromptSubmit hook: inbox previews neutralize angle brackets in peer-supplied text (message bodies, rejection reasons, delta strings), and the hook moves peer content out of the `<system-reminder>` block into a labeled `<untrusted_user_content>` block.
+- Tokens are stored hashed (sha256) at rest. Both persistent peer tokens and outstanding invite tokens migrate in place on first startup; the raw token only ever lives on the peer side. Malformed `expires_at` columns now fail-closed (treat as expired) instead of fail-open via `Date.parse() === NaN`.
+- Per-document ACLs gate every doc-scoped TCP endpoint. Document creators are owners; other parties access docs only if explicitly granted (via `brackish doc grant` or `brackish invite --grant <doc>`). Socket peers retain peer-trust.
+- Token-in-URL-query (`?token=`) auth fallback removed. Browser UI is now reachable only on loopback TCP, without auth — anyone who can connect to `127.0.0.1` already qualifies as a local user. Cross-machine browser UI is explicitly not supported; ssh-forward to loopback, or use the CLI. Tokens never appear in URLs, logs, browser history, or Referer headers.
+- Rate limiting on `/connect` (10/min per source IP) and failed bearer auth (20/min per IP). Socket peers bypass.
+
+### Added
+
+- `brackish doc grant <doc> <identity>` / `brackish doc revoke <doc> <identity>` / `brackish doc members <doc>` for managing per-document ACLs.
+- `brackish invite --grant <doc>` (repeatable, also accepts comma-separated) — the redeeming peer automatically becomes a member of each named doc.
+- `brackish status <doc>` annotates each row with `(blocked on: X, Y)` when a proposal's `$ref`s point at schemas that aren't accepted yet — so the model sees ref-blocked artifacts before attempting an accept that would fail validation.
+- `--rationale "<text>"` on `<kind> reject` as an alias for the positional reason — symmetric with `accept --rationale`. Either positional or flag form works; passing both errors.
+- `SKILL.md` verb cheat sheet: one-line description + sample for every brackish command type, grouped by daemon/identity, ACL, propose, accept-reject-withdraw, diff, lint, visualize, wait. Comprehensive based on what models actually reach for in trials.
+- README: new "Security model" section describing the trust boundary, transport assumptions, and what brackish is not.
+- `serve` stderr banner: positive "loopback only — NOT externally reachable" line on `127.0.0.1` binds; warning banner naming the address on any non-loopback bind. Suppressible via `BRACKISH_QUIET_BIND_WARNING=1`.
+
+### Changed
+
+- Bare `brackish serve --bind` (and `brackish up --bind`) defaults to `127.0.0.1:11442`. Pass `--bind 0.0.0.0` explicitly to expose on the LAN. **Breaking** for cross-machine setups using the bare flag.
+- `<kind> show <doc> <id>` always returns whatever's live, tagged by status — accepted, proposed, or both if both exist (the latter case adds a `delta vs accepted` annotation on the proposed). The `--proposed` flag was removed (always-tagged output makes it redundant); `--full` is accepted as a silent no-op for callers that still pass it.
+- `app.onError` maps `HttpError` (query-param validation) and `ZodError` (body / param zod validation) to 400 instead of 500. Surfaces the actual validation message instead of "internal server error".
+- `propose-batch` is now truly atomic: a new `Store.batchPropose` wraps all per-artifact proposes in a single SQLite transaction with savepoints. Partial commit is impossible — a mid-batch failure rolls back every earlier propose. The response shape no longer carries a partial `succeeded` field on error.
+- Diff endpoint resolves the default `--to` via `MAX(version)` instead of linearly probing versions 50→1, so artifacts with more than 50 versions diff correctly without an explicit `--to`.
+- Skill `SKILL.md` and `server.md` teach the new bind default: agents now ask the human about connectivity intent (loopback vs LAN-reachable) before binding cross-machine.
+
+### Fixed
+
+- Diff endpoint key-case mismatch: server's diff lookup used the projection's lowercase `operationKey` instead of the store's uppercase `operationIdentityKey`, causing every endpoint diff to 404. Caught by a new full-journey integration test that walks the entire skill flow (doc-grant through visualize) end-to-end in ~100ms.
+
+### Breaking
+
+- `--bind` default switched from `0.0.0.0` to `127.0.0.1`. Re-launch cross-machine daemons with `--bind 0.0.0.0` explicitly.
+- TCP `?token=` query-string auth fallback removed. Browser callers visit `/ui/<doc>` on loopback (no auth required there); CLI callers must use the `Authorization: Bearer` header.
+- Per-document ACL enforcement on TCP. Existing docs auto-grant their `created_by` as owner via migration; pre-0.6.0 TCP peers other than the doc creator must be added explicitly with `brackish doc grant`.
+- Token-at-rest format change. The migration rehashes existing tokens in place on first startup; peers don't need to re-redeem. The raw `token` column is replaced by `token_hash`.
+- `Store.createInvite` interface grew an optional `grantDocs` array; external Store implementations need to handle it (or ignore via default `[]`).
+- The `propose-batch` HTTP response on failure no longer includes a `succeeded` list — the operation is all-or-nothing.
+- `<kind> show --proposed` flag removed. Bare `show` now returns whatever's live (tagged), so callers no longer need to pick. `--full` is accepted as a no-op for back-compat with callers that habitually pass it. JSON output shape changed from a single envelope to `{accepted?, proposed?, deltaVsAccepted?}`.
+
 ## [0.5.3] - 2026-05-22
 
 ### Added

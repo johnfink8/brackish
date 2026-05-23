@@ -221,7 +221,7 @@ function formatRationaleEntry(e: RationaleEntry): string {
 // --- html (Swagger UI via CDN + rationale sidebar) ---
 
 export function renderHtml(input: RenderInput, opts: { documentName: string }): string {
-  const specJson = JSON.stringify(input.document);
+  const specJson = jsonForHtml(input.document);
   const rationale = input.rationale ?? { endpoints: new Map(), schemas: new Map(), convention: [] };
 
   // Pre-render each version's spec to a YAML string so the browser doesn't need a YAML
@@ -230,7 +230,7 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
     ...e,
     specYaml: e.spec === undefined || e.spec === null ? '' : yamlStringify(e.spec).trimEnd(),
   });
-  const rationaleJson = JSON.stringify({
+  const rationaleJson = jsonForHtml({
     endpoints: Object.fromEntries(
       Array.from(rationale.endpoints, ([k, vs]) => [k, vs.map(withYaml)]),
     ),
@@ -239,7 +239,7 @@ export function renderHtml(input: RenderInput, opts: { documentName: string }): 
   });
   // Pass the raw event stream through; the client renders it as a chronological timeline,
   // looking up spec bodies in the rationale map for propose events.
-  const eventsJson = JSON.stringify(input.events ?? []);
+  const eventsJson = jsonForHtml(input.events ?? []);
   // Inline the rationale JSON so the page works offline once Swagger UI is cached.
   return `<!doctype html>
 <html lang="en">
@@ -377,4 +377,16 @@ function escapeHtml(s: string): string {
     };
     return map[c] ?? c;
   });
+}
+
+// JSON-stringify for inlining inside a <script> block. Plain JSON.stringify leaves
+// `</script>` literals intact in string values, which closes the surrounding script
+// element and lets peer-controlled string fields execute as HTML. Escaping `<` as
+// `<` keeps the JSON valid (JSON.parse still produces `<` at runtime) while making
+// the rendered text unable to form a tag-closer. U+2028 / U+2029 are escaped too to
+// avoid line-terminator issues in older JS parsers.
+function jsonForHtml(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/[\u2028\u2029]/g, (c) => (c === '\u2028' ? '\\u2028' : '\\u2029'));
 }

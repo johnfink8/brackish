@@ -164,8 +164,10 @@ describe('parseBindAddress', () => {
     expect(parseBindAddress('localhost')).toEqual({ host: 'localhost', port: 11442 });
   });
 
-  it('defaults to 0.0.0.0:11442 for empty string', () => {
-    expect(parseBindAddress('')).toEqual({ host: '0.0.0.0', port: 11442 });
+  it('defaults to 127.0.0.1:11442 for empty string (loopback, not LAN-exposed)', () => {
+    // Bare `brackish serve --bind` should bind loopback — users who want LAN
+    // exposure must pass `--bind 0.0.0.0` explicitly.
+    expect(parseBindAddress('')).toEqual({ host: '127.0.0.1', port: 11442 });
   });
 
   it('rejects out-of-range port', () => {

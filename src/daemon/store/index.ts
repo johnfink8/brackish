@@ -204,8 +204,24 @@ export interface Store {
   touchPartySeen(identity: Identity): Promise<void>;
 
   // --- invites ---
-  createInvite(identity: Identity, ttlSeconds: number): Promise<Invite>;
+  createInvite(identity: Identity, ttlSeconds: number, grantDocs?: DocumentName[]): Promise<Invite>;
   redeemInvite(inviteToken: string): Promise<{ identity: Identity; token: string }>;
+
+  // --- per-document ACL (TCP-only enforcement; socket transport bypasses) ---
+  isMember(documentName: DocumentName, identity: Identity): Promise<boolean>;
+  listDocumentsForMember(identity: Identity): Promise<Document[]>;
+  addDocumentMember(
+    documentName: DocumentName,
+    identity: Identity,
+    role: 'owner' | 'member',
+    grantedBy: Identity,
+  ): Promise<void>;
+  removeDocumentMember(documentName: DocumentName, identity: Identity): Promise<void>;
+  listDocumentMembers(
+    documentName: DocumentName,
+  ): Promise<
+    Array<{ identity: Identity; role: 'owner' | 'member'; grantedBy: Identity; grantedAt: string }>
+  >;
 
   // --- cursors (server-tracked per (identity, document)) ---
   getLastSeenCursor(identity: Identity, documentName: DocumentName): Promise<Cursor>;
@@ -214,6 +230,46 @@ export interface Store {
   // --- inbox (cross-document summary for one identity) ---
   inboxSummary(identity: Identity): Promise<InboxEntry[]>;
 
+  // --- diff support ---
+  /** Return the highest existing version number for an artifact regardless of status,
+   *  or null if none. Used by the diff endpoint to default `--to` to the actual latest
+   *  without linearly probing version numbers. */
+  latestVersion(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+  ): Promise<number | null>;
+
+  // --- atomic batch propose ---
+  /**
+   * Atomically propose a coordinated set of artifacts. Runs all per-artifact proposes
+   * inside one transaction — any failure rolls back the whole batch, so partial
+   * state is impossible. The caller is responsible for validating the assembled doc
+   * before invoking this; per-artifact errors here (e.g. version_in_flight from a
+   * racing peer) abort and roll back.
+   */
+  batchPropose(
+    documentName: DocumentName,
+    body: BatchProposeInput,
+    by: Identity,
+  ): Promise<BatchProposeSucceededItem[]>;
+
   // --- lifecycle ---
   close(): Promise<void>;
 }
+
+export type BatchProposeInput = {
+  convention?: { spec: ConventionSpec; opts?: ProposeOptions };
+  schemas?: Array<{ name: SchemaName; spec: JSONSchema; opts?: ProposeOptions }>;
+  endpoints?: Array<{
+    method: HttpMethod;
+    path: string;
+    spec: OperationSpec;
+    opts?: ProposeOptions;
+  }>;
+};
+
+export type BatchProposeSucceededItem =
+  | { kind: 'convention'; envelope: ConventionArtifact }
+  | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
+  | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };

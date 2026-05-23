@@ -2,11 +2,11 @@
 // propose/show/accept/reject/withdraw/diff/lint.
 
 import type { Command } from 'commander';
-import { stringify as yamlStringify } from 'yaml';
+import { compactSummary, generatePatch } from '../lib/diff.js';
 import { lintConventionSpec } from '../lib/lint.js';
 import { type ConventionSpec, ConventionSpecSchema } from '../lib/models.js';
 import { loadSpecFile, parseSpecFile } from '../lib/specfile.js';
-import { describeConvention } from '../render/output.js';
+import { describeConvention, renderTaggedShow } from '../render/output.js';
 import {
   type ConcurrencyOpts,
   collect,
@@ -14,9 +14,11 @@ import {
   emitDiff,
   emitJson,
   emitRenderedDiff,
-  fetchOrFallback,
+  errExit,
   finalizeLint,
+  getOrNull,
   parseConcurrencyOpts,
+  resolveRejectReason,
   warnFileClobbers,
   withClient,
 } from './common.js';
@@ -106,20 +108,29 @@ export function register(program: Command): void {
 
   convention
     .command('show <doc>')
-    .option('--proposed')
-    .option('--full')
+    .description(
+      'show the document convention, tagged by status. Shows accepted+proposed if both exist (rare: peer revising an already-accepted convention). For version-history walks, use `convention diff --from N --to M`.',
+    )
+    // `--full` is a no-op alias. Claude is the primary caller of this CLI and reaches
+    // for `--full` consistently when fetching a body — the tagged-show output always
+    // includes the body, so the flag is harmless and accepted silently.
+    .option('--full', 'no-op (body is always included; Claude callers tend to pass it anyway)')
     .option('--json')
-    .action(async (doc: string, opts: { proposed?: boolean; full?: boolean; json?: boolean }) =>
+    .action(async (doc: string, opts: { json?: boolean }) =>
       withClient(async (client) => {
-        const v = await fetchOrFallback(
-          () =>
-            opts.proposed ? client.getConventionProposed(doc) : client.getConventionCurrent(doc),
-          opts.proposed ? () => client.getConventionCurrent(doc) : null,
-          !opts.proposed ? () => client.getConventionProposed(doc) : undefined,
-        );
-        if (opts.json) emitJson(v);
-        else if (opts.full) emit(`${describeConvention(v)}\n${yamlStringify(v.spec).trimEnd()}`);
-        else emit(describeConvention(v));
+        const label = 'convention';
+        const [accepted, proposed] = await Promise.all([
+          getOrNull(() => client.getConventionCurrent(doc)),
+          getOrNull(() => client.getConventionProposed(doc)),
+        ]);
+        if (!accepted && !proposed) {
+          errExit(1, `artifact_not_found: no convention proposed or accepted in ${doc}`);
+        }
+        const deltaVsAccepted =
+          accepted && proposed ? compactSummary(generatePatch(accepted.spec, proposed.spec)) : null;
+        const out = { accepted, proposed, deltaVsAccepted };
+        if (opts.json) emitJson(out);
+        else emit(renderTaggedShow({ label, ...out }));
       }),
     );
 
@@ -141,19 +152,30 @@ export function register(program: Command): void {
     );
 
   convention
-    .command('reject <doc> <reason>')
+    .command('reject <doc> [reason]')
+    .description(
+      'reject the latest proposed convention; pass the reason positionally OR via --rationale',
+    )
     .option('--version <n>')
+    .option('--rationale <text>', 'flag-form alias for the positional <reason>')
     .option('--json')
-    .action(async (doc: string, reason: string, opts: { version?: string; json?: boolean }) =>
-      withClient(async (client) => {
-        const versionN = opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
-        const v = await client.rejectConvention(doc, reason, versionN);
-        if (opts.json) emitJson(v);
-        else
-          emit(
-            `rejected ${describeConvention(v)}\n  → peer sees the reason in their inbox; a rejected convention blocks dependents — they should re-propose before either side adds more schemas/endpoints`,
-          );
-      }),
+    .action(
+      async (
+        doc: string,
+        reasonArg: string | undefined,
+        opts: { version?: string; rationale?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const reason = resolveRejectReason(reasonArg, opts.rationale);
+          const versionN =
+            opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
+          const v = await client.rejectConvention(doc, reason, versionN);
+          if (opts.json) emitJson(v);
+          else
+            emit(
+              `rejected ${describeConvention(v)}\n  → peer sees the reason in their inbox; a rejected convention blocks dependents — they should re-propose before either side adds more schemas/endpoints`,
+            );
+        }),
     );
 
   convention

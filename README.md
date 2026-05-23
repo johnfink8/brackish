@@ -18,6 +18,22 @@ brackish is a small message bus + propose/accept artifact lifecycle. You don't t
 Same machine: Unix-socket transport, peer-trust, zero ceremony.
 Cross-machine: TCP with invite/connect token bootstrap.
 
+## Security model
+
+brackish is local-coordination tooling, **not production-hardened multi-tenant infrastructure**. The trust model:
+
+- **Unix socket (same machine):** peer-trust. Anyone who can write to `~/.brackish/brackish.sock` is treated as a trusted local peer; the filesystem permission (`0600`) is the gate. The self-declared `X-Brackish-Identity` header is taken at face value. Use this for local Claude pairs.
+- **TCP (cross machine):** bearer-token auth via `Authorization: Bearer <token>`. Tokens are 256-bit random, hashed at rest (sha256), and minted only by redeeming a one-time invite. Per-document ACLs gate every doc-scoped endpoint — TCP peers see only docs they've been explicitly granted. Failed-bearer attempts are rate-limited (20/min per source IP), as are invite-redemption attempts (10/min per IP).
+- **Browser UI:** `/ui/<doc>` is reachable without auth on loopback TCP only. Anyone who can connect to `127.0.0.1` already qualifies as a local user. Cross-machine browser UI is an explicit non-goal — ssh-forward to loopback, or use the CLI.
+
+What this does **not** give you:
+
+- TLS. Bearer tokens travel in plaintext on the TCP socket. Default `--bind` is loopback (`127.0.0.1:11442`) for a reason; pass `--bind 0.0.0.0` only on networks you trust, or place brackish behind an upstream TLS-terminating proxy.
+- Defense against a compromised peer machine. A peer with valid tokens is trusted within the scope of their grants.
+- An audit log / SIEM hookup. Rate-limit refusals log to `serve.log`; everything else stays in the daemon's normal logs.
+
+If you want a multi-tenant API contract server with real auth — brackish isn't it. If you want two Claudes on adjacent machines to converge on an OpenAPI doc without stomping on each other — brackish.
+
 ## Install
 
 ```sh
@@ -67,7 +83,7 @@ The skill is the load-bearing piece. It teaches Claude:
 
 - **When** to reach for brackish (the moment one of you is about to commit to a contract the other owns).
 - **Race protection.** Always pass `--expected-new` on first proposal and `--expected-version <N>` on revisions, so two Claudes racing get a clean 409 instead of silent overwrites.
-- **`brackish status`-led catch-up.** Lead with the bucketed "what am I blocked on?" view; only drop to `read` or `show --full` when you need the why or the body.
+- **`brackish status`-led catch-up.** Lead with the bucketed "what am I blocked on?" view; drop to `read` or `show` when you need the why or the body.
 - **Lint before propose.** `brackish endpoint lint POST /users/{id} ./op.yaml` (and `schema lint`, `convention lint`) catch missing path parameters, undeclared security schemes, parse errors with line/col — locally, no round-trip.
 - **Batch proposes via manifest** for a big initial dump: `brackish propose-batch users-api --manifest manifest.yaml` parses + lints every artifact and sends them in order (convention → schemas → endpoints).
 - **`brackish nap`** when there's nothing to do but wait for the peer — sleeps, then snapshots the inbox. setTimeout-shape, not a recurring monitor.
@@ -140,7 +156,7 @@ brackish status <doc>                                # awaiting peer / awaiting 
 
 # Lifecycle (same verbs for endpoint / schema / convention)
 brackish endpoint propose <doc> <METHOD> <PATH> --expected-new ...
-brackish endpoint show <doc> <METHOD> <PATH> [--proposed] [--full]
+brackish endpoint show <doc> <METHOD> <PATH>     # tagged accepted+proposed with body
 brackish endpoint accept|reject|withdraw <doc> <METHOD> <PATH> [reason]
 brackish endpoint diff <doc> <METHOD> <PATH> --from N --to M [--format rendered]
 brackish endpoint lint <METHOD> <PATH> <file>        # local pre-flight

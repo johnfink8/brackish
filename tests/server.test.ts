@@ -165,6 +165,34 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('error mapping', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 't' } });
+    });
+
+    it('returns 400 (not 500) when a query param fails HttpError validation', async () => {
+      // `since=abc` triggers HttpError(400) inside parseSince. Currently that error
+      // class isn't caught by app.onError, so the handler falls through to the generic
+      // 500 path — the targeted bug.
+      const res = await call('GET', '/documents/t/events?since=abc');
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('since');
+    });
+
+    it('returns 400 (not 500) when a request body fails zod validation', async () => {
+      // Empty message text fails SendMessageRequestSchema (min(1)). The ZodError isn't
+      // a StoreError, so the current code returns 500.
+      const res = await call('POST', '/documents/t/messages', { body: { text: '' } });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 400 (not 500) when a path param fails identity validation', async () => {
+      const res = await call('GET', '/documents/NOT-VALID');
+      expect(res.status).toBe(400);
+    });
+  });
+
   describe('long-poll wait', () => {
     beforeEach(async () => {
       await call('POST', '/documents', { body: { name: 't' } });
@@ -526,6 +554,67 @@ describe('server (Unix-socket transport)', () => {
       });
       expect(res.status).toBe(201);
     });
+
+    it('rolls back earlier items in the batch when a later propose fails (version_in_flight)', async () => {
+      // Pre-seed an in-flight proposal of `C` by host. A subsequent batch from peer
+      // that proposes [A, B, C] passes meta-schema validation (well-formed), but the
+      // per-artifact propose for C will throw `version_in_flight`. The whole batch
+      // must roll back — A and B must not be visible afterward. With the pre-fix
+      // implementation, A and B land before C fails, leaving partial state.
+      await call('POST', '/documents/b/schemas', {
+        body: { name: 'C', spec: { type: 'object' } },
+        identity: 'host',
+      });
+      const res = await call('POST', '/documents/b/propose-batch', {
+        body: {
+          schemas: [
+            { name: 'A', spec: { type: 'object' } },
+            { name: 'B', spec: { type: 'object' } },
+            { name: 'C', spec: { type: 'object' } },
+          ],
+        },
+        identity: 'peer',
+      });
+      expect(res.status).toBe(409);
+      const aCheck = await call('GET', '/documents/b/schemas/A?proposed=true', {
+        identity: 'peer',
+      });
+      expect(aCheck.status).toBe(404);
+      const bCheck = await call('GET', '/documents/b/schemas/B?proposed=true', {
+        identity: 'peer',
+      });
+      expect(bCheck.status).toBe(404);
+    });
+  });
+
+  describe('diff resolution past v50', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'd' } });
+    });
+
+    it('resolves --to to the actual latest version, not capped at 50', async () => {
+      // Drive a schema up to v60 by alternating propose (host) → accept (peer).
+      const target = 60;
+      for (let v = 1; v <= target; v++) {
+        const prop = await call('POST', '/documents/d/schemas', {
+          body: { name: 'Big', spec: { type: 'object', title: `v${v}` } },
+          identity: 'host',
+        });
+        expect(prop.status).toBe(201);
+        const acc = await call('POST', `/documents/d/schemas/Big/accept?version=${v}`, {
+          identity: 'peer',
+        });
+        expect(acc.status).toBe(200);
+      }
+      // No `from`/`to`: the server should walk back to find the latest. Pre-fix code
+      // probes versions 50→1 and stops at v50, missing v51..v60 entirely and returning
+      // "not enough versions to diff" 404.
+      const diff = await call('GET', '/documents/d/schemas/Big/diff');
+      expect(diff.status).toBe(200);
+      const body = (await diff.json()) as { fromVersion: number; toVersion: number };
+      expect(body.toVersion).toBe(60);
+      expect(body.fromVersion).toBe(59);
+    });
   });
 
   describe('inbox', () => {
@@ -661,5 +750,183 @@ describe('server (TCP transport + invite/connect)', () => {
       headers: { Authorization: 'Bearer not-a-real-token-just-padding-to-pass-len' },
     });
     expect(res.status).toBe(401);
+  });
+
+  describe('rate limiting', () => {
+    it('429s after the burst cap on repeated /connect with bogus tokens', async () => {
+      // Pre-fix: every bogus /connect returns 404 (invite_invalid) with no throttling,
+      // so an attacker can churn through token guesses (or simply DoS the endpoint).
+      // The fix admits a small burst (≤10/min), then 429s subsequent attempts from the
+      // same source IP. The 11th request in a tight loop must be 429.
+      const statuses: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        const r = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            inviteToken: `bogus-padding-token-${i.toString().padStart(20, '0')}`,
+          }),
+        });
+        statuses.push(r.status);
+      }
+      // Up to the burst cap should fail-auth (404 invite_invalid); past the cap should 429.
+      expect(statuses).toContain(429);
+      // First request must NOT be 429 — confirms the limiter has a burst window.
+      expect(statuses[0]).not.toBe(429);
+    });
+  });
+
+  describe('/ui loopback bypass', () => {
+    // Browser navigation can't attach an Authorization header to a URL bar visit.
+    // Rather than carry tokens in URLs (the leak we just fixed) or build OTT+cookie
+    // machinery for a use case that's only realistic on the same host anyway, we
+    // accept `/ui/*` without auth ONLY on loopback. Non-loopback TCP still requires
+    // Bearer, which a browser visit can't supply — so cross-machine browser UI is
+    // explicitly NOT supported. Use ssh-forward to loopback, or the CLI.
+    it('serves /ui/<doc> without auth headers on loopback TCP', async () => {
+      // host creates a doc over socket so /ui/<doc> has something to render.
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        await undiciFetch('http://localhost/documents', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'host',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: 'public-ui' }),
+          dispatcher: sockAgent,
+        });
+      } finally {
+        await sockAgent.close();
+      }
+      const res = await fetch(`${tcpUrl}/ui/public-ui`);
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(body).toContain('swagger-ui');
+    });
+
+    it('still requires Bearer for non-/ui paths on loopback TCP', async () => {
+      const res = await fetch(`${tcpUrl}/whoami`);
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('no token-in-query fallback', () => {
+    // Pre-fix code accepted `?token=<valid>` as a TCP auth fallback (used by browser
+    // UI URLs). Tokens in query strings leak via Referer, server access logs, browser
+    // history, and shared URLs — and combine with XSS for trivial exfil. The fix
+    // removes the fallback; browser UI now uses the loopback /ui bypass instead.
+    it('GET /whoami?token=<valid> with no Authorization header returns 401', async () => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      let bearer: string;
+      try {
+        const inv = await undiciFetch('http://localhost/invites', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'admin',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ identity: 'qpeer', ttlSeconds: 60 }),
+          dispatcher: sockAgent,
+        });
+        const invData = (await inv.json()) as { inviteToken: string };
+        const con = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invData.inviteToken }),
+        });
+        const conData = (await con.json()) as { token: string };
+        bearer = conData.token;
+      } finally {
+        await sockAgent.close();
+      }
+      // Sanity: bearer works via Authorization header.
+      const ok = await fetch(`${tcpUrl}/whoami`, {
+        headers: { Authorization: `Bearer ${bearer}` },
+      });
+      expect(ok.status).toBe(200);
+      // The targeted exploit: same token, passed via query string, no header.
+      const res = await fetch(`${tcpUrl}/whoami?token=${encodeURIComponent(bearer)}`);
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('per-document ACLs (TCP)', () => {
+    // Helper: mint an invite over socket for an identity, redeem it over TCP, return the bearer.
+    const mintTokenForPeer = async (peerIdentity: string): Promise<string> => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        const inv = await undiciFetch('http://localhost/invites', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'admin',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ identity: peerIdentity, ttlSeconds: 60 }),
+          dispatcher: sockAgent,
+        });
+        const invData = (await inv.json()) as { inviteToken: string };
+        const con = await fetch(`${tcpUrl}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invData.inviteToken }),
+        });
+        const conData = (await con.json()) as { token: string };
+        return conData.token;
+      } finally {
+        await sockAgent.close();
+      }
+    };
+
+    it('denies a non-member TCP peer access to a doc-scoped GET (403)', async () => {
+      // host creates `private` over socket (host implicit owner).
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        await undiciFetch('http://localhost/documents', {
+          method: 'POST',
+          headers: {
+            'X-Brackish-Identity': 'host',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: 'private' }),
+          dispatcher: sockAgent,
+        });
+      } finally {
+        await sockAgent.close();
+      }
+      // peer redeems an invite over TCP — registered party but NOT a member of `private`.
+      const peerToken = await mintTokenForPeer('peer');
+      const res = await fetch(`${tcpUrl}/documents/private/endpoints`, {
+        headers: { Authorization: `Bearer ${peerToken}` },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('GET /documents only lists docs the TCP caller is a member of', async () => {
+      const sockAgent = new Agent({ connect: { socketPath: server.socketPath } });
+      try {
+        for (const name of ['alpha', 'beta']) {
+          await undiciFetch('http://localhost/documents', {
+            method: 'POST',
+            headers: {
+              'X-Brackish-Identity': 'host',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ name }),
+            dispatcher: sockAgent,
+          });
+        }
+      } finally {
+        await sockAgent.close();
+      }
+      const peerToken = await mintTokenForPeer('peer');
+      const res = await fetch(`${tcpUrl}/documents`, {
+        headers: { Authorization: `Bearer ${peerToken}` },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { documents: Array<{ name: string }> };
+      // peer is a member of neither; list is empty for them.
+      expect(body.documents.map((d) => d.name)).toEqual([]);
+    });
   });
 });

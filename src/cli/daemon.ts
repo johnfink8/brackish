@@ -97,7 +97,7 @@ export function register(program: Command): void {
     .description('start the brackish daemon (Unix socket always; --bind also opens TCP)')
     .option(
       '--bind [addr]',
-      'enable TCP. Bare `--bind` → 0.0.0.0:11442; `--bind 0.0.0.0` → default port; `--bind 0.0.0.0:8080` → exact',
+      'enable TCP. Bare `--bind` → 127.0.0.1:11442 (loopback); pass `--bind 0.0.0.0` to expose on the LAN; `--bind 0.0.0.0:8080` → exact host+port',
     )
     .option('--socket <path>', 'override socket path')
     .option('--data <path>', 'override sqlite db path')
@@ -160,6 +160,24 @@ export function register(program: Command): void {
           process.stderr.write(
             `               tcp=http://${server.tcpAddress.host}:${server.tcpAddress.port}\n`,
           );
+          // Bind-context banner. Suppressible via BRACKISH_QUIET_BIND_WARNING=1 for CI/demos.
+          // Loopback gets a positive "not externally reachable" line so the user/agent sees
+          // the security posture confirmed; non-loopback gets a louder warning naming the
+          // exposure. Brackish is local-coordination tooling, NOT production-hardened.
+          if (!process.env.BRACKISH_QUIET_BIND_WARNING) {
+            const isLoopback = isLoopbackHost(server.tcpAddress.host);
+            if (isLoopback) {
+              process.stderr.write(
+                `               (loopback only — NOT externally reachable; remote peers won't see this server)\n`,
+              );
+            } else {
+              process.stderr.write(
+                `\nWARNING: brackish is binding TCP on ${server.tcpAddress.host}:${server.tcpAddress.port} —\n` +
+                  `reachable from any host that can route to this address. Use ONLY if the user\n` +
+                  `indicated your peer is on another machine. Set BRACKISH_QUIET_BIND_WARNING=1 to silence.\n\n`,
+              );
+            }
+          }
         }
 
         if (opts.invite !== undefined && inviteTtl !== null && server.tcpAddress) {
@@ -222,7 +240,7 @@ export function register(program: Command): void {
     )
     .option(
       '--bind [addr]',
-      'enable TCP on the spawned daemon; bare `--bind` defaults to 0.0.0.0:11442',
+      'enable TCP on the spawned daemon; bare `--bind` defaults to 127.0.0.1:11442 (loopback)',
     )
     .option(
       '--identity <name>',
@@ -323,6 +341,14 @@ export function register(program: Command): void {
 
 function servePidPath(): string {
   return join(brackishHome(), 'serve.pid');
+}
+
+/** Is the host a loopback / link-local-only address? Used to gate the bind-warning banner. */
+function isLoopbackHost(host: string): boolean {
+  if (host === '127.0.0.1' || host === 'localhost' || host === '::1') return true;
+  // Whole 127/8 loopback range counts.
+  if (host.startsWith('127.')) return true;
+  return false;
 }
 
 async function isDaemonRunning(socketPath: string): Promise<boolean> {

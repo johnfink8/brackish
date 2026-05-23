@@ -33,4 +33,42 @@ export function register(program: Command): void {
           );
       }),
     );
+
+  document
+    .command('grant <doc> <identity>')
+    .description('add <identity> as a member of <doc> (peer-trust on socket; owner-only on TCP)')
+    .option('--owner', 'grant owner role instead of plain member')
+    .action(async (doc: string, identity: string, opts: { owner?: boolean }) =>
+      withClient(async (client) => {
+        await client.addMember(doc, identity, opts.owner ? 'owner' : 'member');
+        emit(`granted ${identity} ${opts.owner ? 'owner' : 'member'} on ${doc}`);
+      }),
+    );
+
+  document
+    .command('revoke <doc> <identity>')
+    .description('remove <identity> from <doc>')
+    .action(async (doc: string, identity: string) =>
+      withClient(async (client) => {
+        await client.removeMember(doc, identity);
+        emit(`revoked ${identity} from ${doc}`);
+      }),
+    );
+
+  document
+    .command('members <doc>')
+    .description('list members of <doc>')
+    .option('--json', 'output JSON')
+    .action(async (doc: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const members = await client.listMembers(doc);
+        if (opts.json) emitJson({ members });
+        else {
+          const lines = members.map(
+            (m) => `  ${m.identity.padEnd(20)} ${m.role.padEnd(8)} granted_by=${m.grantedBy}`,
+          );
+          emit(`members of ${doc}:\n${lines.join('\n') || '  (none)'}`);
+        }
+      }),
+    );
 }

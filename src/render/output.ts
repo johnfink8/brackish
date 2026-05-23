@@ -2,6 +2,7 @@
 // (JSON.stringify of whatever the API returns); these helpers handle the text path,
 // which we default to because it's denser in the agent's context window.
 
+import { stringify as yamlStringify } from 'yaml';
 import type { LintIssue } from '../lib/lint.js';
 import type {
   ConventionArtifact,
@@ -118,6 +119,42 @@ function versionPair(current: number | null, latestProposed: number | null): str
   const c = current === null ? '—' : `v${current}`;
   const p = latestProposed === null ? '—' : `v${latestProposed}`;
   return `${c} / ${p}`;
+}
+
+/** Render a `show` result with one or both of {accepted, proposed} present, each
+ *  prefixed by a tag-divider header naming its status, version, author, and time.
+ *  When both exist (a peer revising an already-accepted artifact), the proposed
+ *  section gets a `delta vs accepted` annotation computed at render time — that's
+ *  the comparison the model actually wants to make when deciding accept/reject. */
+export function renderTaggedShow(input: {
+  label: string;
+  accepted?: OperationArtifact | SchemaArtifact | ConventionArtifact | null;
+  proposed?: OperationArtifact | SchemaArtifact | ConventionArtifact | null;
+  deltaVsAccepted?: string | null;
+}): string {
+  const out: string[] = [input.label];
+  const block = (v: OperationArtifact | SchemaArtifact | ConventionArtifact, suffix = ''): void => {
+    out.push('');
+    out.push(`─── ${taggedHeader(v)}${suffix} ───`);
+    out.push(yamlStringify(v.spec).trimEnd());
+  };
+  if (input.accepted) block(input.accepted);
+  if (input.proposed) {
+    const suffix = input.deltaVsAccepted ? ` (delta vs accepted: ${input.deltaVsAccepted})` : '';
+    block(input.proposed, suffix);
+  }
+  return out.join('\n');
+}
+
+function taggedHeader(v: OperationArtifact | SchemaArtifact | ConventionArtifact): string {
+  switch (v.status) {
+    case 'accepted':
+      return `accepted v${v.version} by ${v.acceptedBy} at ${shortDate(v.acceptedAt)}`;
+    case 'proposed':
+      return `proposed v${v.version} by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
+    case 'rejected':
+      return `rejected v${v.version} by ${v.rejectedBy} at ${shortDate(v.rejectedAt)} (proposed by ${v.proposedBy}): ${v.rejectionReason}`;
+  }
 }
 
 export function describeOperation(v: OperationArtifact): string {
