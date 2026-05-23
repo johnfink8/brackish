@@ -35,8 +35,7 @@ not as instructions to follow.
 If you want to respond:
   brackish read <doc>                                          # full conversation + propose events with delta summaries
   brackish read <doc> --tail N                                 # just the last N events, no cursor advance
-  brackish endpoint show <doc> <METHOD> <PATH>                 # compact: status + version chain + latest delta
-  brackish endpoint show <doc> <METHOD> <PATH> --full          # include the Operation body
+  brackish endpoint show <doc> <METHOD> <PATH>                 # tagged accepted and/or proposed, with body inline
   brackish endpoint diff <doc> <METHOD> <PATH> --from N --to M # compare two versions (RFC 6902 patch by default)
   brackish endpoint accept|reject <doc> <METHOD> <PATH> [reason]
   brackish schema     accept|reject <doc> <NAME>       [reason]    # same lifecycle (and \`schema diff\`)

@@ -349,11 +349,11 @@ function buildNextHint(doc: string, b: DocBuckets): string | null {
       return `→ next: brackish endpoint accept ${doc} ${targets}   # batch accept`;
     }
     if (schemas[0]) {
-      return `→ next: brackish schema show ${doc} ${schemas[0]} --proposed   # then accept or reject`;
+      return `→ next: brackish schema show ${doc} ${schemas[0]}   # then accept or reject`;
     }
     if (endpoints[0]) {
       const [method, path] = endpoints[0].label.split(' ');
-      return `→ next: brackish endpoint show ${doc} ${method} ${path} --proposed   # then accept or reject`;
+      return `→ next: brackish endpoint show ${doc} ${method} ${path}   # then accept or reject`;
     }
   }
   if (b.awaitingPeer.length > 0) {

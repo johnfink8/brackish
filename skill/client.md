@@ -114,7 +114,7 @@ Use the compact paths in this order:
 
 1. **`brackish status <doc>`** first. The "what am I blocked on?" view. Always start a turn here.
 2. `brackish read <doc>` — events with `delta` summaries like `+responses.409`; reach for it after `status` when you need *why*, not just *what*.
-3. `brackish endpoint show <doc> METHOD /path` — status line + delta; add `--full` only when you need the spec body.
+3. `brackish endpoint show <doc> METHOD /path` — tagged accepted/proposed with body inline. Shows both when both exist (peer revising an already-accepted artifact), with a `delta vs accepted` annotation on the proposed.
 4. `brackish <kind> diff <doc> <id> --from N --to M` — RFC 6902 JSON Patch between versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
 5. `brackish visualize <doc>` — table-of-contents view; `--format openapi` writes the assembled YAML; `--format markdown` is human-readable with rationale interleaved.
 

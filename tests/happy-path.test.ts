@@ -152,8 +152,10 @@ describe('happy-path: skill journey from doc-grant to visualize', () => {
     ]);
     expect(initialStatus.awaitingMe.find((r) => r.label === 'User')?.blockedOn).toEqual([]);
 
-    // ===== Phase 5.5: bob reads the proposed Message body via --proposed before deciding =====
-    // The skill teaches `<kind> show --proposed --full` for grounding before accept/reject.
+    // ===== Phase 5.5: bob reads the proposed Message body before deciding =====
+    // The skill teaches `<kind> show <doc> <id>` for grounding before accept/reject; the
+    // CLI returns tagged accepted+proposed with body inline. Here we exercise the
+    // BrackishClient's lower-level getSchema({proposed:true}) which the CLI uses internally.
     const proposedMessage = await bob.getSchema('chat-api', 'Message', { proposed: true });
     expect(proposedMessage.status).toBe('proposed');
     expect(proposedMessage.version).toBe(1);

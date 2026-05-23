@@ -50,6 +50,41 @@ export type ConcurrencyOpts = {
   force?: boolean;
 };
 
+/** Run a client call that may 404 with `artifact_not_found`, return null on that
+ *  specific failure mode, rethrow anything else. Used by `show` to fetch the
+ *  accepted + proposed versions in parallel without one's absence killing the
+ *  call. */
+export async function getOrNull<T>(fn: () => Promise<T>): Promise<T | null> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof ClientError && e.code === 'artifact_not_found') return null;
+    throw e;
+  }
+}
+
+/** Resolve a reject reason from either the positional form or `--rationale`. Either
+ *  works; passing both is ambiguous; passing neither is invalid. Kept here so all
+ *  three reject verbs (endpoint/schema/convention) share the same validation.
+ *  Throws on misuse — `withClient`'s top-level catch routes through `errExit`. */
+export function resolveRejectReason(
+  positional: string | undefined,
+  rationale: string | undefined,
+): string {
+  if (positional !== undefined && rationale !== undefined) {
+    throw new Error(
+      'pass the reason positionally OR via --rationale, not both — they would conflict',
+    );
+  }
+  const reason = positional ?? rationale;
+  if (!reason || reason.length === 0) {
+    throw new Error(
+      'a reject reason is required — pass it positionally or via --rationale "<text>"',
+    );
+  }
+  return reason;
+}
+
 export function parseConcurrencyOpts(opts: ConcurrencyOpts): ProposeOptionsWire {
   if (opts.expectedNew && opts.expectedVersion !== undefined) {
     errExit(2, 'pass at most one of --expected-new or --expected-version');
@@ -80,53 +115,6 @@ export function warnFileClobbers(filePath: string, ignored: string[]): void {
   process.stderr.write(
     `warning: --file ${filePath} replaces other flags; ignoring ${ignored.join(', ')}\n`,
   );
-}
-
-// --- show fallback / inverse-probe ---
-
-/**
- * Try `primary`; on `artifact_not_found` with a `fallback`, retry the fallback + emit a stderr
- * hint. Lets `show --proposed` degrade to "showing latest accepted" instead of looking like the
- * artifact was deleted.
- *
- * `inverseProbe`, when provided, runs only when primary fails with no fallback: it probes for
- * the inverse (typically `--proposed`) and, if that succeeds, decorates the error so the caller
- * learns to add `--proposed`.
- */
-export async function fetchOrFallback<T>(
-  primary: () => Promise<T>,
-  fallback: (() => Promise<T>) | null,
-  inverseProbe?: () => Promise<unknown>,
-): Promise<T> {
-  try {
-    return await primary();
-  } catch (e) {
-    if (!(e instanceof ClientError) || e.code !== 'artifact_not_found') throw e;
-    if (fallback) {
-      process.stderr.write('note: no proposed version; showing latest accepted\n');
-      return fallback();
-    }
-    if (inverseProbe) {
-      let probe: unknown;
-      try {
-        probe = await inverseProbe();
-      } catch (probeError) {
-        if (probeError instanceof ClientError && probeError.code === 'artifact_not_found') throw e;
-        throw probeError;
-      }
-      let hint = 'a proposed version exists; try --proposed';
-      if (
-        probe &&
-        typeof probe === 'object' &&
-        'version' in probe &&
-        typeof probe.version === 'number'
-      ) {
-        hint = `v${probe.version} is proposed; try --proposed`;
-      }
-      throw new ClientError(e.status, e.code, `${e.message} (${hint})`);
-    }
-    throw e;
-  }
 }
 
 // --- diff output ---
@@ -255,7 +243,7 @@ export async function withClient(
 function recoveryHint(code: string | null): string | null {
   switch (code) {
     case 'version_in_flight':
-      return 'read the in-flight version with `brackish <kind> show <id> --proposed`, then accept/reject — or override with `--expected-version <N>` / `--force`';
+      return 'read the in-flight version with `brackish <kind> show <id>`, then accept/reject — or override with `--expected-version <N>` / `--force`';
     case 'version_mismatch':
       return 'state drifted from your --expected-version; `brackish read <doc>` to reconcile, then retry with the actual latest';
     case 'cannot_accept_own':
@@ -267,7 +255,7 @@ function recoveryHint(code: string | null): string | null {
     case 'artifact_not_pending':
       return 'this version is already accepted or rejected — no pending version to act on. Check with `brackish status <doc>` for what is actually awaiting you';
     case 'artifact_not_found':
-      return '`brackish endpoint list <doc>` or `brackish schema list <doc>` to confirm the identity key, or pass `--proposed` if you meant the in-flight version';
+      return '`brackish endpoint list <doc>` or `brackish schema list <doc>` to confirm the identity key';
     case 'document_not_found':
       return '`brackish documents` to list existing docs (alias `brackish docs`)';
     case 'document_exists':

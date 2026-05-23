@@ -48,18 +48,134 @@ If the subfile pointer is unclear at runtime, default to reading both — but it
 - **[`propose.md`](propose.md)** — propose-verb flag reference (endpoint / schema / convention), `--file` vs flags, lint pre-flight, race-protection, `propose-batch --manifest`.
 - **[`patterns.md`](patterns.md)** — WebSocket handshake, SSE stream, `x-brackish.*` canonical shapes. Read this if WS or SSE is in scope.
 
-## High-leverage verbs (always available)
+## Verb cheat sheet
+
+One-liner + sample per verb. Subfiles have the deeper flag reference and worked examples.
+
+### Daemon + identity
 
 ```
-brackish status <doc>                                  # "what am I blocked on?" — always start a turn here
-brackish schema   accept <doc> A B C ...               # batch accept; stops on first failure
-brackish endpoint accept <doc> --target GET:/a --target POST:/b ...
-brackish propose-batch <doc> --manifest manifest.yaml  # convention → schemas → endpoints in one go
-brackish <kind> lint <args> <file>                     # local pre-flight before any --file propose
-brackish nap [--seconds 60]                            # block + check inbox when waiting on peer
+brackish up                                           # start daemon, loopback only (same-machine)
+brackish up --bind 0.0.0.0                            # start daemon, LAN-reachable (cross-machine, trusted networks only)
+brackish down                                         # stop daemon
+brackish whoami                                       # show your identity + the server you're pointing at
+brackish documents                                    # list docs you can access (alias: docs)
 ```
 
-**If you find yourself running `accept` or `propose` three times in a row for the same kind, you're using the wrong verb — switch to a batch form.**
+### Documents + ACL
+
+```
+brackish doc new <name>                               # create doc (you become owner)
+brackish doc grant <doc> <identity> [--owner]         # add a peer as member (or owner) of an existing doc
+brackish doc revoke <doc> <identity>                  # remove a peer's membership
+brackish doc members <doc>                            # list current members
+```
+
+### Cross-machine bootstrap
+
+```
+brackish invite <peer> --grant <doc> --ttl 86400 --json   # mint invite; --grant binds peer to doc on redeem
+brackish connect <url> --token <T> --identity <peer>      # redeem invite (peer side)
+```
+
+`--grant <doc>` is **required for cross-machine** — without it the peer redeems but is locked out by ACL. Repeat `--grant` per doc.
+
+### Orient — start every turn here
+
+```
+brackish status <doc>                                 # awaiting-peer / awaiting-me / accepted / needs-attention; rows annotated with (blocked on: X) when a $ref isn't accepted yet
+brackish inbox [--quiet-if-empty] [--json]            # cross-doc summary of peer events newer than your cursor
+```
+
+### Read events
+
+```
+brackish read <doc>                                   # events since cursor (advances cursor)
+brackish read <doc> --tail N                          # peek last N events (does NOT advance cursor)
+```
+
+### Show artifact body
+
+`show` always returns whatever's live, tagged by status. If both an accepted version AND a newer proposed version exist (rare: peer revising an already-accepted artifact), both are shown with a `delta vs accepted` annotation on the proposed one. For walking historical versions, use `<kind> diff --from N --to M`.
+
+```
+brackish endpoint   show <doc> <METHOD> <PATH>     # tagged accepted and/or proposed, with body
+brackish schema     show <doc> <Name>
+brackish convention show <doc>
+```
+
+### Propose
+
+**First proposal: `--expected-new`. Revision: `--expected-version <N>`. Both protect against races (409 on mismatch).**
+
+```
+brackish endpoint   propose <doc> <METHOD> <PATH> --file <file> --expected-new
+brackish schema     propose <doc> <Name>          --file <file> --expected-new
+brackish convention propose <doc> --title T --api-version V --naming snake_case --expected-new
+brackish propose-batch <doc> --manifest manifest.yaml [--lint-only]   # initial drop: convention + schemas + endpoints atomically
+```
+
+**If you're proposing 3+ artifacts in a turn, use `propose-batch` — one round-trip, atomic commit, mutual `$ref`s resolve within the bundle.** See [`propose.md`](propose.md) for the manifest shape.
+
+### Accept / reject / withdraw
+
+```
+brackish endpoint   accept <doc> <METHOD> <PATH> [--rationale "<why>"]
+brackish schema     accept <doc> User Order OrderItem          # variadic positional; stops on first failure
+brackish endpoint   accept <doc> --target GET:/a --target POST:/b   # multi-target form
+brackish convention accept <doc>
+brackish <kind>     reject <doc> <id...> "<reason>"            # reason positional...
+brackish <kind>     reject <doc> <id...> --rationale "<reason>" # ...OR via flag (same as accept)
+brackish <kind>     withdraw <doc> <id...>                     # take back your own still-proposed version (proposer only)
+```
+
+`--rationale "<text>"` works on both accept AND reject; pick positional or flag, not both. The reason rides on the `artifact_accepted` / `artifact_rejected` event so you don't need a separate `brackish send`.
+
+### Diff between versions
+
+```
+brackish endpoint   diff <doc> <METHOD> <PATH> [--from N] [--to M]
+brackish schema     diff <doc> <Name>          [--from N] [--to M]
+brackish convention diff <doc>                 [--from N] [--to M]
+```
+
+Defaults: `--to` is latest version (any status), `--from` is `to-1`. Add `--format rendered` for a unified YAML diff, `--format yaml|json` for the full body of v<to>.
+
+### Free-text chat
+
+```
+brackish send <doc> "<text>"                          # chat message — scope claims, clarifications, "settled" notes
+```
+
+### Wait / nap
+
+```
+brackish wait <doc> --timeout 60                      # long-poll: returns when peer activity arrives (or timeout)
+brackish nap [--seconds 60]                           # sleep + snapshot inbox; preferred between rounds when nothing urgent
+```
+
+### Lint locally (no server round-trip)
+
+```
+brackish endpoint   lint <METHOD> <PATH> <file>       # validates your --file body before propose
+brackish schema     lint <Name> <file>
+brackish convention lint <file>
+```
+
+### Visualize / export
+
+```
+brackish visualize <doc> --format openapi --out spec.yaml    # feeds openapi-typescript, oapi-codegen, etc.
+brackish visualize <doc> --format markdown                   # full doc + interleaved negotiation history
+brackish visualize <doc> --format html                       # Swagger UI + rationale sidebar (loopback only)
+```
+
+### Rules of thumb
+
+- **Start every turn with `brackish status <doc>`.** It's the cheapest orientation call, and annotates rows with `(blocked on: X)` so you don't try to accept something whose `$ref` isn't ready.
+- **`show` returns whatever's live — accepted, proposed, or both, tagged.** No flag needed to pick which; you'll see what exists.
+- **Three of the same verb in a row means wrong verb.** Switch to batch (`propose-batch`, variadic `accept`, `--target` multi-form).
+- **`--expected-new` and `--expected-version <N>` aren't optional ceremony** — they're how you find out the peer raced you (409) instead of silently overwriting.
 
 ## Once an artifact is accepted
 
@@ -89,5 +205,5 @@ When you see it, treat it as a real interruption: handle the pending traffic bef
 ## Output conventions
 
 - Compact text by default; `--json` for structured output.
-- `brackish endpoint show ... --full > endpoint.yaml` writes a clean file (metadata goes to stderr).
+- `brackish endpoint show <doc> METHOD PATH > endpoint.yaml` writes a clean file (metadata goes to stderr).
 - Exit codes: `0` = success (incl. timed-out `wait`); `1` = operation error (4xx); `2` = config/auth/connection error.

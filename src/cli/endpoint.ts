@@ -1,8 +1,8 @@
 // Endpoint (OpenAPI Operation) command group: propose/list/show/accept/reject/withdraw/diff/lint.
 
 import type { Command } from 'commander';
-import { stringify as yamlStringify } from 'yaml';
 import { acceptEndpoints, type EndpointTarget } from '../client/batch.js';
+import { compactSummary, generatePatch } from '../lib/diff.js';
 import { lintEndpointSpec } from '../lib/lint.js';
 import {
   type ConventionArtifact,
@@ -13,7 +13,7 @@ import {
   OperationSpecSchema,
 } from '../lib/models.js';
 import { loadSpecFile, parseSpecFile } from '../lib/specfile.js';
-import { describeOperation, formatEndpointSummaries } from '../render/output.js';
+import { describeOperation, formatEndpointSummaries, renderTaggedShow } from '../render/output.js';
 import {
   type ConcurrencyOpts,
   collect,
@@ -22,9 +22,10 @@ import {
   emitJson,
   emitRenderedDiff,
   errExit,
-  fetchOrFallback,
   finalizeLint,
+  getOrNull,
   parseConcurrencyOpts,
+  resolveRejectReason,
   warnFileClobbers,
   withClient,
 } from './common.js';
@@ -127,37 +128,31 @@ export function register(program: Command): void {
 
   endpoint
     .command('show <doc> <method> <path>')
-    .description('show an endpoint (compact by default; --full for the Operation body)')
-    .option('--version <n>')
-    .option('--proposed')
-    .option('--full', 'include the Operation body')
+    .description(
+      'show an endpoint, tagged by status. Shows accepted+proposed if both exist (rare: peer revising an already-accepted artifact). For version-history walks, use `endpoint diff --from N --to M`.',
+    )
+    // `--full` is a no-op alias. Claude is the primary caller of this CLI and reaches
+    // for `--full` consistently when fetching a body — the tagged-show output always
+    // includes the body, so the flag is harmless and accepted silently.
+    .option('--full', 'no-op (body is always included; Claude callers tend to pass it anyway)')
     .option('--json')
-    .action(
-      async (
-        doc: string,
-        methodRaw: string,
-        path: string,
-        opts: { version?: string; proposed?: boolean; full?: boolean; json?: boolean },
-      ) =>
-        withClient(async (client) => {
-          const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
-          const v = await fetchOrFallback(
-            () =>
-              client.getEndpoint(doc, method, path, {
-                ...(opts.version !== undefined
-                  ? { version: Number.parseInt(opts.version, 10) }
-                  : {}),
-                ...(opts.proposed ? { proposed: true } : {}),
-              }),
-            opts.proposed ? () => client.getEndpoint(doc, method, path) : null,
-            !opts.proposed && opts.version === undefined
-              ? () => client.getEndpoint(doc, method, path, { proposed: true })
-              : undefined,
-          );
-          if (opts.json) emitJson(v);
-          else if (opts.full) emit(`${describeOperation(v)}\n${yamlStringify(v.spec).trimEnd()}`);
-          else emit(describeOperation(v));
-        }),
+    .action(async (doc: string, methodRaw: string, path: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
+        const label = `endpoint ${method.toUpperCase()} ${path}`;
+        const [accepted, proposed] = await Promise.all([
+          getOrNull(() => client.getEndpoint(doc, method, path)),
+          getOrNull(() => client.getEndpoint(doc, method, path, { proposed: true })),
+        ]);
+        if (!accepted && !proposed) {
+          errExit(1, `artifact_not_found: no version of ${label} in ${doc}`);
+        }
+        const deltaVsAccepted =
+          accepted && proposed ? compactSummary(generatePatch(accepted.spec, proposed.spec)) : null;
+        const out = { accepted, proposed, deltaVsAccepted };
+        if (opts.json) emitJson(out);
+        else emit(renderTaggedShow({ label, ...out }));
+      }),
     );
 
   endpoint
@@ -252,19 +247,23 @@ export function register(program: Command): void {
     );
 
   endpoint
-    .command('reject <doc> <method> <path> <reason>')
-    .description('reject the latest proposed version with a reason')
+    .command('reject <doc> <method> <path> [reason]')
+    .description(
+      'reject the latest proposed version; pass the reason positionally OR via --rationale',
+    )
     .option('--version <n>')
+    .option('--rationale <text>', 'flag-form alias for the positional <reason>')
     .option('--json')
     .action(
       async (
         doc: string,
         methodRaw: string,
         path: string,
-        reason: string,
-        opts: { version?: string; json?: boolean },
+        reasonArg: string | undefined,
+        opts: { version?: string; rationale?: string; json?: boolean },
       ) =>
         withClient(async (client) => {
+          const reason = resolveRejectReason(reasonArg, opts.rationale);
           const method = HttpMethodSchema.parse(methodRaw.toLowerCase());
           const versionN =
             opts.version !== undefined ? Number.parseInt(opts.version, 10) : undefined;
