@@ -757,6 +757,110 @@ describe('SqliteStore', () => {
       expect(latest?.status).toBe('rejected');
     });
   });
+
+  describe('retract lifecycle', () => {
+    beforeEach(async () => {
+      await store.createDocument('d', 'host');
+      await store.proposeSchema('d', 'Thing', { type: 'object' }, 'host');
+      await store.acceptSchema('d', 'Thing', 1, 'peer');
+    });
+
+    it('tombstones an accepted artifact so it is no longer current', async () => {
+      const out = await store.batchRetract('d', { schemas: ['Thing'] }, 'host', 'dead');
+      expect(out).toEqual([{ kind: 'schema', name: 'Thing', version: 2 }]);
+      expect(await store.getSchemaCurrent('d', 'Thing')).toBeNull();
+      const [summary] = await store.listSchemas('d');
+      expect(summary?.currentVersion).toBeNull();
+    });
+
+    it('records the retraction in the rationale chain', async () => {
+      await store.batchRetract('d', { schemas: ['Thing'] }, 'host', 'dead');
+      const chain = await store.rationaleForSchema('d', 'Thing');
+      const tomb = chain.find((e) => e.status === 'retracted');
+      expect(tomb?.version).toBe(2);
+      expect(tomb?.retractedBy).toBe('host');
+      expect(tomb?.retractionReason).toBe('dead');
+    });
+
+    it('lets the artifact be re-proposed and re-accepted after retraction', async () => {
+      await store.batchRetract('d', { schemas: ['Thing'] }, 'host');
+      // No --force needed: latest version is the tombstone, not a live proposal.
+      await store.proposeSchema('d', 'Thing', { type: 'object', title: 'v2' }, 'host');
+      await store.acceptSchema('d', 'Thing', 3, 'peer');
+      const cur = await store.getSchemaCurrent('d', 'Thing');
+      expect(cur?.version).toBe(3);
+    });
+
+    it('is atomic: a mixed batch with a missing target removes nothing', async () => {
+      await expect(
+        store.batchRetract('d', { schemas: ['Thing', 'Ghost'] }, 'host'),
+      ).rejects.toMatchObject({ code: 'artifact_not_found' });
+      // Thing survived — the whole batch rolled back.
+      expect(await store.getSchemaCurrent('d', 'Thing')).not.toBeNull();
+    });
+
+    it('refuses to retract an artifact with no accepted version', async () => {
+      await expect(store.batchRetract('d', { schemas: ['Ghost'] }, 'host')).rejects.toMatchObject({
+        code: 'artifact_not_found',
+      });
+    });
+  });
+});
+
+// The v3→v4 migration widens the artifact_versions.status CHECK to admit 'retracted'. SQLite
+// can't ALTER a CHECK, so the store rebuilds the table on open. Verify an existing v3 DB is
+// carried forward (rows survive) and that retract — impossible under the old CHECK — now works.
+describe('SqliteStore v3→v4 migration', () => {
+  let tmp: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'brackish-mig-'));
+    dbPath = join(tmp, 'old.db');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE documents (name TEXT PRIMARY KEY, created_by TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE artifact_versions (
+        document_name TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('operation','schema','convention')),
+        identity_key TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        spec TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected')),
+        proposed_by TEXT NOT NULL, proposed_at TEXT NOT NULL,
+        accepted_by TEXT, accepted_at TEXT,
+        rejected_by TEXT, rejected_at TEXT, rejection_reason TEXT,
+        delta TEXT,
+        PRIMARY KEY (document_name, kind, identity_key, version)
+      );
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+      INSERT INTO documents VALUES ('d', 'host', '2026-01-01T00:00:00Z');
+      INSERT INTO artifact_versions
+        (document_name, kind, identity_key, version, spec, status, proposed_by, proposed_at, accepted_by, accepted_at)
+        VALUES ('d', 'schema', 'Old', 1, '{"type":"object"}', 'accepted', 'host', '2026-01-01T00:00:00Z', 'peer', '2026-01-01T00:00:01Z');
+    `);
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('carries forward existing rows and admits retraction afterward', async () => {
+    const store = new SqliteStore({ path: dbPath, notifier: new EventNotifier() });
+    try {
+      // Pre-existing accepted row survived the rebuild.
+      const cur = await store.getSchemaCurrent('d', 'Old');
+      expect(cur?.version).toBe(1);
+      // Retract now works — it would have thrown a CHECK constraint error pre-migration.
+      const out = await store.batchRetract('d', { schemas: ['Old'] }, 'peer');
+      expect(out).toEqual([{ kind: 'schema', name: 'Old', version: 2 }]);
+      expect(await store.getSchemaCurrent('d', 'Old')).toBeNull();
+    } finally {
+      await store.close();
+    }
+  });
 });
 
 // Make sure the error class is usable for typed assertions.

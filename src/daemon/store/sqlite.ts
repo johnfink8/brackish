@@ -50,6 +50,8 @@ import type {
   BatchProposeSucceededItem,
   ProposeOptions,
   RationaleEntry,
+  RetractedItem,
+  RetractInput,
   Store,
 } from './index.js';
 
@@ -75,7 +77,7 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   identity_key     TEXT NOT NULL,
   version          INTEGER NOT NULL,
   spec             TEXT NOT NULL,
-  status           TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected')),
+  status           TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','retracted')),
   proposed_by      TEXT NOT NULL,
   proposed_at      TEXT NOT NULL,
   accepted_by      TEXT,
@@ -152,7 +154,7 @@ CREATE TABLE IF NOT EXISTS invite_grants (
 
 `;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const hashToken = (raw: string): string => createHash('sha256').update(raw).digest('hex');
 
@@ -179,11 +181,13 @@ type ArtifactRow = {
   identity_key: string;
   version: number;
   spec: string;
-  status: 'proposed' | 'accepted' | 'rejected';
+  status: 'proposed' | 'accepted' | 'rejected' | 'retracted';
   proposed_by: string;
   proposed_at: string;
   accepted_by: string | null;
   accepted_at: string | null;
+  // For status='retracted', the rejected_* columns hold the retraction metadata (who/when/why) —
+  // reused rather than adding parallel columns, the same way withdraw reuses them.
   rejected_by: string | null;
   rejected_at: string | null;
   rejection_reason: string | null;
@@ -229,6 +233,7 @@ export class SqliteStore implements Store {
     this.migrateLegacyTokenColumns();
     this.db.exec(SCHEMA);
     this.migrateOwnershipFromCreatedBy();
+    this.migrateArtifactStatusCheck();
     this.recordSchemaVersion();
     this.notifier = opts.notifier;
   }
@@ -256,6 +261,46 @@ export class SqliteStore implements Store {
       for (const d of docs) {
         insert.run(d.name, d.created_by, d.created_by, d.created_at);
       }
+    });
+    tx();
+  }
+
+  /** v3 → v4 migration: widen the artifact_versions.status CHECK to admit 'retracted'. SQLite
+   *  can't ALTER a CHECK in place, so rebuild the table carrying every row forward. Detected by
+   *  inspecting the live table SQL: a fresh DB already got the new CHECK from SCHEMA, so this
+   *  no-ops there; only an older table (CHECK without 'retracted') is rebuilt. */
+  private migrateArtifactStatusCheck(): void {
+    const row = this.db
+      .prepare<[], { sql: string }>(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='artifact_versions'",
+      )
+      .get();
+    if (!row || row.sql.includes("'retracted'")) return;
+    const tx = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE artifact_versions_new (
+          document_name    TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+          kind             TEXT NOT NULL CHECK (kind IN ('operation','schema','convention')),
+          identity_key     TEXT NOT NULL,
+          version          INTEGER NOT NULL,
+          spec             TEXT NOT NULL,
+          status           TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','retracted')),
+          proposed_by      TEXT NOT NULL,
+          proposed_at      TEXT NOT NULL,
+          accepted_by      TEXT,
+          accepted_at      TEXT,
+          rejected_by      TEXT,
+          rejected_at      TEXT,
+          rejection_reason TEXT,
+          delta            TEXT,
+          PRIMARY KEY (document_name, kind, identity_key, version)
+        );
+        INSERT INTO artifact_versions_new SELECT * FROM artifact_versions;
+        DROP TABLE artifact_versions;
+        ALTER TABLE artifact_versions_new RENAME TO artifact_versions;
+        CREATE INDEX IF NOT EXISTS artifact_versions_lookup_idx
+          ON artifact_versions(document_name, kind, identity_key, status, version);
+      `);
     });
     tx();
   }
@@ -383,6 +428,21 @@ export class SqliteStore implements Store {
         status: 'accepted',
         acceptedBy: row.accepted_by,
         acceptedAt: row.accepted_at,
+      };
+    }
+    if (row.status === 'retracted') {
+      // Retraction metadata is stored in the rejected_* columns (reason is optional).
+      if (row.rejected_by === null || row.rejected_at === null) {
+        throw new Error(
+          `retracted artifact ${row.identity_key}@v${row.version} missing retracted_by/at`,
+        );
+      }
+      return {
+        ...base,
+        status: 'retracted',
+        retractedBy: row.rejected_by,
+        retractedAt: row.rejected_at,
+        ...(row.rejection_reason !== null ? { retractionReason: row.rejection_reason } : {}),
       };
     }
     if (row.rejected_by === null || row.rejected_at === null || row.rejection_reason === null) {
@@ -714,6 +774,65 @@ export class SqliteStore implements Store {
     return row;
   }
 
+  /** Tombstone the currently-accepted version of an artifact: append a new `retracted` version
+   *  carrying the live spec forward (so history/diff still read), and emit artifact_retracted.
+   *  Throws artifact_not_found when there's no live accepted version to remove. */
+  private retractRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    by: Identity,
+    reason?: string,
+  ): ArtifactRow {
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const live = this.getRaw(documentName, kind, identityKey, { status: 'accepted' });
+      if (!live) {
+        throw new StoreError(
+          'artifact_not_found',
+          `no accepted ${kind} "${identityKey}" to retract`,
+        );
+      }
+      const latest = this.latestVersionRow(documentName, kind, identityKey);
+      const version = (latest?.version ?? live.version) + 1;
+      const retractedAt = now();
+      this.db
+        .prepare(
+          `INSERT INTO artifact_versions
+             (document_name, kind, identity_key, version, spec, status,
+              proposed_by, proposed_at, rejected_by, rejected_at, rejection_reason, delta)
+           VALUES (?, ?, ?, ?, ?, 'retracted', ?, ?, ?, ?, ?, NULL)`,
+        )
+        .run(
+          documentName,
+          kind,
+          identityKey,
+          version,
+          live.spec,
+          by,
+          retractedAt,
+          by,
+          retractedAt,
+          reason ?? null,
+        );
+      this.insertEvent(documentName, 'artifact_retracted', {
+        from: by,
+        artifactKind: kind,
+        identityKey,
+        version,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      row = this.db
+        .prepare<[string, string, string, number], ArtifactRow>(
+          'SELECT * FROM artifact_versions WHERE document_name = ? AND kind = ? AND identity_key = ? AND version = ?',
+        )
+        .get(documentName, kind, identityKey, version);
+    });
+    tx();
+    if (!row) throw new Error('retractRaw: row missing after insert');
+    return row;
+  }
+
   private getRaw(
     documentName: DocumentName,
     kind: 'operation' | 'schema' | 'convention',
@@ -727,14 +846,25 @@ export class SqliteStore implements Store {
         )
         .get(documentName, kind, identityKey, selector.version);
     }
-    const status = selector.status ?? 'accepted';
-    return this.db
-      .prepare<[string, string, string, string], ArtifactRow>(
+    if (selector.status === 'proposed') {
+      return this.db
+        .prepare<[string, string, string], ArtifactRow>(
+          `SELECT * FROM artifact_versions
+           WHERE document_name = ? AND kind = ? AND identity_key = ? AND status = 'proposed'
+           ORDER BY version DESC LIMIT 1`,
+        )
+        .get(documentName, kind, identityKey);
+    }
+    // "Current accepted" = the latest terminal version, but only if it's an accept. A later
+    // retraction tombstones the artifact, so we return undefined (not the stale accepted row).
+    const latestTerminal = this.db
+      .prepare<[string, string, string], ArtifactRow>(
         `SELECT * FROM artifact_versions
-         WHERE document_name = ? AND kind = ? AND identity_key = ? AND status = ?
+         WHERE document_name = ? AND kind = ? AND identity_key = ? AND status IN ('accepted','retracted')
          ORDER BY version DESC LIMIT 1`,
       )
-      .get(documentName, kind, identityKey, status);
+      .get(documentName, kind, identityKey);
+    return latestTerminal?.status === 'accepted' ? latestTerminal : undefined;
   }
 
   /** Build a summary (current/proposed/delta) from the version rows for one identity key. */
@@ -746,7 +876,12 @@ export class SqliteStore implements Store {
     latestProposedAt: string | null;
     latestDelta: string | null;
   } {
-    const accepted = [...rows].reverse().find((r) => r.status === 'accepted');
+    // The artifact is live iff its latest *terminal* version (accepted or retracted) is an
+    // accept. A retraction at a higher version supersedes an earlier accept → not live.
+    const latestTerminal = [...rows]
+      .reverse()
+      .find((r) => r.status === 'accepted' || r.status === 'retracted');
+    const accepted = latestTerminal?.status === 'accepted' ? latestTerminal : undefined;
     const proposed = [...rows].reverse().find((r) => r.status === 'proposed');
     return {
       currentVersion: accepted ? accepted.version : null,
@@ -779,9 +914,16 @@ export class SqliteStore implements Store {
         };
         if (r.accepted_by) entry.acceptedBy = r.accepted_by;
         if (r.accepted_at) entry.acceptedAt = r.accepted_at;
-        if (r.rejected_by) entry.rejectedBy = r.rejected_by;
-        if (r.rejected_at) entry.rejectedAt = r.rejected_at;
-        if (r.rejection_reason) entry.rejectionReason = r.rejection_reason;
+        if (r.status === 'retracted') {
+          // Retraction reuses the rejected_* columns; surface them under the retracted_* fields.
+          if (r.rejected_by) entry.retractedBy = r.rejected_by;
+          if (r.rejected_at) entry.retractedAt = r.rejected_at;
+          if (r.rejection_reason) entry.retractionReason = r.rejection_reason;
+        } else {
+          if (r.rejected_by) entry.rejectedBy = r.rejected_by;
+          if (r.rejected_at) entry.rejectedAt = r.rejected_at;
+          if (r.rejection_reason) entry.rejectionReason = r.rejection_reason;
+        }
         return entry;
       });
   }
@@ -1579,6 +1721,45 @@ export class SqliteStore implements Store {
     return succeeded;
   }
 
+  // --- atomic batch retract ---
+
+  async batchRetract(
+    documentName: DocumentName,
+    input: RetractInput,
+    by: Identity,
+    reason?: string,
+  ): Promise<RetractedItem[]> {
+    // One outer transaction wrapping each per-artifact retract as a savepoint, mirroring
+    // batchPropose: any throw (e.g. a target with no accepted version) rolls the whole set back.
+    const out: RetractedItem[] = [];
+    const tx = this.db.transaction(() => {
+      if (input.convention) {
+        const r = this.retractRaw(documentName, 'convention', CONVENTION_KEY, by, reason);
+        out.push({ kind: 'convention', version: r.version });
+      }
+      if (input.schemas) {
+        for (const name of input.schemas) {
+          const r = this.retractRaw(documentName, 'schema', name, by, reason);
+          out.push({ kind: 'schema', name, version: r.version });
+        }
+      }
+      if (input.endpoints) {
+        for (const e of input.endpoints) {
+          const r = this.retractRaw(
+            documentName,
+            'operation',
+            operationIdentityKey(e.method, e.path),
+            by,
+            reason,
+          );
+          out.push({ kind: 'endpoint', method: e.method, path: e.path, version: r.version });
+        }
+      }
+    });
+    tx();
+    return out;
+  }
+
   // --- lifecycle ---
 
   async close(): Promise<void> {
@@ -1600,6 +1781,8 @@ function previewOf(e: Event): string {
       return `rejected ${e.artifactKind} ${e.identityKey} v${e.version}: ${truncate(neutralizeForReminder(e.reason), 50)}`;
     case 'artifact_withdrawn':
       return `withdrew ${e.artifactKind} ${e.identityKey} v${e.version}`;
+    case 'artifact_retracted':
+      return `retracted ${e.artifactKind} ${e.identityKey} v${e.version}${e.reason ? `: ${truncate(neutralizeForReminder(e.reason), 50)}` : ''}`;
     case 'document_created':
       return `document created by ${e.by}`;
   }

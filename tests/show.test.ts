@@ -70,8 +70,8 @@ describe('show — tagged accepted/proposed', () => {
     expect(result.proposed?.version).toBe(1);
 
     const rendered = renderTaggedShow({ label: 'schema Message', ...result });
-    expect(rendered).toContain('proposed v1 by alice');
-    expect(rendered).not.toContain('accepted');
+    expect(rendered.meta).toContain('proposed v1 by alice');
+    expect(rendered.meta).not.toContain('accepted');
   });
 
   it('returns only the accepted when no proposed', async () => {
@@ -88,8 +88,8 @@ describe('show — tagged accepted/proposed', () => {
     expect(result.proposed).toBeNull();
 
     const rendered = renderTaggedShow({ label: 'schema User', ...result });
-    expect(rendered).toContain('accepted v1 by bob');
-    expect(rendered).not.toContain('proposed');
+    expect(rendered.meta).toContain('accepted v1 by bob');
+    expect(rendered.meta).not.toContain('proposed');
   });
 
   it('returns BOTH accepted v1 + proposed v2 when peer is revising', async () => {
@@ -122,11 +122,10 @@ describe('show — tagged accepted/proposed', () => {
     expect(result.proposed?.version).toBe(2);
 
     const rendered = renderTaggedShow({ label: 'schema Message', ...result });
-    expect(rendered).toContain('accepted v1 by bob');
-    expect(rendered).toContain('proposed v2 by alice');
-    // The delta line is rendered by the CLI's caller; here we just confirm both
-    // sections are present with their full bodies.
-    expect(rendered).toContain('created_at');
+    expect(rendered.meta).toContain('accepted v1 by bob');
+    expect(rendered.meta).toContain('proposed v2 by alice');
+    // Metadata (headers) is stderr-bound; the spec body(ies) go to stdout.
+    expect(rendered.body).toContain('created_at');
   });
 
   it("getOrNull returns null on artifact_not_found (the no-fallback fetch the CLI's show relies on)", async () => {

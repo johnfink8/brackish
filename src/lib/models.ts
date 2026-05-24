@@ -210,6 +210,16 @@ const rejectedFields = {
   rejectedAt: z.string().datetime(),
   rejectionReason: z.string(),
 };
+// A previously-accepted artifact that was removed from the doc. Tombstone: it stays in the
+// version chain (history is preserved) but the projection drops it. `spec` is the body that
+// was live at retraction time, kept so the rationale/diff still reads naturally.
+const retractedFields = {
+  ...versionBase,
+  status: z.literal('retracted'),
+  retractedBy: IdentitySchema,
+  retractedAt: z.string().datetime(),
+  retractionReason: z.string().optional(),
+};
 
 // Operation artifact
 const opBase = {
@@ -224,6 +234,7 @@ export const OperationArtifactSchema = z.discriminatedUnion('status', [
   z.object({ ...opBase, ...proposedFields }),
   z.object({ ...opBase, ...acceptedFields }),
   z.object({ ...opBase, ...rejectedFields }),
+  z.object({ ...opBase, ...retractedFields }),
 ]);
 export type OperationArtifact = z.infer<typeof OperationArtifactSchema>;
 
@@ -239,6 +250,7 @@ export const SchemaArtifactSchema = z.discriminatedUnion('status', [
   z.object({ ...schemaBase, ...proposedFields }),
   z.object({ ...schemaBase, ...acceptedFields }),
   z.object({ ...schemaBase, ...rejectedFields }),
+  z.object({ ...schemaBase, ...retractedFields }),
 ]);
 export type SchemaArtifact = z.infer<typeof SchemaArtifactSchema>;
 
@@ -253,6 +265,7 @@ export const ConventionArtifactSchema = z.discriminatedUnion('status', [
   z.object({ ...conventionBase, ...proposedFields }),
   z.object({ ...conventionBase, ...acceptedFields }),
   z.object({ ...conventionBase, ...rejectedFields }),
+  z.object({ ...conventionBase, ...retractedFields }),
 ]);
 export type ConventionArtifact = z.infer<typeof ConventionArtifactSchema>;
 
@@ -342,6 +355,17 @@ export const ArtifactWithdrawnEventSchema = z.object({
   version: z.number().int().positive(),
 });
 
+/** A previously-accepted artifact was removed from the doc (unilateral, effective immediately). */
+export const ArtifactRetractedEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('artifact_retracted'),
+  from: IdentitySchema,
+  artifactKind: ArtifactKindSchema,
+  identityKey: z.string(),
+  version: z.number().int().positive(),
+  reason: z.string().optional(),
+});
+
 export const DocumentCreatedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('document_created'),
@@ -354,6 +378,7 @@ export const EventSchema = z.discriminatedUnion('kind', [
   ArtifactAcceptedEventSchema,
   ArtifactRejectedEventSchema,
   ArtifactWithdrawnEventSchema,
+  ArtifactRetractedEventSchema,
   DocumentCreatedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
@@ -362,6 +387,7 @@ export type ArtifactProposedEvent = z.infer<typeof ArtifactProposedEventSchema>;
 export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
 export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
 export type ArtifactWithdrawnEvent = z.infer<typeof ArtifactWithdrawnEventSchema>;
+export type ArtifactRetractedEvent = z.infer<typeof ArtifactRetractedEventSchema>;
 export type DocumentCreatedEvent = z.infer<typeof DocumentCreatedEventSchema>;
 
 // --- inbox summary ---
@@ -432,31 +458,36 @@ export const BatchItemOptionsSchema = z
   .strict();
 export type BatchItemOptions = z.infer<typeof BatchItemOptionsSchema>;
 
+// Shared overlay shape: a coordinated set of convention + schemas + endpoints. propose-batch
+// requires at least one (the .refine below); validate reuses the bare shape and allows empty
+// (= "validate the current doc with nothing overlaid").
+const batchOverlayShape = {
+  convention: z
+    .object({ spec: ConventionSpecSchema, options: BatchItemOptionsSchema.optional() })
+    .optional(),
+  schemas: z
+    .array(
+      z.object({
+        name: SchemaNameSchema,
+        spec: JSONSchemaSchema,
+        options: BatchItemOptionsSchema.optional(),
+      }),
+    )
+    .optional(),
+  endpoints: z
+    .array(
+      z.object({
+        method: HttpMethodSchema,
+        path: PathSchema,
+        spec: OperationSpecSchema,
+        options: BatchItemOptionsSchema.optional(),
+      }),
+    )
+    .optional(),
+};
+
 export const ProposeBatchRequestSchema = z
-  .object({
-    convention: z
-      .object({ spec: ConventionSpecSchema, options: BatchItemOptionsSchema.optional() })
-      .optional(),
-    schemas: z
-      .array(
-        z.object({
-          name: SchemaNameSchema,
-          spec: JSONSchemaSchema,
-          options: BatchItemOptionsSchema.optional(),
-        }),
-      )
-      .optional(),
-    endpoints: z
-      .array(
-        z.object({
-          method: HttpMethodSchema,
-          path: PathSchema,
-          spec: OperationSpecSchema,
-          options: BatchItemOptionsSchema.optional(),
-        }),
-      )
-      .optional(),
-  })
+  .object(batchOverlayShape)
   .strict()
   .refine(
     (b) =>
@@ -468,6 +499,67 @@ export const ProposeBatchRequestSchema = z
     },
   );
 export type ProposeBatchRequest = z.infer<typeof ProposeBatchRequestSchema>;
+
+// Dry-run validation: same overlay as propose-batch, but empty is allowed (validate the
+// current doc as-is). The server assembles and meta-schema-validates without committing.
+export const ValidateRequestSchema = z.object(batchOverlayShape).strict();
+export type ValidateRequest = z.infer<typeof ValidateRequestSchema>;
+
+export const ValidateResponseSchema = z.object({
+  valid: z.boolean(),
+  /** 'wide' when an overlay was supplied (accepted + proposed + overlay, as propose-batch would
+   *  assemble it); 'accepted' for the bare current-doc check. */
+  view: z.enum(['accepted', 'wide']),
+  issues: z.array(
+    z.object({
+      severity: z.enum(['error', 'warn']),
+      field: z.string(),
+      message: z.string(),
+    }),
+  ),
+});
+export type ValidateResponse = z.infer<typeof ValidateResponseSchema>;
+
+// Atomic removal of a coordinated set of accepted artifacts. Like propose-batch but in reverse:
+// the server assembles the accepted doc with these removed, requires it still valid (no orphaned
+// $ref), and commits all-or-nothing. Effective immediately (unilateral); the peer sees the
+// artifact_retracted events.
+export const RetractRequestSchema = z
+  .object({
+    endpoints: z.array(z.object({ method: HttpMethodSchema, path: PathSchema })).optional(),
+    schemas: z.array(SchemaNameSchema).optional(),
+    convention: z.boolean().optional(),
+    reason: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      (b.endpoints !== undefined && b.endpoints.length > 0) ||
+      (b.schemas !== undefined && b.schemas.length > 0) ||
+      b.convention === true,
+    { message: 'retract request must name at least one of: endpoints, schemas, convention' },
+  );
+export type RetractRequest = z.infer<typeof RetractRequestSchema>;
+
+export const RetractResponseSchema = z.object({
+  retracted: z.array(
+    z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('convention'), version: z.number().int().positive() }),
+      z.object({
+        kind: z.literal('schema'),
+        name: SchemaNameSchema,
+        version: z.number().int().positive(),
+      }),
+      z.object({
+        kind: z.literal('endpoint'),
+        method: HttpMethodSchema,
+        path: PathSchema,
+        version: z.number().int().positive(),
+      }),
+    ]),
+  ),
+});
+export type RetractResponse = z.infer<typeof RetractResponseSchema>;
 
 export const ProposeBatchResponseSchema = z.object({
   succeeded: z.array(

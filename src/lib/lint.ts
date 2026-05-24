@@ -90,6 +90,7 @@ export function lintEndpointSpec(method: HttpMethod, path: string, spec: unknown
       });
     }
   });
+  lintNullable(out, op);
 
   return out;
 }
@@ -114,6 +115,7 @@ export function lintSchemaSpec(name: string, spec: unknown): LintResult {
       });
     }
   });
+  lintNullable(out, parsed.data);
   return out;
 }
 
@@ -160,6 +162,40 @@ export function lintConventionSpec(spec: unknown): LintResult {
 }
 
 // --- helpers ---
+
+/** Warn on OpenAPI 3.0-style `nullable: <bool>` anywhere in a schema/operation. 3.1 dropped the
+ *  keyword (it's JSON Schema 2020-12); the meta-schema silently ignores it, so it passes server
+ *  validation but 3.1 codegen treats the field as non-nullable. Use `type: [..., 'null']`. */
+function lintNullable(out: LintResult, root: unknown): void {
+  walkNullable(root, (fieldPath) => {
+    out.warnings.push({
+      severity: 'warn',
+      field: fieldPath,
+      message:
+        "OpenAPI 3.0 `nullable` is ignored in 3.1 — use `type: [<type>, 'null']` instead (3.1 tooling treats this field as non-nullable)",
+    });
+  });
+}
+
+function walkNullable(
+  obj: unknown,
+  visit: (fieldPath: string) => void,
+  trail: string[] = [],
+): void {
+  if (obj === null || obj === undefined) return;
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i++) walkNullable(obj[i], visit, [...trail, String(i)]);
+    return;
+  }
+  if (typeof obj !== 'object') return;
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'nullable' && typeof v === 'boolean') {
+      visit(trail.length === 0 ? 'nullable' : `${trail.join('.')}.nullable`);
+    } else {
+      walkNullable(v, visit, [...trail, k]);
+    }
+  }
+}
 
 /** Recursively walk an object, calling `visit(refString, dottedPath)` for every `$ref: "..."`. */
 function walkRefs(

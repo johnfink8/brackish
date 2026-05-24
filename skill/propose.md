@@ -119,6 +119,8 @@ brackish convention lint ./convention.yaml
 
 Exit 0 = clean. Exit 1 = errors (the message names the field and the fix). `--strict` promotes warnings to errors.
 
+**`lint` (and `propose-batch --lint-only`) is LOCAL only — it does not run the server's full OpenAPI 3.1 meta-schema validation against the assembled doc.** Green lint can still be rejected on propose. To get the real check without writing anything, use `brackish validate <doc> --manifest manifest.yaml`: the server assembles accepted + your overlay exactly as `propose-batch` would and validates the whole doc, committing nothing. Bare `brackish validate <doc>` checks the current accepted doc — run it when a propose fails citing field-paths you didn't touch (the doc itself may already be invalid).
+
 ## `--file` clobbers other CLI flags
 
 If you pass `--file convention.yaml --global-security bearer`, the `--global-security` is silently dropped (brackish 0.3.1+ warns to stderr, but the file still wins). **Bake every field into the file**; flags don't merge.
@@ -177,10 +179,10 @@ brackish propose-batch <doc> --manifest manifest.yaml
 ```
 
 - Order is forced: convention → schemas → endpoints, regardless of manifest layout.
-- Each file is parsed + linted **locally** before sending. Parse errors surface with line/col; lint errors include the field path. Round-trip cost only on real disagreements with the peer.
+- Each file is parsed + linted **locally** first; that pre-flight is sequential and stops on the first parse/lint error, naming what was never reached.
+- **The server commit is atomic.** Once pre-flight passes, the whole bundle is assembled and validated as one doc, then committed all-or-nothing. On a validation failure **nothing is written** — no partial state lands on the shared doc, so a rejected batch is safe to fix and re-run.
 - `expected: new` is the default per item. Override per-item with `expected: <N>` for revisions or `expected: force` to stack.
-- Stop-on-first-failure: prints what landed, names the failing item, lists what was never attempted.
-- `--lint-only` (alias `--dry-run`) runs the pipeline without sending — useful for CI or sanity-checking before a big drop.
+- `--lint-only` (alias `--dry-run`) runs only the *local* pre-flight. For the real server-side validation without committing, use `brackish validate <doc> --manifest <file>` (it assembles + meta-schema-checks the whole doc and writes nothing).
 
 ## Ground in code, not docs
 

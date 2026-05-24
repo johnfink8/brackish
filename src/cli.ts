@@ -21,8 +21,10 @@ import { register as registerDocuments } from './cli/documents.js';
 import { register as registerEndpoint } from './cli/endpoint.js';
 import { register as registerEvents } from './cli/events.js';
 import { register as registerInstall } from './cli/install.js';
+import { register as registerRetract } from './cli/retract.js';
 import { register as registerSchema } from './cli/schema.js';
 import { register as registerStatus } from './cli/status.js';
+import { register as registerValidate } from './cli/validate.js';
 import { register as registerVisualize } from './cli/visualize.js';
 
 // Pulled from package.json at build time (esbuild inlines static JSON imports). Keeps the bin's
@@ -46,6 +48,8 @@ export function buildProgram(): Command {
   registerSchema(program);
   registerConvention(program);
   registerBatch(program);
+  registerValidate(program);
+  registerRetract(program);
   registerStatus(program);
   registerVisualize(program);
   registerDemo(program);

@@ -22,7 +22,7 @@ import {
   type SchemaName,
 } from '../lib/models.js';
 import { parseSpecFile } from '../lib/specfile.js';
-import { type BrackishClient, ClientError } from './client.js';
+import { type BrackishClient, ClientError, type SpecIssue } from './client.js';
 import { type LoadedManifest, loadManifest, type ManifestExpected } from './manifest.js';
 
 export type BatchAcceptResult = {
@@ -108,7 +108,9 @@ export type BatchProposeFailure =
   | { stage: 'manifest'; message: string }
   | { stage: 'parse'; key: ArtifactKey; file: string; message: string }
   | { stage: 'lint'; key: ArtifactKey; file: string; issues: LintIssue[] }
-  | { stage: 'propose'; key: ArtifactKey; file: string; code: string | null; message: string };
+  // The whole batch was rejected as one unit — the assembled doc didn't validate, and nothing
+  // was written. Not attributable to a single item, so no `key`/`remaining`.
+  | { stage: 'batch'; code: string | null; message: string; issues: SpecIssue[] };
 
 export type BatchProposeSuccess = {
   key: ArtifactKey;
@@ -151,31 +153,33 @@ function planArtifacts(manifest: LoadedManifest): Array<{
   return plan;
 }
 
-/** Load + lint + propose every artifact in a manifest. Submits the whole batch as a single
- *  atomic request to /documents/:name/propose-batch, which assembles all items into the
- *  projected wide doc and validates once — so forward and mutual refs work without manifest
- *  ordering tricks. The server commits all-or-nothing on validation. */
-export async function proposeBatchFromManifest(
-  client: BrackishClient,
-  document: DocumentName,
+type ParsedItem = {
+  key: ArtifactKey;
+  file: string;
+  expected: ManifestExpected;
+  data: unknown;
+};
+
+/** Load a manifest, then parse + brackish-lint every file in plan order. Stops at the first
+ *  parse/lint failure (those checks are genuinely sequential), returning a BatchProposeResult
+ *  carrying the failure + the items not yet reached. The deep meta-schema validation happens
+ *  server-side; this is the cheap local pre-flight shared by propose-batch and validate. */
+function loadAndParseManifest(
   manifestPath: string,
-  opts: ProposeBatchOptions = {},
-): Promise<BatchProposeResult> {
+): { ok: true; items: ParsedItem[] } | { ok: false; result: BatchProposeResult } {
   const loaded = loadManifest(manifestPath);
   if (!loaded.ok) {
-    return { succeeded: [], failed: { stage: 'manifest', message: loaded.message }, remaining: [] };
+    return {
+      ok: false,
+      result: {
+        succeeded: [],
+        failed: { stage: 'manifest', message: loaded.message },
+        remaining: [],
+      },
+    };
   }
   const plan = planArtifacts(loaded.manifest);
-
-  // Local pre-flight: parse every file + run brackish-side lint (zod + cross-field checks).
-  // The deep meta-schema validation runs on the server, but we still catch parse errors and
-  // brackish-specific structural issues here without a round-trip.
-  const parsedItems: Array<{
-    key: ArtifactKey;
-    file: string;
-    expected: ManifestExpected;
-    data: unknown;
-  }> = [];
+  const items: ParsedItem[] = [];
   for (let i = 0; i < plan.length; i++) {
     const item = plan[i];
     if (!item) continue;
@@ -183,41 +187,42 @@ export async function proposeBatchFromManifest(
     const parsed = parseSpecFile(item.file);
     if (!parsed.ok) {
       return {
-        succeeded: [],
-        failed: { stage: 'parse', key: item.key, file: item.file, message: parsed.message },
-        remaining,
+        ok: false,
+        result: {
+          succeeded: [],
+          failed: { stage: 'parse', key: item.key, file: item.file, message: parsed.message },
+          remaining,
+        },
       };
     }
     const lintResult = runLintFor(item.key, parsed.data);
     if (lintResult.errors.length > 0) {
       return {
-        succeeded: [],
-        failed: { stage: 'lint', key: item.key, file: item.file, issues: lintResult.errors },
-        remaining,
+        ok: false,
+        result: {
+          succeeded: [],
+          failed: { stage: 'lint', key: item.key, file: item.file, issues: lintResult.errors },
+          remaining,
+        },
       };
     }
-    parsedItems.push({
-      key: item.key,
-      file: item.file,
-      expected: item.expected,
-      data: parsed.data,
-    });
+    items.push({ key: item.key, file: item.file, expected: item.expected, data: parsed.data });
   }
+  return { ok: true, items };
+}
 
-  if (opts.lintOnly) {
-    return {
-      succeeded: parsedItems.map((p) => ({ key: p.key, file: p.file, version: 0 })),
-      failed: null,
-      remaining: [],
-    };
-  }
-
-  // Build the atomic batch request. Re-parse each spec against its kind's zod schema to
-  // narrow `unknown` → typed without an `as` cast.
+/** Build the wire batch request from parsed items, keeping ordered key→file lists so the
+ *  caller can match server-side envelopes back to manifest paths. Re-parses each spec against
+ *  its kind's zod schema to narrow `unknown` → typed without an `as` cast. */
+function buildBatchBody(items: ParsedItem[]): {
+  body: ProposeBatchRequest;
+  schemaItems: Array<{ key: ArtifactKey; file: string }>;
+  endpointItems: Array<{ key: ArtifactKey; file: string }>;
+} {
   const body: ProposeBatchRequest = {};
   const schemaItems: Array<{ key: ArtifactKey; file: string }> = [];
   const endpointItems: Array<{ key: ArtifactKey; file: string }> = [];
-  for (const item of parsedItems) {
+  for (const item of items) {
     const options = expectedToBatchOptions(item.expected);
     if (item.key.kind === 'convention') {
       body.convention = withOptions({ spec: ConventionSpecSchema.parse(item.data) }, options);
@@ -242,6 +247,32 @@ export async function proposeBatchFromManifest(
       endpointItems.push({ key: item.key, file: item.file });
     }
   }
+  return { body, schemaItems, endpointItems };
+}
+
+/** Load + lint + propose every artifact in a manifest. Submits the whole batch as a single
+ *  atomic request to /documents/:name/propose-batch, which assembles all items into the
+ *  projected wide doc and validates once — so forward and mutual refs work without manifest
+ *  ordering tricks. The server commits all-or-nothing on validation. */
+export async function proposeBatchFromManifest(
+  client: BrackishClient,
+  document: DocumentName,
+  manifestPath: string,
+  opts: ProposeBatchOptions = {},
+): Promise<BatchProposeResult> {
+  const loaded = loadAndParseManifest(manifestPath);
+  if (!loaded.ok) return loaded.result;
+  const parsedItems = loaded.items;
+
+  if (opts.lintOnly) {
+    return {
+      succeeded: parsedItems.map((p) => ({ key: p.key, file: p.file, version: 0 })),
+      failed: null,
+      remaining: [],
+    };
+  }
+
+  const { body, schemaItems, endpointItems } = buildBatchBody(parsedItems);
 
   try {
     const res = await client.proposeBatch(document, body);
@@ -265,20 +296,46 @@ export async function proposeBatchFromManifest(
   } catch (e) {
     const code = e instanceof ClientError ? e.code : null;
     const message = e instanceof Error ? e.message : String(e);
-    // Whole-batch failure: nothing was committed (validation rejected before any writes),
-    // unless a mid-batch propose raced a peer (rare). Mark every item as remaining.
-    return {
-      succeeded: [],
-      failed: {
-        stage: 'propose',
-        key: plan[0]?.key ?? { kind: 'convention' },
-        file: '',
-        code,
-        message,
-      },
-      remaining: plan.map((p) => p.key),
-    };
+    const issues = e instanceof ClientError ? e.issues : [];
+    // Atomic whole-batch rejection: the server validated the assembled doc and wrote nothing
+    // (a mid-batch peer race rolls back the same way). There's no partial state and no single
+    // culprit item, so report it as one batch failure — not a per-item "remaining" list.
+    return { succeeded: [], failed: { stage: 'batch', code, message, issues }, remaining: [] };
   }
+}
+
+export type ValidateManifestResult =
+  | {
+      ok: true;
+      valid: boolean;
+      view: 'accepted' | 'wide';
+      issues: SpecIssue[];
+      itemCount: number;
+    }
+  | { ok: false; failed: BatchProposeFailure };
+
+/** Dry-run a manifest: pre-flight locally, then ask the server to assemble + meta-schema-validate
+ *  the whole set without committing. Same load/lint path as propose-batch, so a manifest that
+ *  validates here will commit cleanly there. */
+export async function validateFromManifest(
+  client: BrackishClient,
+  document: DocumentName,
+  manifestPath: string,
+): Promise<ValidateManifestResult> {
+  const loaded = loadAndParseManifest(manifestPath);
+  if (!loaded.ok) {
+    // loadAndParseManifest only ever produces manifest/parse/lint failures here.
+    return { ok: false, failed: loaded.result.failed ?? { stage: 'manifest', message: 'unknown' } };
+  }
+  const { body } = buildBatchBody(loaded.items);
+  const res = await client.validate(document, body);
+  return {
+    ok: true,
+    valid: res.valid,
+    view: res.view,
+    issues: res.issues,
+    itemCount: loaded.items.length,
+  };
 }
 
 function runLintFor(

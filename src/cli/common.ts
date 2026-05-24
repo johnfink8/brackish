@@ -25,6 +25,13 @@ export function emitJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+/** Emit a tagged `show` result: metadata (label + headers) to stderr, spec body to stdout, so
+ *  `brackish <kind> show <doc> <id> > file.yaml` captures only the spec. */
+export function emitShow(rendered: { meta: string; body: string }): void {
+  process.stderr.write(`${rendered.meta}\n`);
+  if (rendered.body.length > 0) process.stdout.write(`${rendered.body}\n`);
+}
+
 export function errExit(code: number, message: string): never {
   process.stderr.write(`brackish: ${message}\n`);
   process.exit(code);
@@ -265,7 +272,7 @@ function recoveryHint(code: string | null): string | null {
     case 'invite_expired':
       return 'ask the inviter for a fresh `/brackish connect …` line';
     case 'spec_invalid':
-      return 'the proposed spec does not validate as OpenAPI 3.1. Pre-flight locally with `brackish <kind> lint <args> <file>` to surface the field-paths before sending';
+      return 'the assembled doc does not validate as OpenAPI 3.1. If the cited field-paths are NOT the artifact you are touching, the doc is already invalid from other artifacts — run `brackish validate <doc>` to see every problem, then fix or `brackish retract` them together (you cannot repair a wedged doc one artifact at a time)';
     default:
       return null;
   }

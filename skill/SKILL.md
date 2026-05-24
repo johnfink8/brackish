@@ -115,9 +115,18 @@ brackish convention propose <doc> --title T --api-version V --naming snake_case 
 brackish propose-batch <doc> --manifest manifest.yaml [--lint-only]   # initial drop: convention + schemas + endpoints atomically
 ```
 
-**If you're proposing 3+ artifacts in a turn, use `propose-batch` — one round-trip, atomic commit, mutual `$ref`s resolve within the bundle.** See [`propose.md`](propose.md) for the manifest shape.
+**If you're proposing 3+ artifacts in a turn, use `propose-batch` — one round-trip, atomic commit, mutual `$ref`s resolve within the bundle.** It's all-or-nothing: on any validation failure **nothing is written**, so a rejected batch never leaves partial state on the shared doc. See [`propose.md`](propose.md) for the manifest shape.
 
-### Accept / reject / withdraw
+### Validate (dry-run — writes nothing)
+
+```
+brackish validate <doc>                          # is the current accepted doc valid OpenAPI 3.1? lists every problem
+brackish validate <doc> --manifest manifest.yaml # would proposing this whole set leave the doc valid? (same assembly as propose-batch)
+```
+
+The real assembled-doc check — `--lint-only` on propose-batch only runs *local* lint, which passes specs the server's full 3.1 validation then rejects. Run `validate` before a big drop, and run bare `validate <doc>` if a propose fails citing field-paths that aren't yours (the doc may already be invalid).
+
+### Accept / reject / withdraw / retract
 
 ```
 brackish endpoint   accept <doc> <METHOD> <PATH> [--rationale "<why>"]
@@ -126,8 +135,11 @@ brackish endpoint   accept <doc> --target GET:/a --target POST:/b   # multi-targ
 brackish convention accept <doc>
 brackish <kind>     reject <doc> <id...> "<reason>"            # reason positional...
 brackish <kind>     reject <doc> <id...> --rationale "<reason>" # ...OR via flag (same as accept)
-brackish <kind>     withdraw <doc> <id...>                     # take back your own still-proposed version (proposer only)
+brackish <kind>     withdraw <doc> <id...>                     # take back your own still-proposed PROPOSAL (proposer only)
+brackish retract <doc> --endpoint "GET /a" --schema Foo [--convention] [--reason "<why>"]   # remove ACCEPTED artifacts (atomic)
 ```
+
+`retract` removes already-accepted artifacts from the doc (atomic, all-or-nothing). The doc must stay valid afterward, so retract the whole set that references each other together. It's the escape hatch for a wedged doc — one that's accepted-but-invalid (e.g. validated under an older OpenAPI checker): retract the invalid artifacts as a set, then re-propose clean. Effective immediately; the peer sees the `artifact_retracted` events.
 
 `--rationale "<text>"` works on both accept AND reject; pick positional or flag, not both. The reason rides on the `artifact_accepted` / `artifact_rejected` event so you don't need a separate `brackish send`.
 

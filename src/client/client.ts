@@ -41,12 +41,18 @@ import {
   ProposeBatchResponseSchema,
   type RationaleResponse,
   RationaleResponseSchema,
+  type RetractRequest,
+  type RetractResponse,
+  RetractResponseSchema,
   type SchemaArtifact,
   SchemaArtifactSchema,
   type SchemaListResponse,
   SchemaListResponseSchema,
   type SchemaName,
   SendMessageResponseSchema,
+  type ValidateRequest,
+  type ValidateResponse,
+  ValidateResponseSchema,
   type WhoamiResponse,
   WhoamiResponseSchema,
 } from '../lib/models.js';
@@ -179,6 +185,26 @@ export class BrackishClient {
     return this.fetchAndParse(
       `/documents/${encodeURIComponent(document)}/propose-batch`,
       ProposeBatchResponseSchema,
+      { method: 'POST', body },
+    );
+  }
+
+  /** Dry-run: assemble + meta-schema-validate the doc (optionally with an overlay), writing
+   *  nothing. Empty body validates the current accepted doc. */
+  validate(document: DocumentName, body: ValidateRequest = {}): Promise<ValidateResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/validate`,
+      ValidateResponseSchema,
+      { method: 'POST', body },
+    );
+  }
+
+  /** Atomically remove a set of accepted artifacts. Server validates the post-removal doc and
+   *  commits all-or-nothing. */
+  retract(document: DocumentName, body: RetractRequest): Promise<RetractResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/retract`,
+      RetractResponseSchema,
       { method: 'POST', body },
     );
   }
