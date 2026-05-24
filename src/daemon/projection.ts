@@ -34,6 +34,12 @@ export type Overlay = {
   schemas?: Map<string, JSONSchema>;
   /** Replace/add these operations (keyed by `<METHOD> <path>`). */
   operations?: Map<string, { method: HttpMethod; path: string; spec: OperationSpec }>;
+  /** Drop these schemas from the assembled doc (keyed by name) — used to preview a retraction. */
+  removeSchemas?: Set<string>;
+  /** Drop these operations (keyed by `<METHOD> <path>`). */
+  removeOperations?: Set<string>;
+  /** Drop the convention from the assembled doc. */
+  removeConvention?: boolean;
 };
 
 /** Build the projected OpenAPI document. */
@@ -45,7 +51,9 @@ export async function projectDocument(
 ): Promise<OpenAPIDocument> {
   // Convention
   let convention: ConventionSpec | null;
-  if (overlay.convention !== undefined) {
+  if (overlay.removeConvention) {
+    convention = null;
+  } else if (overlay.convention !== undefined) {
     convention = overlay.convention;
   } else {
     convention = await currentConvention(store, doc, view);
@@ -64,6 +72,9 @@ export async function projectDocument(
   if (overlay.schemas) {
     for (const [name, spec] of overlay.schemas) schemaMap.set(name, spec);
   }
+  if (overlay.removeSchemas) {
+    for (const name of overlay.removeSchemas) schemaMap.delete(name);
+  }
 
   // Operations
   const endpointSummaries = await store.listEndpoints(doc);
@@ -80,6 +91,9 @@ export async function projectDocument(
   }
   if (overlay.operations) {
     for (const [key, op] of overlay.operations) operationMap.set(key, op);
+  }
+  if (overlay.removeOperations) {
+    for (const key of overlay.removeOperations) operationMap.delete(key);
   }
 
   return assembleFromSpecs({

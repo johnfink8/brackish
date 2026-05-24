@@ -202,10 +202,10 @@ endpoints:
     expect(result.failed?.stage).toBe('manifest');
   });
 
-  it('the OpenAPI meta-schema catches a bearer-no-scheme convention at the server (propose stage)', async () => {
+  it('the OpenAPI meta-schema catches a bearer-no-scheme convention at the server (batch stage)', async () => {
     // Convention with `securitySchemes.bearerAuth = { type: http }` — missing the required
     // `scheme: bearer` field. The meta-schema check runs server-side against the assembled
-    // doc, so the local lint passes but the server rejects with spec_invalid at propose.
+    // doc, so the local lint passes but the server rejects the whole batch with spec_invalid.
     write(
       join(manifestDir, 'convention.yaml'),
       `info: { title: Orders API, version: 1.0.0 }\nsecuritySchemes:\n  bearerAuth:\n    type: http\n`,
@@ -213,10 +213,13 @@ endpoints:
     const manifestPath = join(manifestDir, 'manifest.yaml');
     write(manifestPath, `convention:\n  file: convention.yaml\n`);
     const result = await proposeBatchFromManifest(host, 'd', manifestPath);
-    expect(result.failed?.stage).toBe('propose');
-    if (result.failed && result.failed.stage === 'propose') {
+    expect(result.failed?.stage).toBe('batch');
+    if (result.failed && result.failed.stage === 'batch') {
       expect(result.failed.code).toBe('spec_invalid');
+      // Atomic rejection reports the assembled-doc issues, not a per-item "remaining" list.
+      expect(result.failed.issues.length).toBeGreaterThan(0);
     }
+    expect(result.remaining).toEqual([]);
     expect(result.succeeded).toEqual([]);
   });
 });

@@ -56,7 +56,7 @@ export function register(program: Command): void {
     );
 }
 
-function describeArtifactKey(key: ArtifactKey): string {
+export function describeArtifactKey(key: ArtifactKey): string {
   if (key.kind === 'convention') return 'convention';
   if (key.kind === 'schema') return `schema ${key.name}`;
   return `endpoint ${key.method.toUpperCase()} ${key.path}`;
@@ -94,10 +94,20 @@ function emitProposeBatchFailure(result: BatchProposeResult): void {
       );
     }
   } else {
+    // Atomic rejection: the whole batch was validated as one assembled doc and nothing was
+    // written. Say so plainly so it's clear there's no partial state to clean up.
+    lines.push(`batch rejected — nothing was written (${f.code ?? 'error'}): ${f.message}`);
+    for (const issue of f.issues) {
+      lines.push(
+        `  ${issue.severity === 'error' ? 'error' : 'warn '}  ${issue.field}: ${issue.message}`,
+      );
+    }
     lines.push(
-      `propose failed for ${describeArtifactKey(f.key)} (${f.file}): ${f.code ?? 'error'} (${f.message})`,
+      'fix the spec(s) and re-run `brackish propose-batch` — the batch commits all-or-nothing.',
     );
   }
+  // `remaining` is meaningful only for the sequential local pre-flight (parse/lint); an atomic
+  // batch rejection leaves nothing pending, so it carries an empty list.
   if (result.remaining.length > 0) {
     lines.push(
       `remaining (not attempted): ${result.remaining.map(describeArtifactKey).join(', ')}`,

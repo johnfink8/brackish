@@ -587,6 +587,215 @@ describe('server (Unix-socket transport)', () => {
     });
   });
 
+  describe('validate (dry-run)', () => {
+    beforeEach(async () => {
+      await call('POST', '/documents', { body: { name: 'val' } });
+    });
+
+    it('reports the current accepted doc as valid (empty body, accepted view)', async () => {
+      const res = await call('POST', '/documents/val/validate', { body: {} });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { valid: boolean; view: string; issues: unknown[] };
+      expect(body.valid).toBe(true);
+      expect(body.view).toBe('accepted');
+      expect(body.issues).toEqual([]);
+    });
+
+    it('previews a mutually-referencing schema pair as valid without writing anything', async () => {
+      const res = await call('POST', '/documents/val/validate', {
+        body: {
+          schemas: [
+            {
+              name: 'Person',
+              spec: {
+                type: 'object',
+                properties: { addr: { $ref: '#/components/schemas/Address' } },
+              },
+            },
+            {
+              name: 'Address',
+              spec: {
+                type: 'object',
+                properties: { who: { $ref: '#/components/schemas/Person' } },
+              },
+            },
+          ],
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { valid: boolean; view: string };
+      expect(body.valid).toBe(true);
+      expect(body.view).toBe('wide');
+      // Nothing committed: neither schema is even proposed.
+      const check = await call('GET', '/documents/val/schemas/Person?proposed=true', {});
+      expect(check.status).toBe(404);
+    });
+
+    it('reports an overlay with a dangling ref as invalid, naming the orphan, and writes nothing', async () => {
+      const res = await call('POST', '/documents/val/validate', {
+        body: {
+          schemas: [
+            {
+              name: 'MessageList',
+              spec: {
+                type: 'object',
+                properties: {
+                  items: { type: 'array', items: { $ref: '#/components/schemas/Message' } },
+                },
+              },
+            },
+          ],
+        },
+      });
+      expect(res.status).toBe(200); // a dry-run that finds problems is still a successful check
+      const body = (await res.json()) as { valid: boolean; issues: { message: string }[] };
+      expect(body.valid).toBe(false);
+      expect(body.issues.some((i) => i.message.includes('Message'))).toBe(true);
+      const check = await call('GET', '/documents/val/schemas/MessageList?proposed=true', {});
+      expect(check.status).toBe(404);
+    });
+  });
+
+  describe('retract', () => {
+    // Build an accepted doc: Message, MessageList (refs Message), and GET /msgs (refs MessageList).
+    // Propose as host, accept as peer (can't accept your own).
+    const seed = async (): Promise<void> => {
+      await call('POST', '/documents', { body: { name: 'rt' } });
+      await call('POST', '/documents/rt/schemas', {
+        body: { name: 'Message', spec: { type: 'object' } },
+        identity: 'host',
+      });
+      await call('POST', '/documents/rt/schemas/Message/accept', { identity: 'peer' });
+      await call('POST', '/documents/rt/schemas', {
+        body: {
+          name: 'MessageList',
+          spec: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { $ref: '#/components/schemas/Message' } },
+            },
+          },
+        },
+        identity: 'host',
+      });
+      await call('POST', '/documents/rt/schemas/MessageList/accept', { identity: 'peer' });
+      await call('POST', '/documents/rt/endpoints', {
+        body: {
+          method: 'get',
+          path: '/msgs',
+          spec: {
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/MessageList' } },
+                },
+              },
+            },
+          },
+        },
+        identity: 'host',
+      });
+      await call('POST', '/documents/rt/endpoints/GET%20%2Fmsgs/accept', { identity: 'peer' });
+    };
+    beforeEach(seed);
+
+    it('removes an unreferenced endpoint and drops it from the accepted doc', async () => {
+      const res = await call('POST', '/documents/rt/retract', {
+        body: { endpoints: [{ method: 'get', path: '/msgs' }], reason: 'dead route' },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { retracted: Array<{ kind: string; version: number }> };
+      expect(body.retracted).toHaveLength(1);
+      expect(body.retracted[0]?.kind).toBe('endpoint');
+      // Gone from the accepted doc.
+      const cur = await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {});
+      expect(cur.status).toBe(404);
+      // Doc still validates.
+      const val = (await (await call('POST', '/documents/rt/validate', { body: {} })).json()) as {
+        valid: boolean;
+      };
+      expect(val.valid).toBe(true);
+      // The retract event landed.
+      const events = (await (await call('GET', '/documents/rt/events?since=0')).json()) as {
+        events: { kind: string }[];
+      };
+      expect(events.events.some((e) => e.kind === 'artifact_retracted')).toBe(true);
+    });
+
+    it('refuses a retraction that would orphan a live $ref, removing nothing', async () => {
+      // MessageList (and GET /msgs) reference Message; retracting Message alone dangles them.
+      const res = await call('POST', '/documents/rt/retract', {
+        body: { schemas: ['Message'] },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { code: string; issues?: { message: string }[] };
+      expect(body.code).toBe('spec_invalid');
+      // Nothing removed — Message is still the current accepted schema.
+      const cur = await call('GET', '/documents/rt/schemas/Message', {});
+      expect(cur.status).toBe(200);
+    });
+
+    it('removes a coordinated set atomically (the wedged-doc escape)', async () => {
+      const res = await call('POST', '/documents/rt/retract', {
+        body: {
+          endpoints: [{ method: 'get', path: '/msgs' }],
+          schemas: ['MessageList', 'Message'],
+        },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { retracted: unknown[] };
+      expect(body.retracted).toHaveLength(3);
+      for (const name of ['Message', 'MessageList']) {
+        const cur = await call('GET', `/documents/rt/schemas/${name}`, {});
+        expect(cur.status).toBe(404);
+      }
+    });
+
+    it('404s when a target has no accepted version, removing nothing', async () => {
+      const res = await call('POST', '/documents/rt/retract', {
+        body: { schemas: ['Nonexistent'] },
+      });
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { code: string };
+      expect(body.code).toBe('artifact_not_found');
+      // The real schema is untouched.
+      const cur = await call('GET', '/documents/rt/schemas/Message', {});
+      expect(cur.status).toBe(200);
+    });
+
+    it('lets a retracted artifact be re-proposed and re-accepted (comes back live)', async () => {
+      await call('POST', '/documents/rt/retract', {
+        body: { endpoints: [{ method: 'get', path: '/msgs' }] },
+      });
+      // Re-propose the same endpoint (no --force needed; latest version is the tombstone).
+      const re = await call('POST', '/documents/rt/endpoints', {
+        body: {
+          method: 'get',
+          path: '/msgs',
+          spec: {
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/MessageList' } },
+                },
+              },
+            },
+          },
+        },
+        identity: 'host',
+      });
+      expect(re.status).toBe(201);
+      const acc = await call('POST', '/documents/rt/endpoints/GET%20%2Fmsgs/accept', {
+        identity: 'peer',
+      });
+      expect(acc.status).toBe(200);
+      const cur = await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {});
+      expect(cur.status).toBe(200);
+    });
+  });
+
   describe('diff resolution past v50', () => {
     beforeEach(async () => {
       await call('POST', '/documents', { body: { name: 'd' } });

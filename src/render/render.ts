@@ -206,6 +206,8 @@ function formatRationaleEntry(e: RationaleEntry): string {
           return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **↩ withdrawn** by \`${e.rejectedBy}\` at ${e.rejectedAt}`;
         }
         return `v${e.version} proposed by \`${e.proposedBy}\` at ${e.proposedAt}${delta}; **rejected** by \`${e.rejectedBy}\` at ${e.rejectedAt}: "${e.rejectionReason}"`;
+      case 'retracted':
+        return `v${e.version}${delta}; **✕ retracted** by \`${e.retractedBy}\` at ${e.retractedAt}${e.retractionReason ? `: "${e.retractionReason}"` : ''}`;
     }
   })();
   if (e.spec === undefined || e.spec === null) return head;

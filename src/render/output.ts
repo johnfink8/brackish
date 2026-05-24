@@ -39,6 +39,10 @@ const eventPreview = (e: Event): string => {
       return `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`;
     case 'artifact_withdrawn':
       return `${e.artifactKind} ${e.identityKey} v${e.version} (withdrawn by proposer)`;
+    case 'artifact_retracted':
+      return e.reason
+        ? `${e.artifactKind} ${e.identityKey} removed (was v${e.version}): ${trim(e.reason, 60)}`
+        : `${e.artifactKind} ${e.identityKey} removed (was v${e.version})`;
     case 'document_created':
       return `created by ${e.by}`;
   }
@@ -125,25 +129,30 @@ function versionPair(current: number | null, latestProposed: number | null): str
  *  prefixed by a tag-divider header naming its status, version, author, and time.
  *  When both exist (a peer revising an already-accepted artifact), the proposed
  *  section gets a `delta vs accepted` annotation computed at render time — that's
- *  the comparison the model actually wants to make when deciding accept/reject. */
+ *  the comparison the model actually wants to make when deciding accept/reject.
+ *
+ *  Returns the metadata (label + section headers) and the spec body(ies) separately so
+ *  the CLI can route metadata to stderr and the body to stdout — keeping `show > x.yaml`
+ *  a clean spec file. When both versions are present the bodies are joined by a `---` YAML
+ *  document separator so stdout is still a valid YAML stream. */
 export function renderTaggedShow(input: {
   label: string;
   accepted?: OperationArtifact | SchemaArtifact | ConventionArtifact | null;
   proposed?: OperationArtifact | SchemaArtifact | ConventionArtifact | null;
   deltaVsAccepted?: string | null;
-}): string {
-  const out: string[] = [input.label];
+}): { meta: string; body: string } {
+  const metaLines: string[] = [input.label];
+  const bodies: string[] = [];
   const block = (v: OperationArtifact | SchemaArtifact | ConventionArtifact, suffix = ''): void => {
-    out.push('');
-    out.push(`─── ${taggedHeader(v)}${suffix} ───`);
-    out.push(yamlStringify(v.spec).trimEnd());
+    metaLines.push(`─── ${taggedHeader(v)}${suffix} ───`);
+    bodies.push(yamlStringify(v.spec).trimEnd());
   };
   if (input.accepted) block(input.accepted);
   if (input.proposed) {
     const suffix = input.deltaVsAccepted ? ` (delta vs accepted: ${input.deltaVsAccepted})` : '';
     block(input.proposed, suffix);
   }
-  return out.join('\n');
+  return { meta: metaLines.join('\n'), body: bodies.join('\n---\n') };
 }
 
 function taggedHeader(v: OperationArtifact | SchemaArtifact | ConventionArtifact): string {
@@ -154,6 +163,8 @@ function taggedHeader(v: OperationArtifact | SchemaArtifact | ConventionArtifact
       return `proposed v${v.version} by ${v.proposedBy} at ${shortDate(v.proposedAt)}`;
     case 'rejected':
       return `rejected v${v.version} by ${v.rejectedBy} at ${shortDate(v.rejectedAt)} (proposed by ${v.proposedBy}): ${v.rejectionReason}`;
+    case 'retracted':
+      return `retracted v${v.version} by ${v.retractedBy} at ${shortDate(v.retractedAt)}${v.retractionReason ? `: ${v.retractionReason}` : ''}`;
   }
 }
 
@@ -183,6 +194,8 @@ function decorateStatus(
       return `${base}; accepted by ${v.acceptedBy} at ${shortDate(v.acceptedAt)}`;
     case 'rejected':
       return `${base}; rejected by ${v.rejectedBy} at ${shortDate(v.rejectedAt)}: ${v.rejectionReason}`;
+    case 'retracted':
+      return `${base}; retracted by ${v.retractedBy} at ${shortDate(v.retractedAt)}${v.retractionReason ? `: ${v.retractionReason}` : ''}`;
   }
 }
 

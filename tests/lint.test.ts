@@ -100,6 +100,17 @@ describe('lintSchemaSpec', () => {
     expect(r.warnings).toHaveLength(1);
     expect(r.warnings[0]?.field).toContain('$ref');
   });
+
+  it('warns on OpenAPI 3.0 `nullable` (removed in 3.1), naming the field path', async () => {
+    const r = await lintSchemaSpec('User', {
+      type: 'object',
+      properties: { bio: { type: 'string', nullable: true } },
+    });
+    expect(r.errors).toEqual([]);
+    const nullableWarn = r.warnings.find((w) => /nullable/i.test(w.message));
+    expect(nullableWarn).toBeDefined();
+    expect(nullableWarn?.field).toBe('properties.bio.nullable');
+  });
 });
 
 describe('lintConventionSpec', () => {

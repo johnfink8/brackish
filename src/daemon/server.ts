@@ -15,7 +15,6 @@ import { generatePatch } from '../lib/diff.js';
 import {
   AcceptArtifactRequestSchema,
   AddMemberRequestSchema,
-  type ConventionSpec,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
@@ -24,8 +23,6 @@ import {
   type Event,
   type HttpMethod,
   IdentitySchema,
-  type JSONSchema,
-  type OperationSpec,
   operationIdentityKey,
   ProposeBatchRequestSchema,
   ProposeConventionRequestSchema,
@@ -34,8 +31,11 @@ import {
   parseOperationIdentityKey,
   RedeemInviteRequestSchema,
   RejectArtifactRequestSchema,
+  RetractRequestSchema,
   SchemaNameSchema,
   SendMessageRequestSchema,
+  type ValidateRequest,
+  ValidateRequestSchema,
 } from '../lib/models.js';
 import { EventNotifier } from '../lib/notifier.js';
 import type { assembleDocument } from '../lib/openapi.js';
@@ -43,7 +43,7 @@ import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
 import { RateLimiter } from './limiter.js';
-import { operationKey, projectDocument } from './projection.js';
+import { type Overlay, operationKey, projectDocument } from './projection.js';
 import type { Store } from './store/index.js';
 import { SqliteStore, StoreError } from './store/sqlite.js';
 
@@ -258,6 +258,23 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ identity, documents });
   });
 
+  // --- dry-run validation ---
+  //
+  // Read-only. Assembles the doc exactly as propose-batch would (accepted + proposed + this
+  // overlay, the 'wide' view) and runs the meta-schema validator, but commits nothing — no
+  // artifact rows, no events. An empty body validates the current accepted doc as-is. Lets a
+  // caller preview "would this set leave the doc valid?" without the destructive probing of
+  // actually proposing things to find out.
+  app.post('/documents/:name/validate', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body: ValidateRequest = ValidateRequestSchema.parse(await c.req.json());
+    const { overlay, hasOverlay } = buildOverlay(body);
+    const view = hasOverlay ? 'wide' : 'accepted';
+    const projected = await projectDocument(store, docName, view, overlay);
+    const result = await validateDocument(projected);
+    return c.json({ valid: result.errors.length === 0, view, issues: result.errors });
+  });
+
   // --- atomic propose-batch ---
   //
   // The arbitrator's bulk-insert path. Accepts a coordinated set of artifacts (convention +
@@ -273,27 +290,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = ProposeBatchRequestSchema.parse(await c.req.json());
 
-    const overlay: {
-      convention?: ConventionSpec | null;
-      schemas?: Map<string, JSONSchema>;
-      operations?: Map<string, { method: HttpMethod; path: string; spec: OperationSpec }>;
-    } = {};
-    if (body.convention) overlay.convention = body.convention.spec;
-    if (body.schemas && body.schemas.length > 0) {
-      overlay.schemas = new Map();
-      for (const s of body.schemas) overlay.schemas.set(s.name, s.spec);
-    }
-    if (body.endpoints && body.endpoints.length > 0) {
-      overlay.operations = new Map();
-      for (const e of body.endpoints) {
-        overlay.operations.set(operationKey(e.method, e.path), {
-          method: e.method,
-          path: e.path,
-          spec: e.spec,
-        });
-      }
-    }
-
+    const { overlay } = buildOverlay(body);
     const projected = await projectDocument(store, docName, 'wide', overlay);
     const invalid = await validateDocument(projected);
     if (invalid.errors.length > 0) {
@@ -341,6 +338,52 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       // The whole batch rolled back. Surface the failure shape (mirroring per-propose
       // errors) so the caller can reconcile, with no `succeeded` field — atomic means
       // there is nothing partial to report.
+      const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
+      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof StoreError ? err.code : null;
+      return c.json({ error: message, code }, status);
+    }
+  });
+
+  // --- atomic retract ---
+  //
+  // Remove a coordinated set of accepted artifacts. Assembles the accepted doc with the set
+  // removed and requires it still valid (so you can't orphan a live $ref), then commits the
+  // tombstones all-or-nothing. Unilateral and effective immediately; the peer sees the
+  // artifact_retracted events. The "fully valid after" rule means a doc that's invalid for
+  // reasons beyond what you're removing must have those artifacts included too (or fixed first).
+  app.post('/documents/:name/retract', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = RetractRequestSchema.parse(await c.req.json());
+
+    const removeOperations = new Set<string>(
+      (body.endpoints ?? []).map((e) => operationKey(e.method, e.path)),
+    );
+    const removeSchemas = new Set<string>(body.schemas ?? []);
+    const overlay: Overlay = { removeOperations, removeSchemas };
+    if (body.convention) overlay.removeConvention = true;
+    const projected = await projectDocument(store, docName, 'accepted', overlay);
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'retracting these would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
+
+    const input: import('./store/index.js').RetractInput = {};
+    if (body.endpoints && body.endpoints.length > 0) input.endpoints = body.endpoints;
+    if (body.schemas && body.schemas.length > 0) input.schemas = body.schemas;
+    if (body.convention) input.convention = true;
+    try {
+      const retracted = await store.batchRetract(docName, input, c.get('identity'), body.reason);
+      return c.json({ retracted });
+    } catch (err) {
+      // Whole batch rolled back (e.g. a target had no accepted version). Nothing was removed.
       const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
       const message = err instanceof Error ? err.message : String(err);
       const code = err instanceof StoreError ? err.code : null;
@@ -856,6 +899,35 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
     default:
       return 400;
   }
+}
+
+/** Turn a validate/propose-batch request body into a projection Overlay. `hasOverlay` is false
+ *  only for an empty body (nothing to overlay → validate the current doc). Shared by the
+ *  validate and propose-batch routes so both assemble identically. */
+function buildOverlay(body: ValidateRequest): { overlay: Overlay; hasOverlay: boolean } {
+  const overlay: Overlay = {};
+  let hasOverlay = false;
+  if (body.convention) {
+    overlay.convention = body.convention.spec;
+    hasOverlay = true;
+  }
+  if (body.schemas && body.schemas.length > 0) {
+    overlay.schemas = new Map();
+    for (const s of body.schemas) overlay.schemas.set(s.name, s.spec);
+    hasOverlay = true;
+  }
+  if (body.endpoints && body.endpoints.length > 0) {
+    overlay.operations = new Map();
+    for (const e of body.endpoints) {
+      overlay.operations.set(operationKey(e.method, e.path), {
+        method: e.method,
+        path: e.path,
+        spec: e.spec,
+      });
+    }
+    hasOverlay = true;
+  }
+  return { overlay, hasOverlay };
 }
 
 /** Strip undefined values from a batch-item options object before handing to the store

@@ -21,6 +21,7 @@ import {
   emitDiff,
   emitJson,
   emitRenderedDiff,
+  emitShow,
   errExit,
   finalizeLint,
   getOrNull,
@@ -151,7 +152,7 @@ export function register(program: Command): void {
           accepted && proposed ? compactSummary(generatePatch(accepted.spec, proposed.spec)) : null;
         const out = { accepted, proposed, deltaVsAccepted };
         if (opts.json) emitJson(out);
-        else emit(renderTaggedShow({ label, ...out }));
+        else emitShow(renderTaggedShow({ label, ...out }));
       }),
     );
 

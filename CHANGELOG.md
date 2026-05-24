@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-05-24
+
+Re-negotiation escape hatches (issue #2): removing accepted artifacts, and a read-only validity check so you stop reverse-engineering the validation model by proposing things.
+
+### Added
+
+- `brackish retract <doc> --endpoint "GET /a" --schema Foo [--convention] [--reason ...]` removes already-accepted artifacts (atomic, all-or-nothing). The post-removal doc must still validate, so a wedged doc — accepted-but-invalid under a newer OpenAPI check — is fixed by retracting the invalid set together, then re-proposing clean. Retraction is a tombstone version (history preserved), effective immediately; the peer sees `artifact_retracted` events. New artifact status `retracted` + schema migration (v3→v4) widening the `status` CHECK.
+- `brackish validate <doc> [--manifest <file>]` dry-runs the server's OpenAPI 3.1 assembly + meta-schema validation and writes nothing. Bare form checks the current accepted doc (diagnoses an already-invalid doc); `--manifest` previews proposing a whole set together, exactly as `propose-batch` assembles it.
+
+### Changed
+
+- `propose-batch` failure output no longer reads as a per-item, partially-applied sequence. An atomic rejection now says the batch was rejected and nothing was written, instead of listing "remaining (not attempted)" items that implied a stop-on-first commit.
+- `spec_invalid` recovery hint now distinguishes "your spec is wrong" from "the doc is already invalid from other artifacts" and points at `brackish validate` / `brackish retract`.
+- `<kind> lint` warns on OpenAPI 3.0 `nullable` (removed in 3.1 — the meta-schema silently ignores it, so it passes server validation but 3.1 codegen treats the field as non-nullable). Names the field path; suggests `type: [<type>, 'null']`.
+
+### Fixed
+
+- `<kind> show <doc> <id>` routes the status header/divider to stderr, leaving only the spec body on stdout — so `show > file.yaml` writes a clean file, as the skill always claimed. Both versions present → bodies joined by a `---` YAML document separator on stdout.
+
 ## [0.6.0] - 2026-05-22
 
 Security-and-correctness pass plus a CLI refresh driven by real chat-app trials. The eleven security fixes are the headline — XSS, prompt-injection, default-bind exposure, error-mapping holes, partial-commit semantics, capped diff resolution, plaintext token storage, missing per-document ACLs, query-string token leakage, missing rate limiting, and the absence of explicit "not production-hardened" framing. Each has a red test that demonstrates the targeted exploit/bug before the change and turns green after. After the security pass, seven trial runs surfaced a second batch of model-facing CLI polish — `show` simplified, `--rationale` symmetric on reject, status annotates blocked-on refs, skill ships a verb cheat sheet.

@@ -40,7 +40,7 @@ export type ProposeOptions = {
 
 export type RationaleEntry = {
   version: number;
-  status: 'proposed' | 'accepted' | 'rejected';
+  status: 'proposed' | 'accepted' | 'rejected' | 'retracted';
   proposedBy: Identity;
   proposedAt: string;
   acceptedBy?: Identity;
@@ -48,6 +48,9 @@ export type RationaleEntry = {
   rejectedBy?: Identity;
   rejectedAt?: string;
   rejectionReason?: string;
+  retractedBy?: Identity;
+  retractedAt?: string;
+  retractionReason?: string;
   delta: string | null;
   /** The artifact body for this version. Object shape depends on artifact kind. */
   spec: unknown;
@@ -254,9 +257,34 @@ export interface Store {
     by: Identity,
   ): Promise<BatchProposeSucceededItem[]>;
 
+  // --- atomic batch retract ---
+  /**
+   * Atomically remove a coordinated set of currently-accepted artifacts from the doc, in one
+   * transaction. Each target must have a live accepted version (else artifact_not_found) and is
+   * tombstoned with a new `retracted` version. The caller is responsible for validating that the
+   * post-removal assembled doc is still valid (no orphaned $ref) before invoking this.
+   */
+  batchRetract(
+    documentName: DocumentName,
+    input: RetractInput,
+    by: Identity,
+    reason?: string,
+  ): Promise<RetractedItem[]>;
+
   // --- lifecycle ---
   close(): Promise<void>;
 }
+
+export type RetractInput = {
+  endpoints?: Array<{ method: HttpMethod; path: string }>;
+  schemas?: SchemaName[];
+  convention?: boolean;
+};
+
+export type RetractedItem =
+  | { kind: 'convention'; version: number }
+  | { kind: 'schema'; name: SchemaName; version: number }
+  | { kind: 'endpoint'; method: HttpMethod; path: string; version: number };
 
 export type BatchProposeInput = {
   convention?: { spec: ConventionSpec; opts?: ProposeOptions };
