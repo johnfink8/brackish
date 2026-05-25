@@ -53,6 +53,7 @@ describe('BrackishClient (socket mode)', () => {
   it('listEvents + wait + cursor semantics', async () => {
     await host.createDocument('t');
     await host.sendMessage('t', 'first');
+    await host.deliver('t'); // events are held until delivered
 
     // wait with timeout should return immediately with at least one event
     const first = await host.wait('t', { timeoutSeconds: 5 });
@@ -68,6 +69,7 @@ describe('BrackishClient (socket mode)', () => {
   it('inbox surfaces documents with new events for the caller identity', async () => {
     await host.createDocument('a');
     await host.sendMessage('a', 'hi from host');
+    await host.deliver('a');
     const peerInbox = await peer.inbox();
     expect(peerInbox.documents.some((t) => t.documentName === 'a')).toBe(true);
   });

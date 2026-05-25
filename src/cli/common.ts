@@ -32,6 +32,27 @@ export function emitShow(rendered: { meta: string; body: string }): void {
   if (rendered.body.length > 0) process.stdout.write(`${rendered.body}\n`);
 }
 
+/** After any command, remind the caller of moves they've made but not yet delivered (so the peer
+ *  still can't see them). Phrased to reassure that delivering mid-turn is unnecessary — the nudge
+ *  is "deliver eventually, at turn's end", not "deliver now" — so the proposer keeps batching a
+ *  coherent turn. Wired once into withClient; best-effort, never derails the command, and silent
+ *  when nothing is held (the normal state outside an active turn). */
+async function remindHeld(client: BrackishClient): Promise<void> {
+  let held: Array<{ documentName: string; held: number }> = [];
+  try {
+    held = await client.heldByDoc();
+  } catch {
+    return;
+  }
+  if (held.length === 0) return;
+  const total = held.reduce((n, h) => n + h.held, 0);
+  const where = held.map((h) => `${h.documentName} (${h.held})`).join(', ');
+  const m = total === 1 ? 'move' : 'moves';
+  process.stderr.write(
+    `↪ ${total} held ${m} not yet delivered — in ${where}. The peer sees your turn only after \`brackish deliver <doc>\` (or \`nap\`/\`wait\`, which deliver for you). Finish your turn first; no need to deliver mid-thought.\n`,
+  );
+}
+
 export function errExit(code: number, message: string): never {
   process.stderr.write(`brackish: ${message}\n`);
   process.exit(code);
@@ -228,6 +249,8 @@ export async function withClient(
       ...(cfg.socketPath !== undefined ? { socketPath: cfg.socketPath } : {}),
       ...(cfg.server !== undefined ? { server: cfg.server } : {}),
     });
+    // After any successful command, nudge about undelivered moves (once, centrally). Best-effort.
+    await remindHeld(client);
   } catch (err) {
     if (err instanceof ClientError) {
       const code = err.status >= 500 ? 2 : 1;

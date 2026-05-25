@@ -81,6 +81,7 @@ describe('happy-path: skill journey from doc-grant to visualize', () => {
       "I'm the API server. Scope: chat-api — User/Message + GET/POST messages. JWT bearer auth.",
     );
     expect(scopeMsg.kind).toBe('message');
+    await alice.deliver('chat-api'); // events are held until delivered (one turn = one batch)
 
     // bob's inbox should pick up the scope claim immediately (one new message).
     const inboxAfterScope = await bob.inbox();
@@ -316,7 +317,10 @@ describe('happy-path: skill journey from doc-grant to visualize', () => {
     expect(acceptedEndpoint.status).toBe('accepted');
     expect(acceptedEndpoint.version).toBe(2);
 
-    // Verify both rationales rode on their accept events.
+    // Verify both rationales rode on their accept events. Deliver both sides' held events first
+    // (the event stream spans alice's proposes + bob's accepts).
+    await alice.deliver('chat-api');
+    await bob.deliver('chat-api');
     const events = await bob.listEvents('chat-api');
     const messageAcceptEvent = events.events.find(
       (e) => e.kind === 'artifact_accepted' && e.identityKey === 'Message' && e.version === 2,

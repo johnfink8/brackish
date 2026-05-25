@@ -31,6 +31,8 @@ import {
   parseOperationIdentityKey,
   RedeemInviteRequestSchema,
   RejectArtifactRequestSchema,
+  type RetractionTarget,
+  type RetractRequest,
   RetractRequestSchema,
   SchemaNameSchema,
   SendMessageRequestSchema,
@@ -221,6 +223,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ event }, 201);
   });
 
+  // Deliver the caller's held events — make this turn's moves visible to the peer as one batch.
+  app.post('/documents/:name/deliver', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
+    const delivered = await store.deliver(name, c.get('identity'));
+    return c.json({ delivered });
+  });
+
   app.get('/documents/:name/events', async (c) => {
     const name = DocumentNameSchema.parse(c.req.param('name'));
     const identity = c.get('identity');
@@ -256,6 +265,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const identity = c.get('identity');
     const documents = await store.inboxSummary(identity);
     return c.json({ identity, documents });
+  });
+
+  // Read-only: the caller's own held (undelivered) moves, grouped by doc — drives the
+  // "you have undelivered moves" reminder.
+  app.get('/held', async (c) => {
+    const held = await store.heldByDoc(c.get('identity'));
+    return c.json({ held });
   });
 
   // --- dry-run validation ---
@@ -345,25 +361,20 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     }
   });
 
-  // --- atomic retract ---
+  // --- retractions (negotiated, grouped removals) ---
   //
-  // Remove a coordinated set of accepted artifacts. Assembles the accepted doc with the set
-  // removed and requires it still valid (so you can't orphan a live $ref), then commits the
-  // tombstones all-or-nothing. Unilateral and effective immediately; the peer sees the
-  // artifact_retracted events. The "fully valid after" rule means a doc that's invalid for
-  // reasons beyond what you're removing must have those artifacts included too (or fixed first).
-  app.post('/documents/:name/retract', async (c) => {
+  // A retraction proposes removing a coordinated set of accepted artifacts. The peer accepts
+  // (the set is tombstoned atomically, after validating the post-removal doc is still fully
+  // valid — no orphaned $ref) or rejects (nothing changes). Symmetric with propose/accept:
+  // nothing leaves the contract without both sides. The artifacts stay live while pending.
+  app.post('/documents/:name/retractions', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
     const body = RetractRequestSchema.parse(await c.req.json());
-
-    const removeOperations = new Set<string>(
-      (body.endpoints ?? []).map((e) => operationKey(e.method, e.path)),
+    const targets = targetsFromRetractRequest(body);
+    // Preview: would removing these leave the doc invalid? (binding re-check is at accept.)
+    const invalid = await validateDocument(
+      await projectDocument(store, docName, 'accepted', overlayForTargets(targets)),
     );
-    const removeSchemas = new Set<string>(body.schemas ?? []);
-    const overlay: Overlay = { removeOperations, removeSchemas };
-    if (body.convention) overlay.removeConvention = true;
-    const projected = await projectDocument(store, docName, 'accepted', overlay);
-    const invalid = await validateDocument(projected);
     if (invalid.errors.length > 0) {
       return c.json(
         {
@@ -374,21 +385,75 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
         400,
       );
     }
+    const retraction = await store.proposeRetraction(
+      docName,
+      targets,
+      c.get('identity'),
+      body.reason,
+    );
+    return c.json({ retraction }, 201);
+  });
 
-    const input: import('./store/index.js').RetractInput = {};
-    if (body.endpoints && body.endpoints.length > 0) input.endpoints = body.endpoints;
-    if (body.schemas && body.schemas.length > 0) input.schemas = body.schemas;
-    if (body.convention) input.convention = true;
-    try {
-      const retracted = await store.batchRetract(docName, input, c.get('identity'), body.reason);
-      return c.json({ retracted });
-    } catch (err) {
-      // Whole batch rolled back (e.g. a target had no accepted version). Nothing was removed.
-      const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
-      const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof StoreError ? err.code : null;
-      return c.json({ error: message, code }, status);
+  app.get('/documents/:name/retractions', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const statusQ = c.req.query('status');
+    const opts: { status?: 'proposed' | 'accepted' | 'rejected' | 'withdrawn' } = {};
+    if (
+      statusQ === 'proposed' ||
+      statusQ === 'accepted' ||
+      statusQ === 'rejected' ||
+      statusQ === 'withdrawn'
+    ) {
+      opts.status = statusQ;
     }
+    const retractions = await store.listRetractions(docName, opts);
+    return c.json({ retractions });
+  });
+
+  app.get('/documents/:name/retractions/:id', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const retraction = await store.getRetraction(docName, id);
+    if (!retraction) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+    return c.json({ retraction });
+  });
+
+  app.post('/documents/:name/retractions/:id/accept', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const retraction = await store.getRetraction(docName, id);
+    if (!retraction) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+    // Binding fully-valid-after gate: assemble the accepted doc with this set removed.
+    const invalid = await validateDocument(
+      await projectDocument(store, docName, 'accepted', overlayForTargets(retraction.targets)),
+    );
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'accepting this retraction would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
+    const v = await store.acceptRetraction(docName, id, c.get('identity'));
+    return c.json({ retraction: v });
+  });
+
+  app.post('/documents/:name/retractions/:id/reject', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const body = RejectArtifactRequestSchema.parse(await c.req.json());
+    const v = await store.rejectRetraction(docName, id, body.reason, c.get('identity'));
+    return c.json({ retraction: v });
+  });
+
+  app.post('/documents/:name/retractions/:id/withdraw', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const v = await store.withdrawRetraction(docName, id, c.get('identity'));
+    return c.json({ retraction: v });
   });
 
   // --- endpoints (operation artifacts) ---
@@ -928,6 +993,37 @@ function buildOverlay(body: ValidateRequest): { overlay: Overlay; hasOverlay: bo
     hasOverlay = true;
   }
   return { overlay, hasOverlay };
+}
+
+/** Normalize a retract request body ({endpoints, schemas, convention}) into RetractionTargets. */
+function targetsFromRetractRequest(body: RetractRequest): RetractionTarget[] {
+  const targets: RetractionTarget[] = [];
+  for (const e of body.endpoints ?? [])
+    targets.push({ kind: 'endpoint', method: e.method, path: e.path });
+  for (const n of body.schemas ?? []) targets.push({ kind: 'schema', name: n });
+  if (body.convention) targets.push({ kind: 'convention' });
+  return targets;
+}
+
+/** A projection Overlay that removes the retraction's targets — used to validate fully-valid-after. */
+function overlayForTargets(targets: RetractionTarget[]): Overlay {
+  const removeOperations = new Set<string>();
+  const removeSchemas = new Set<string>();
+  let removeConvention = false;
+  for (const t of targets) {
+    if (t.kind === 'endpoint') removeOperations.add(operationKey(t.method, t.path));
+    else if (t.kind === 'schema') removeSchemas.add(t.name);
+    else removeConvention = true;
+  }
+  const overlay: Overlay = { removeOperations, removeSchemas };
+  if (removeConvention) overlay.removeConvention = true;
+  return overlay;
+}
+
+function parseRetractionId(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) throw new HttpError(400, 'invalid retraction id');
+  return n;
 }
 
 /** Strip undefined values from a batch-item options object before handing to the store

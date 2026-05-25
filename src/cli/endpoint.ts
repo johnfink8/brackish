@@ -110,7 +110,7 @@ export function register(program: Command): void {
         if (opts.json) emitJson(v);
         else
           emit(
-            `proposed ${describeOperation(v)}\n  → peer's inbox will pick it up; \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
+            `proposed ${describeOperation(v)}\n  → \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
           );
       }),
     );

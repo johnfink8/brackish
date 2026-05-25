@@ -355,7 +355,8 @@ export const ArtifactWithdrawnEventSchema = z.object({
   version: z.number().int().positive(),
 });
 
-/** A previously-accepted artifact was removed from the doc (unilateral, effective immediately). */
+/** A previously-accepted artifact was tombstoned — emitted per target when a retraction is
+ *  accepted by the peer. */
 export const ArtifactRetractedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_retracted'),
@@ -364,6 +365,46 @@ export const ArtifactRetractedEventSchema = z.object({
   identityKey: z.string(),
   version: z.number().int().positive(),
   reason: z.string().optional(),
+});
+
+// --- retraction lifecycle (a negotiated, grouped removal) ---
+
+export const RetractionTargetSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('endpoint'), method: HttpMethodSchema, path: PathSchema }),
+  z.object({ kind: z.literal('schema'), name: SchemaNameSchema }),
+  z.object({ kind: z.literal('convention') }),
+]);
+export type RetractionTarget = z.infer<typeof RetractionTargetSchema>;
+
+export const RetractionProposedEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('retraction_proposed'),
+  from: IdentitySchema,
+  retractionId: z.number().int().positive(),
+  targets: z.array(RetractionTargetSchema),
+  reason: z.string().optional(),
+});
+
+export const RetractionAcceptedEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('retraction_accepted'),
+  from: IdentitySchema,
+  retractionId: z.number().int().positive(),
+});
+
+export const RetractionRejectedEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('retraction_rejected'),
+  from: IdentitySchema,
+  retractionId: z.number().int().positive(),
+  reason: z.string(),
+});
+
+export const RetractionWithdrawnEventSchema = z.object({
+  ...eventBaseShape,
+  kind: z.literal('retraction_withdrawn'),
+  from: IdentitySchema,
+  retractionId: z.number().int().positive(),
 });
 
 export const DocumentCreatedEventSchema = z.object({
@@ -379,6 +420,10 @@ export const EventSchema = z.discriminatedUnion('kind', [
   ArtifactRejectedEventSchema,
   ArtifactWithdrawnEventSchema,
   ArtifactRetractedEventSchema,
+  RetractionProposedEventSchema,
+  RetractionAcceptedEventSchema,
+  RetractionRejectedEventSchema,
+  RetractionWithdrawnEventSchema,
   DocumentCreatedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
@@ -388,6 +433,7 @@ export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
 export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
 export type ArtifactWithdrawnEvent = z.infer<typeof ArtifactWithdrawnEventSchema>;
 export type ArtifactRetractedEvent = z.infer<typeof ArtifactRetractedEventSchema>;
+export type RetractionProposedEvent = z.infer<typeof RetractionProposedEventSchema>;
 export type DocumentCreatedEvent = z.infer<typeof DocumentCreatedEventSchema>;
 
 // --- inbox summary ---
@@ -505,6 +551,14 @@ export type ProposeBatchRequest = z.infer<typeof ProposeBatchRequestSchema>;
 export const ValidateRequestSchema = z.object(batchOverlayShape).strict();
 export type ValidateRequest = z.infer<typeof ValidateRequestSchema>;
 
+export const DeliverResponseSchema = z.object({ delivered: z.number().int().nonnegative() });
+export type DeliverResponse = z.infer<typeof DeliverResponseSchema>;
+
+export const HeldResponseSchema = z.object({
+  held: z.array(z.object({ documentName: DocumentNameSchema, held: z.number().int().positive() })),
+});
+export type HeldResponse = z.infer<typeof HeldResponseSchema>;
+
 export const ValidateResponseSchema = z.object({
   valid: z.boolean(),
   /** 'wide' when an overlay was supplied (accepted + proposed + overlay, as propose-batch would
@@ -541,25 +595,50 @@ export const RetractRequestSchema = z
   );
 export type RetractRequest = z.infer<typeof RetractRequestSchema>;
 
-export const RetractResponseSchema = z.object({
-  retracted: z.array(
-    z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('convention'), version: z.number().int().positive() }),
-      z.object({
-        kind: z.literal('schema'),
-        name: SchemaNameSchema,
-        version: z.number().int().positive(),
-      }),
-      z.object({
-        kind: z.literal('endpoint'),
-        method: HttpMethodSchema,
-        path: PathSchema,
-        version: z.number().int().positive(),
-      }),
-    ]),
-  ),
+// A retraction is a NEGOTIATED, grouped removal: one party proposes removing a coordinated set of
+// accepted artifacts; the peer accepts (the whole set is tombstoned, atomically, validated
+// fully-valid-after) or rejects (nothing changes). Mirrors the propose/accept lifecycle in the
+// removal direction. The artifacts stay live while the retraction is pending.
+// (RetractionTargetSchema is defined up near the events, which reference it.)
+const retractionBase = {
+  id: z.number().int().positive(),
+  documentName: DocumentNameSchema,
+  targets: z.array(RetractionTargetSchema).min(1),
+  reason: z.string().optional(),
+  proposedBy: IdentitySchema,
+  proposedAt: z.string().datetime(),
+};
+
+export const RetractionSchema = z.discriminatedUnion('status', [
+  z.object({ ...retractionBase, status: z.literal('proposed') }),
+  z.object({
+    ...retractionBase,
+    status: z.literal('accepted'),
+    acceptedBy: IdentitySchema,
+    acceptedAt: z.string().datetime(),
+  }),
+  z.object({
+    ...retractionBase,
+    status: z.literal('rejected'),
+    rejectedBy: IdentitySchema,
+    rejectedAt: z.string().datetime(),
+    rejectionReason: z.string(),
+  }),
+  z.object({
+    ...retractionBase,
+    status: z.literal('withdrawn'),
+    withdrawnAt: z.string().datetime(),
+  }),
+]);
+export type Retraction = z.infer<typeof RetractionSchema>;
+
+export const RetractionResponseSchema = z.object({ retraction: RetractionSchema });
+export type RetractionResponse = z.infer<typeof RetractionResponseSchema>;
+
+export const RetractionListResponseSchema = z.object({
+  retractions: z.array(RetractionSchema),
 });
-export type RetractResponse = z.infer<typeof RetractResponseSchema>;
+export type RetractionListResponse = z.infer<typeof RetractionListResponseSchema>;
 
 export const ProposeBatchResponseSchema = z.object({
   succeeded: z.array(

@@ -100,10 +100,11 @@ export function register(program: Command): void {
           : buildConventionSpec(opts);
         const v = await client.proposeConvention(doc, spec, parseConcurrencyOpts(opts));
         if (opts.json) emitJson(v);
-        else
+        else {
           emit(
             `proposed ${describeConvention(v)}\n  → convention sets doc-level defaults (security, naming). Schemas + endpoints inherit from it — peer should accept this first before you propose dependents.`,
           );
+        }
       }),
     );
 

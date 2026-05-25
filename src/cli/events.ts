@@ -54,13 +54,35 @@ export function register(program: Command): void {
     );
 
   program
+    .command('deliver <doc>')
+    .description(
+      "deliver your held moves to the peer — makes this turn's proposes/accepts/etc. visible as one batch. Until you deliver (or nap/wait, which imply it) the peer sees nothing of your turn.",
+    )
+    .option('--json', 'output JSON')
+    .action(async (document: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const { delivered } = await client.deliver(document);
+        if (opts.json) emitJson({ delivered });
+        else
+          emit(
+            delivered > 0 ? `delivered ${delivered} event(s) to the peer` : '(nothing to deliver)',
+          );
+      }),
+    );
+
+  program
     .command('wait <doc>')
-    .description('long-poll <doc>: block until new events arrive or --timeout elapses')
+    .description(
+      'long-poll <doc>: block until new events arrive or --timeout elapses (delivers your held moves first)',
+    )
     .option('--timeout <seconds>', 'max seconds to block (1..300)', '30')
     .option('--since <n>', 'override cursor (exclusive lower bound)')
     .option('--json', 'output JSON')
     .action(async (document: string, opts: { timeout: string; since?: string; json?: boolean }) =>
       withClient(async (client) => {
+        // Waiting on the peer means your turn is done — deliver your held moves first so the peer
+        // has something coherent to react to (and you don't deadlock waiting on each other).
+        await client.deliver(document);
         const timeoutSeconds = Number.parseFloat(opts.timeout);
         const sinceN = opts.since !== undefined ? Number.parseInt(opts.since, 10) : undefined;
         const res = await client.wait(document, {
@@ -99,6 +121,9 @@ export function register(program: Command): void {
         if (!Number.isFinite(seconds) || seconds < 0) {
           errExit(2, `--seconds must be a non-negative number (got "${opts.seconds}")`);
         }
+        // Napping = "I'm done, your move" — deliver any held moves across the caller's docs first
+        // so the peer isn't left waiting on an undelivered turn. Content-gated, so empty is cheap.
+        for (const d of await client.listDocuments()) await client.deliver(d.name);
         await sleep(seconds * 1000);
         const res = await client.inbox();
         if (opts.json) emitJson(res);

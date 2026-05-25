@@ -43,10 +43,28 @@ const eventPreview = (e: Event): string => {
       return e.reason
         ? `${e.artifactKind} ${e.identityKey} removed (was v${e.version}): ${trim(e.reason, 60)}`
         : `${e.artifactKind} ${e.identityKey} removed (was v${e.version})`;
+    case 'retraction_proposed': {
+      const what = e.targets.map(describeRetractionTarget).join(', ');
+      return e.reason
+        ? `retraction #${e.retractionId} — remove ${what}: ${trim(e.reason, 60)}`
+        : `retraction #${e.retractionId} — remove ${what}`;
+    }
+    case 'retraction_accepted':
+      return `retraction #${e.retractionId} accepted — artifacts removed`;
+    case 'retraction_rejected':
+      return `retraction #${e.retractionId} rejected: ${trim(e.reason, 60)}`;
+    case 'retraction_withdrawn':
+      return `retraction #${e.retractionId} withdrawn by proposer`;
     case 'document_created':
       return `created by ${e.by}`;
   }
 };
+
+function describeRetractionTarget(t: import('../lib/models.js').RetractionTarget): string {
+  if (t.kind === 'endpoint') return `${t.method.toUpperCase()} ${t.path}`;
+  if (t.kind === 'schema') return `schema ${t.name}`;
+  return 'convention';
+}
 
 const eventFrom = (e: Event): string => {
   if ('from' in e) return e.from;

@@ -1,22 +1,28 @@
-// `brackish retract <doc>` — atomically remove accepted artifacts from the doc. The server
-// validates that the doc still assembles after removal (no orphaned $ref) and commits
-// all-or-nothing. Effective immediately; the peer sees the retract events. This is the escape
-// hatch for a wedged doc: retract the whole invalid set in one call, then re-propose clean.
+// `brackish retract …` — NEGOTIATED removal of accepted artifacts. `retract propose` opens a
+// grouped retraction (a coordinated set of removals); the PEER accepts it (the set is tombstoned,
+// validated fully-valid-after) or rejects it. Symmetric with propose/accept — nothing leaves the
+// shared contract unilaterally. The artifacts stay live until the retraction is accepted.
 
 import type { Command } from 'commander';
 import {
   HttpMethodSchema,
   PathSchema,
+  type Retraction,
+  type RetractionTarget,
   type RetractRequest,
   SchemaNameSchema,
 } from '../lib/models.js';
-import { collect, emit, emitJson, errExit, withClient } from './common.js';
+import { collect, emit, emitJson, errExit, resolveRejectReason, withClient } from './common.js';
 
 export function register(program: Command): void {
-  program
-    .command('retract <doc>')
+  const retract = program
+    .command('retract')
+    .description('negotiated removal of accepted artifacts (propose → peer accepts/rejects)');
+
+  retract
+    .command('propose <doc>')
     .description(
-      'remove accepted artifacts (atomic, all-or-nothing). The doc must still be valid afterward — to escape a wedged doc, retract the whole invalid set together. Effective immediately; the peer sees it.',
+      'propose removing a coordinated set of accepted artifacts. The peer accepts (set is removed) or rejects. To escape a wedged doc, name the whole invalid set so the post-removal doc is valid.',
     )
     .option(
       '--endpoint <"METHOD /path">',
@@ -26,7 +32,7 @@ export function register(program: Command): void {
     )
     .option('--schema <name>', 'schema to remove (repeatable)', collect, [])
     .option('--convention', 'remove the convention')
-    .option('--reason <text>', 'why — rides on the retract events for the peer')
+    .option('--reason <text>', 'why — rides on the retraction for the peer')
     .option('--json')
     .action(
       async (
@@ -51,21 +57,89 @@ export function register(program: Command): void {
             body.schemas === undefined &&
             body.convention === undefined
           ) {
-            errExit(2, 'retract: name at least one --endpoint, --schema, or --convention');
+            errExit(2, 'retract propose: name at least one --endpoint, --schema, or --convention');
           }
-
-          const res = await client.retract(doc, body);
-          if (opts.json) {
-            emitJson(res);
-            return;
-          }
-          for (const r of res.retracted)
-            emit(`retracted ${describeRetracted(r)} (tombstone v${r.version})`);
+          const { retraction } = await client.proposeRetraction(doc, body);
+          if (opts.json) return emitJson(retraction);
           emit(
-            `removed ${res.retracted.length} artifact(s) — the peer will see the retract events.`,
+            `proposed retraction #${retraction.id} — remove ${retraction.targets.map(describeTarget).join(', ')}`,
+          );
+          emit(
+            `  → the peer accepts/rejects it: \`brackish retract accept ${doc} ${retraction.id}\` / \`reject\``,
           );
         }),
     );
+
+  retract
+    .command('list <doc>')
+    .description('list retractions (default: only those awaiting action)')
+    .option('--all', 'include accepted/rejected/withdrawn, not just proposed')
+    .option('--json')
+    .action(async (doc: string, opts: { all?: boolean; json?: boolean }) =>
+      withClient(async (client) => {
+        const res = await client.listRetractions(doc, opts.all ? {} : { status: 'proposed' });
+        if (opts.json) return emitJson(res);
+        if (res.retractions.length === 0) {
+          emit(opts.all ? '(no retractions)' : '(no pending retractions)');
+          return;
+        }
+        for (const r of res.retractions) emit(formatRetraction(r));
+      }),
+    );
+
+  retract
+    .command('accept <doc> <id>')
+    .description(
+      'accept a proposed retraction — removes the set (peer-only; validated fully-valid-after)',
+    )
+    .option('--json')
+    .action(async (doc: string, idRaw: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const { retraction } = await client.acceptRetraction(doc, parseId(idRaw));
+        if (opts.json) return emitJson(retraction);
+        emit(
+          `accepted retraction #${retraction.id} — removed ${retraction.targets.map(describeTarget).join(', ')}`,
+        );
+      }),
+    );
+
+  retract
+    .command('reject <doc> <id> [reason]')
+    .description('reject a proposed retraction — the artifacts stay (peer-only)')
+    .option('--rationale <text>', 'reason (alias for the positional)')
+    .option('--json')
+    .action(
+      async (
+        doc: string,
+        idRaw: string,
+        reasonArg: string | undefined,
+        opts: { rationale?: string; json?: boolean },
+      ) =>
+        withClient(async (client) => {
+          const reason = resolveRejectReason(reasonArg, opts.rationale);
+          const { retraction } = await client.rejectRetraction(doc, parseId(idRaw), reason);
+          if (opts.json) return emitJson(retraction);
+          emit(`rejected retraction #${retraction.id} — artifacts kept`);
+        }),
+    );
+
+  retract
+    .command('withdraw <doc> <id>')
+    .description('withdraw your own proposed retraction')
+    .option('--json')
+    .action(async (doc: string, idRaw: string, opts: { json?: boolean }) =>
+      withClient(async (client) => {
+        const { retraction } = await client.withdrawRetraction(doc, parseId(idRaw));
+        if (opts.json) return emitJson(retraction);
+        emit(`withdrew retraction #${retraction.id}`);
+      }),
+    );
+}
+
+function parseId(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) errExit(2, `invalid retraction id: ${raw}`);
+  return n;
 }
 
 function parseEndpointToken(tok: string) {
@@ -76,13 +150,14 @@ function parseEndpointToken(tok: string) {
   return { method: HttpMethodSchema.parse(m[1].toLowerCase()), path: PathSchema.parse(m[2]) };
 }
 
-function describeRetracted(
-  r:
-    | { kind: 'convention'; version: number }
-    | { kind: 'schema'; name: string; version: number }
-    | { kind: 'endpoint'; method: string; path: string; version: number },
-): string {
-  if (r.kind === 'convention') return 'convention';
-  if (r.kind === 'schema') return `schema ${r.name}`;
-  return `endpoint ${r.method.toUpperCase()} ${r.path}`;
+function describeTarget(t: RetractionTarget): string {
+  if (t.kind === 'endpoint') return `${t.method.toUpperCase()} ${t.path}`;
+  if (t.kind === 'schema') return `schema ${t.name}`;
+  return 'convention';
+}
+
+function formatRetraction(r: Retraction): string {
+  const what = r.targets.map(describeTarget).join(', ');
+  const reason = r.reason ? ` — "${r.reason}"` : '';
+  return `#${r.id}  [${r.status}]  by ${r.proposedBy}  remove ${what}${reason}`;
 }

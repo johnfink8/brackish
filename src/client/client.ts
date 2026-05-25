@@ -12,6 +12,8 @@ import {
   type ConventionArtifact,
   ConventionArtifactSchema,
   type ConventionSpec,
+  type DeliverResponse,
+  DeliverResponseSchema,
   type DiffResponse,
   DiffResponseSchema,
   type Document,
@@ -23,6 +25,8 @@ import {
   EndpointListResponseSchema,
   type EventListResponse,
   EventListResponseSchema,
+  type HeldResponse,
+  HeldResponseSchema,
   type HttpMethod,
   type Identity,
   type InboxResponse,
@@ -41,9 +45,11 @@ import {
   ProposeBatchResponseSchema,
   type RationaleResponse,
   RationaleResponseSchema,
+  type RetractionListResponse,
+  RetractionListResponseSchema,
+  type RetractionResponse,
+  RetractionResponseSchema,
   type RetractRequest,
-  type RetractResponse,
-  RetractResponseSchema,
   type SchemaArtifact,
   SchemaArtifactSchema,
   type SchemaListResponse,
@@ -189,6 +195,20 @@ export class BrackishClient {
     );
   }
 
+  /** Deliver the caller's held events — make this turn's moves visible to the peer. */
+  deliver(document: DocumentName): Promise<DeliverResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/deliver`,
+      DeliverResponseSchema,
+      { method: 'POST' },
+    );
+  }
+
+  /** Read-only: the caller's held (undelivered) moves, grouped by doc. */
+  heldByDoc(): Promise<HeldResponse['held']> {
+    return this.fetchAndParse('/held', HeldResponseSchema).then((r) => r.held);
+  }
+
   /** Dry-run: assemble + meta-schema-validate the doc (optionally with an overlay), writing
    *  nothing. Empty body validates the current accepted doc. */
   validate(document: DocumentName, body: ValidateRequest = {}): Promise<ValidateResponse> {
@@ -199,13 +219,51 @@ export class BrackishClient {
     );
   }
 
-  /** Atomically remove a set of accepted artifacts. Server validates the post-removal doc and
-   *  commits all-or-nothing. */
-  retract(document: DocumentName, body: RetractRequest): Promise<RetractResponse> {
+  /** Propose a grouped retraction (negotiated removal). The peer accepts/rejects it. */
+  proposeRetraction(document: DocumentName, body: RetractRequest): Promise<RetractionResponse> {
     return this.fetchAndParse(
-      `/documents/${encodeURIComponent(document)}/retract`,
-      RetractResponseSchema,
+      `/documents/${encodeURIComponent(document)}/retractions`,
+      RetractionResponseSchema,
       { method: 'POST', body },
+    );
+  }
+
+  listRetractions(
+    document: DocumentName,
+    opts: { status?: 'proposed' | 'accepted' | 'rejected' | 'withdrawn' } = {},
+  ): Promise<RetractionListResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/retractions`,
+      RetractionListResponseSchema,
+      { query: { status: opts.status } },
+    );
+  }
+
+  acceptRetraction(document: DocumentName, id: number): Promise<RetractionResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/retractions/${id}/accept`,
+      RetractionResponseSchema,
+      { method: 'POST' },
+    );
+  }
+
+  rejectRetraction(
+    document: DocumentName,
+    id: number,
+    reason: string,
+  ): Promise<RetractionResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/retractions/${id}/reject`,
+      RetractionResponseSchema,
+      { method: 'POST', body: { reason } },
+    );
+  }
+
+  withdrawRetraction(document: DocumentName, id: number): Promise<RetractionResponse> {
+    return this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/retractions/${id}/withdraw`,
+      RetractionResponseSchema,
+      { method: 'POST' },
     );
   }
 

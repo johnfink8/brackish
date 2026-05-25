@@ -39,6 +39,10 @@ import {
   operationIdentityKey,
   type Party,
   parseOperationIdentityKey,
+  type Retraction,
+  RetractionSchema,
+  type RetractionTarget,
+  RetractionTargetSchema,
   type SchemaArtifact,
   SchemaArtifactSchema,
   type SchemaName,
@@ -50,8 +54,6 @@ import type {
   BatchProposeSucceededItem,
   ProposeOptions,
   RationaleEntry,
-  RetractedItem,
-  RetractInput,
   Store,
 } from './index.js';
 
@@ -67,7 +69,10 @@ CREATE TABLE IF NOT EXISTS events (
   document_name TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
   kind          TEXT NOT NULL,
   created_at    TEXT NOT NULL,
-  data          TEXT NOT NULL
+  data          TEXT NOT NULL,
+  -- NULL until the author delivers their turn. Undelivered events are the author's private
+  -- "internal monologue": invisible to the peer's read/inbox/wait until delivered.
+  delivered_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS events_document_id_idx ON events(document_name, id);
 
@@ -151,6 +156,26 @@ CREATE TABLE IF NOT EXISTS invite_grants (
   PRIMARY KEY (token_hash, document_name)
 );
 
+-- Negotiated, grouped removals. A retraction proposes removing a coordinated set of accepted
+-- artifacts; the peer accepts (the set is tombstoned in artifact_versions) or rejects. id is
+-- per-document sequential. targets is a JSON array of RetractionTarget.
+CREATE TABLE IF NOT EXISTS retractions (
+  document_name    TEXT NOT NULL REFERENCES documents(name) ON DELETE CASCADE,
+  id               INTEGER NOT NULL,
+  targets          TEXT NOT NULL,
+  reason           TEXT,
+  status           TEXT NOT NULL CHECK (status IN ('proposed','accepted','rejected','withdrawn')),
+  proposed_by      TEXT NOT NULL,
+  proposed_at      TEXT NOT NULL,
+  accepted_by      TEXT,
+  accepted_at      TEXT,
+  rejected_by      TEXT,
+  rejected_at      TEXT,
+  rejection_reason TEXT,
+  withdrawn_at     TEXT,
+  PRIMARY KEY (document_name, id)
+);
+
 
 `;
 
@@ -173,6 +198,23 @@ type EventRow = {
   kind: string;
   created_at: string;
   data: string;
+  delivered_at: string | null;
+};
+
+type RetractionRow = {
+  document_name: string;
+  id: number;
+  targets: string;
+  reason: string | null;
+  status: 'proposed' | 'accepted' | 'rejected' | 'withdrawn';
+  proposed_by: string;
+  proposed_at: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  rejection_reason: string | null;
+  withdrawn_at: string | null;
 };
 
 type ArtifactRow = {
@@ -234,6 +276,7 @@ export class SqliteStore implements Store {
     this.db.exec(SCHEMA);
     this.migrateOwnershipFromCreatedBy();
     this.migrateArtifactStatusCheck();
+    this.migrateEventsDelivered();
     this.recordSchemaVersion();
     this.notifier = opts.notifier;
   }
@@ -263,6 +306,17 @@ export class SqliteStore implements Store {
       }
     });
     tx();
+  }
+
+  /** Add events.delivered_at (the deliver/hold feature) to an older DB. Detected by column
+   *  presence (a fresh DB already has it from SCHEMA). Existing events are backfilled as
+   *  delivered — they were already visible before the feature, so they stay visible. */
+  private migrateEventsDelivered(): void {
+    if (this.tableColumns('events').includes('delivered_at')) return;
+    this.db.exec(
+      'ALTER TABLE events ADD COLUMN delivered_at TEXT;' +
+        'UPDATE events SET delivered_at = created_at WHERE delivered_at IS NULL;',
+    );
   }
 
   /** v3 → v4 migration: widen the artifact_versions.status CHECK to admit 'retracted'. SQLite
@@ -496,19 +550,20 @@ export class SqliteStore implements Store {
   /** Insert an event row, return the materialized Event, and notify subscribers. */
   private insertEvent(documentName: DocumentName, kind: string, data: object): Event {
     const createdAt = now();
+    // delivered_at defaults to NULL (undelivered/held). The peer is NOT notified here — that
+    // happens at deliver time, so a multi-move turn surfaces to the peer as one coherent batch.
     const result = this.db
       .prepare('INSERT INTO events (document_name, kind, created_at, data) VALUES (?, ?, ?, ?)')
       .run(documentName, kind, createdAt, JSON.stringify(data));
     const id = Number(result.lastInsertRowid);
-    const event = this.rowToEvent({
+    return this.rowToEvent({
       id,
       document_name: documentName,
       kind,
       created_at: createdAt,
       data: JSON.stringify(data),
+      delivered_at: null,
     });
-    this.notifier.notify(documentName);
-    return event;
   }
 
   /** Fetch the latest version row for (document, kind, identity_key) regardless of status — used
@@ -1054,21 +1109,58 @@ export class SqliteStore implements Store {
     return this.insertEvent(documentName, 'message', { from, text });
   }
 
+  /** Deliver the caller's held (undelivered) events: make them visible to the peer's
+   *  read/inbox/wait, as one coherent batch. Content-gated — returns the number delivered, and
+   *  only notifies waiters when something actually went out (so an empty turn doesn't wake the
+   *  peer). The author is matched on the event's `from`/`by` field. */
+  async deliver(documentName: DocumentName, by: Identity): Promise<number> {
+    const result = this.db
+      .prepare(
+        `UPDATE events SET delivered_at = ?
+         WHERE document_name = ? AND delivered_at IS NULL
+           AND COALESCE(json_extract(data, '$.from'), json_extract(data, '$.by')) = ?`,
+      )
+      .run(now(), documentName, by);
+    const count = Number(result.changes);
+    if (count > 0) this.notifier.notify(documentName);
+    return count;
+  }
+
+  /** Read-only: the caller's own still-held (undelivered) events, grouped by doc. Drives the
+   *  "you have undelivered moves" reminder without delivering anything. */
+  async heldByDoc(by: Identity): Promise<Array<{ documentName: DocumentName; held: number }>> {
+    const rows = this.db
+      .prepare<[string], { document_name: string; n: number }>(
+        `SELECT document_name, COUNT(*) AS n FROM events
+         WHERE delivered_at IS NULL
+           AND COALESCE(json_extract(data, '$.from'), json_extract(data, '$.by')) = ?
+         GROUP BY document_name
+         ORDER BY document_name`,
+      )
+      .all(by);
+    return rows.map((r) => ({ documentName: r.document_name, held: r.n }));
+  }
+
   async listEvents(documentName: DocumentName, since: Cursor, limit: number): Promise<Event[]> {
+    // Only DELIVERED events are visible — undelivered events are the author's held, private turn.
+    // Cursor stays id-based. In the 2-party turn-based model each side delivers its whole turn
+    // atomically, so a reader never advances past a peer event that delivers later (the peer's
+    // pending events are always its highest ids). The only skip window is genuinely concurrent
+    // turns (both sides creating + the lower-id author delivering after the other has read past) —
+    // rare, and the documented limitation of holding on an id cursor.
     const rows = this.db
       .prepare<[string, number, number], EventRow>(
-        'SELECT * FROM events WHERE document_name = ? AND id > ? ORDER BY id LIMIT ?',
+        'SELECT * FROM events WHERE document_name = ? AND id > ? AND delivered_at IS NOT NULL ORDER BY id LIMIT ?',
       )
       .all(documentName, since, limit);
     return rows.map((r) => this.rowToEvent(r));
   }
 
   async listLastEvents(documentName: DocumentName, limit: number): Promise<Event[]> {
-    // Reverse-fetch the tail in id-DESC order then flip to chronological — keeps the response
-    // shape identical to listEvents (oldest first).
+    // Tail peek (no cursor advance), so no hole-stop needed — just the last N *delivered* events.
     const rows = this.db
       .prepare<[string, number], EventRow>(
-        'SELECT * FROM events WHERE document_name = ? ORDER BY id DESC LIMIT ?',
+        'SELECT * FROM events WHERE document_name = ? AND delivered_at IS NOT NULL ORDER BY id DESC LIMIT ?',
       )
       .all(documentName, limit);
     return rows.reverse().map((r) => this.rowToEvent(r));
@@ -1606,6 +1698,7 @@ export class SqliteStore implements Store {
         `SELECT t.name AS document_name,
                 (SELECT COUNT(*) FROM events e
                    WHERE e.document_name = t.name
+                   AND e.delivered_at IS NOT NULL
                    AND e.id > COALESCE(
                      (SELECT last_seen FROM cursors
                         WHERE identity = @identity AND document_name = t.name),
@@ -1631,6 +1724,7 @@ export class SqliteStore implements Store {
         .prepare<[string, number, string], EventRow>(
           `SELECT * FROM events
              WHERE document_name = ?
+               AND delivered_at IS NOT NULL
                AND id > ?
                AND COALESCE(json_extract(data, '$.from'), json_extract(data, '$.by')) IS NOT ?
              ORDER BY id DESC LIMIT 1`,
@@ -1721,43 +1815,241 @@ export class SqliteStore implements Store {
     return succeeded;
   }
 
-  // --- atomic batch retract ---
+  // --- retractions (negotiated, grouped removals) ---
 
-  async batchRetract(
+  async proposeRetraction(
     documentName: DocumentName,
-    input: RetractInput,
+    targets: RetractionTarget[],
     by: Identity,
     reason?: string,
-  ): Promise<RetractedItem[]> {
-    // One outer transaction wrapping each per-artifact retract as a savepoint, mirroring
-    // batchPropose: any throw (e.g. a target with no accepted version) rolls the whole set back.
-    const out: RetractedItem[] = [];
+  ): Promise<Retraction> {
+    // Propose a grouped removal. Validates each target currently has an accepted version (the
+    // fully-valid-after check is the caller's, at accept time). Artifacts stay live while pending.
+    let row: RetractionRow | undefined;
     const tx = this.db.transaction(() => {
-      if (input.convention) {
-        const r = this.retractRaw(documentName, 'convention', CONVENTION_KEY, by, reason);
-        out.push({ kind: 'convention', version: r.version });
-      }
-      if (input.schemas) {
-        for (const name of input.schemas) {
-          const r = this.retractRaw(documentName, 'schema', name, by, reason);
-          out.push({ kind: 'schema', name, version: r.version });
-        }
-      }
-      if (input.endpoints) {
-        for (const e of input.endpoints) {
-          const r = this.retractRaw(
-            documentName,
-            'operation',
-            operationIdentityKey(e.method, e.path),
-            by,
-            reason,
+      const doc = this.db
+        .prepare<[string], DocumentRow>('SELECT * FROM documents WHERE name = ?')
+        .get(documentName);
+      if (!doc) throw new StoreError('document_not_found', `document "${documentName}" not found`);
+      for (const t of targets) {
+        const live = this.getRaw(documentName, targetKind(t), targetKey(t), { status: 'accepted' });
+        if (!live) {
+          throw new StoreError(
+            'artifact_not_found',
+            `no accepted ${targetKind(t)} "${targetKey(t)}" to retract`,
           );
-          out.push({ kind: 'endpoint', method: e.method, path: e.path, version: r.version });
         }
       }
+      const maxRow = this.db
+        .prepare<[string], { m: number | null }>(
+          'SELECT MAX(id) AS m FROM retractions WHERE document_name = ?',
+        )
+        .get(documentName);
+      const id = (maxRow?.m ?? 0) + 1;
+      const proposedAt = now();
+      this.db
+        .prepare(
+          `INSERT INTO retractions (document_name, id, targets, reason, status, proposed_by, proposed_at)
+           VALUES (?, ?, ?, ?, 'proposed', ?, ?)`,
+        )
+        .run(documentName, id, JSON.stringify(targets), reason ?? null, by, proposedAt);
+      this.insertEvent(documentName, 'retraction_proposed', {
+        from: by,
+        retractionId: id,
+        targets,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+      row = this.getRetractionRow(documentName, id);
     });
     tx();
-    return out;
+    if (!row) throw new Error('proposeRetraction: row missing after insert');
+    return this.rowToRetraction(row);
+  }
+
+  async acceptRetraction(
+    documentName: DocumentName,
+    id: number,
+    by: Identity,
+  ): Promise<Retraction> {
+    // Tombstone every target atomically and mark the retraction accepted. The caller validates
+    // fully-valid-after (post-removal doc) before invoking; retractRaw re-checks each target.
+    let row: RetractionRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.getRetractionRow(documentName, id);
+      if (!existing) {
+        throw new StoreError('artifact_not_found', `retraction #${id} not found`);
+      }
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `retraction #${id} is ${existing.status}, not proposed`,
+        );
+      }
+      if (existing.proposed_by === by) {
+        throw new StoreError(
+          'cannot_accept_own',
+          `${by} cannot accept their own retraction #${id}`,
+        );
+      }
+      const reason = existing.reason ?? undefined;
+      for (const t of this.parseTargets(existing.targets)) {
+        this.retractRaw(documentName, targetKind(t), targetKey(t), by, reason);
+      }
+      const acceptedAt = now();
+      this.db
+        .prepare(
+          `UPDATE retractions SET status = 'accepted', accepted_by = ?, accepted_at = ?
+           WHERE document_name = ? AND id = ?`,
+        )
+        .run(by, acceptedAt, documentName, id);
+      this.insertEvent(documentName, 'retraction_accepted', { from: by, retractionId: id });
+      row = this.getRetractionRow(documentName, id);
+    });
+    tx();
+    if (!row) throw new Error('acceptRetraction: row missing after update');
+    return this.rowToRetraction(row);
+  }
+
+  async rejectRetraction(
+    documentName: DocumentName,
+    id: number,
+    reason: string,
+    by: Identity,
+  ): Promise<Retraction> {
+    let row: RetractionRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.getRetractionRow(documentName, id);
+      if (!existing) throw new StoreError('artifact_not_found', `retraction #${id} not found`);
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `retraction #${id} is ${existing.status}, not proposed`,
+        );
+      }
+      if (existing.proposed_by === by) {
+        throw new StoreError(
+          'cannot_reject_own',
+          `${by} cannot reject their own retraction #${id} — withdraw it instead`,
+        );
+      }
+      const rejectedAt = now();
+      this.db
+        .prepare(
+          `UPDATE retractions SET status = 'rejected', rejected_by = ?, rejected_at = ?, rejection_reason = ?
+           WHERE document_name = ? AND id = ?`,
+        )
+        .run(by, rejectedAt, reason, documentName, id);
+      this.insertEvent(documentName, 'retraction_rejected', { from: by, retractionId: id, reason });
+      row = this.getRetractionRow(documentName, id);
+    });
+    tx();
+    if (!row) throw new Error('rejectRetraction: row missing after update');
+    return this.rowToRetraction(row);
+  }
+
+  async withdrawRetraction(
+    documentName: DocumentName,
+    id: number,
+    by: Identity,
+  ): Promise<Retraction> {
+    let row: RetractionRow | undefined;
+    const tx = this.db.transaction(() => {
+      const existing = this.getRetractionRow(documentName, id);
+      if (!existing) throw new StoreError('artifact_not_found', `retraction #${id} not found`);
+      if (existing.status !== 'proposed') {
+        throw new StoreError(
+          'artifact_not_pending',
+          `retraction #${id} is ${existing.status}, only proposed retractions can be withdrawn`,
+        );
+      }
+      if (existing.proposed_by !== by) {
+        throw new StoreError(
+          'cannot_withdraw_others',
+          `${by} cannot withdraw retraction #${id} — it was proposed by ${existing.proposed_by}`,
+        );
+      }
+      const withdrawnAt = now();
+      this.db
+        .prepare(
+          `UPDATE retractions SET status = 'withdrawn', withdrawn_at = ?
+           WHERE document_name = ? AND id = ?`,
+        )
+        .run(withdrawnAt, documentName, id);
+      this.insertEvent(documentName, 'retraction_withdrawn', { from: by, retractionId: id });
+      row = this.getRetractionRow(documentName, id);
+    });
+    tx();
+    if (!row) throw new Error('withdrawRetraction: row missing after update');
+    return this.rowToRetraction(row);
+  }
+
+  async getRetraction(documentName: DocumentName, id: number): Promise<Retraction | null> {
+    const row = this.getRetractionRow(documentName, id);
+    return row ? this.rowToRetraction(row) : null;
+  }
+
+  async listRetractions(
+    documentName: DocumentName,
+    opts: { status?: Retraction['status'] } = {},
+  ): Promise<Retraction[]> {
+    const rows = opts.status
+      ? this.db
+          .prepare<[string, string], RetractionRow>(
+            'SELECT * FROM retractions WHERE document_name = ? AND status = ? ORDER BY id',
+          )
+          .all(documentName, opts.status)
+      : this.db
+          .prepare<[string], RetractionRow>(
+            'SELECT * FROM retractions WHERE document_name = ? ORDER BY id',
+          )
+          .all(documentName);
+    return rows.map((r) => this.rowToRetraction(r));
+  }
+
+  private getRetractionRow(documentName: DocumentName, id: number): RetractionRow | undefined {
+    return this.db
+      .prepare<[string, number], RetractionRow>(
+        'SELECT * FROM retractions WHERE document_name = ? AND id = ?',
+      )
+      .get(documentName, id);
+  }
+
+  private parseTargets(json: string): RetractionTarget[] {
+    return z.array(RetractionTargetSchema).parse(parseJson(json));
+  }
+
+  private rowToRetraction(row: RetractionRow): Retraction {
+    const base = {
+      id: row.id,
+      documentName: row.document_name,
+      targets: this.parseTargets(row.targets),
+      ...(row.reason !== null ? { reason: row.reason } : {}),
+      proposedBy: row.proposed_by,
+      proposedAt: row.proposed_at,
+    };
+    if (row.status === 'proposed') return RetractionSchema.parse({ ...base, status: 'proposed' });
+    if (row.status === 'accepted') {
+      return RetractionSchema.parse({
+        ...base,
+        status: 'accepted',
+        acceptedBy: row.accepted_by,
+        acceptedAt: row.accepted_at,
+      });
+    }
+    if (row.status === 'withdrawn') {
+      return RetractionSchema.parse({
+        ...base,
+        status: 'withdrawn',
+        withdrawnAt: row.withdrawn_at,
+      });
+    }
+    return RetractionSchema.parse({
+      ...base,
+      status: 'rejected',
+      rejectedBy: row.rejected_by,
+      rejectedAt: row.rejected_at,
+      rejectionReason: row.rejection_reason,
+    });
   }
 
   // --- lifecycle ---
@@ -1783,9 +2075,34 @@ function previewOf(e: Event): string {
       return `withdrew ${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_retracted':
       return `retracted ${e.artifactKind} ${e.identityKey} v${e.version}${e.reason ? `: ${truncate(neutralizeForReminder(e.reason), 50)}` : ''}`;
+    case 'retraction_proposed':
+      return `proposed retraction #${e.retractionId} (${e.targets.map(describeTarget).join(', ')})${e.reason ? `: ${truncate(neutralizeForReminder(e.reason), 50)}` : ''}`;
+    case 'retraction_accepted':
+      return `accepted retraction #${e.retractionId}`;
+    case 'retraction_rejected':
+      return `rejected retraction #${e.retractionId}: ${truncate(neutralizeForReminder(e.reason), 50)}`;
+    case 'retraction_withdrawn':
+      return `withdrew retraction #${e.retractionId}`;
     case 'document_created':
       return `document created by ${e.by}`;
   }
+}
+
+/** Map a RetractionTarget to the store's (kind, identityKey) addressing scheme. */
+function targetKind(t: RetractionTarget): 'operation' | 'schema' | 'convention' {
+  return t.kind === 'endpoint' ? 'operation' : t.kind;
+}
+function targetKey(t: RetractionTarget): string {
+  if (t.kind === 'endpoint') return operationIdentityKey(t.method, t.path);
+  if (t.kind === 'schema') return t.name;
+  return CONVENTION_KEY;
+}
+
+/** Compact human label for a retraction target (event previews). */
+function describeTarget(t: RetractionTarget): string {
+  if (t.kind === 'endpoint') return `${t.method.toUpperCase()} ${t.path}`;
+  if (t.kind === 'schema') return `schema ${t.name}`;
+  return 'convention';
 }
 
 function truncate(s: string, n: number): string {

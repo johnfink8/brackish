@@ -48,6 +48,10 @@ describe('server (Unix-socket transport)', () => {
     return undiciFetch(`http://localhost${path}`, init);
   };
 
+  // Events are held until their author delivers them. Flush identity's held events in a doc.
+  const deliver = (doc: string, identity = 'host'): Promise<UndiciResponse> =>
+    call('POST', `/documents/${doc}/deliver`, { identity });
+
   describe('public + auth', () => {
     it('healthz is reachable with no identity header', async () => {
       const res = await undiciFetch('http://localhost/healthz', { dispatcher: sockAgent });
@@ -106,6 +110,7 @@ describe('server (Unix-socket transport)', () => {
 
     it('send + list events from cursor 0', async () => {
       await call('POST', '/documents/t/messages', { body: { text: 'hello' } });
+      await deliver('t');
       const res = await call('GET', '/documents/t/events?since=0');
       expect(res.status).toBe(200);
       const data = (await res.json()) as { events: { kind: string }[]; cursor: number };
@@ -145,6 +150,7 @@ describe('server (Unix-socket transport)', () => {
       for (let i = 0; i < 5; i++) {
         await call('POST', '/documents/t/messages', { body: { text: `m${i}` } });
       }
+      await deliver('t');
       const cursorBefore = (
         (await (await call('GET', '/documents/t/events?tail=2')).json()) as { cursor: number }
       ).cursor;
@@ -214,13 +220,15 @@ describe('server (Unix-socket transport)', () => {
     it('wakes the moment a new message arrives from another identity', async () => {
       const t0 = Date.now();
       const waitPromise = call('GET', '/documents/t/wait?timeout=10');
-      // Send a message ~150ms later as a different identity.
+      // Send + deliver a message ~150ms later as a different identity. Delivery is what wakes a
+      // waiter now — a held (undelivered) message must not.
       const sendPromise = (async () => {
         await new Promise((r) => setTimeout(r, 150));
         await call('POST', '/documents/t/messages', {
           body: { text: 'wake up' },
           identity: 'peer',
         });
+        await deliver('t', 'peer');
       })();
 
       const [res] = await Promise.all([waitPromise, sendPromise]);
@@ -700,75 +708,101 @@ describe('server (Unix-socket transport)', () => {
     };
     beforeEach(seed);
 
-    it('removes an unreferenced endpoint and drops it from the accepted doc', async () => {
-      const res = await call('POST', '/documents/rt/retract', {
-        body: { endpoints: [{ method: 'get', path: '/msgs' }], reason: 'dead route' },
+    // host proposes retractions; peer accepts (cannot_accept_own). Returns the retraction id.
+    const propose = async (
+      body: unknown,
+    ): Promise<{ status: number; id: number; json: unknown }> => {
+      const res = await call('POST', '/documents/rt/retractions', { body, identity: 'host' });
+      const json = await res.json();
+      const id = (json as { retraction?: { id: number } }).retraction?.id ?? 0;
+      return { status: res.status, id, json };
+    };
+
+    it('proposing leaves the artifact live; the peer accepting removes it', async () => {
+      const p = await propose({
+        endpoints: [{ method: 'get', path: '/msgs' }],
+        reason: 'dead route',
       });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { retracted: Array<{ kind: string; version: number }> };
-      expect(body.retracted).toHaveLength(1);
-      expect(body.retracted[0]?.kind).toBe('endpoint');
-      // Gone from the accepted doc.
-      const cur = await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {});
-      expect(cur.status).toBe(404);
-      // Doc still validates.
+      expect(p.status).toBe(201);
+      // Still live while pending.
+      expect((await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {})).status).toBe(200);
+
+      const acc = await call('POST', `/documents/rt/retractions/${p.id}/accept`, {
+        identity: 'peer',
+      });
+      expect(acc.status).toBe(200);
+      // Now gone, doc still valid, both events present.
+      expect((await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {})).status).toBe(404);
       const val = (await (await call('POST', '/documents/rt/validate', { body: {} })).json()) as {
         valid: boolean;
       };
       expect(val.valid).toBe(true);
-      // The retract event landed.
+      await deliver('rt', 'peer'); // the accept's events are the peer's; deliver to see them
       const events = (await (await call('GET', '/documents/rt/events?since=0')).json()) as {
         events: { kind: string }[];
       };
+      expect(events.events.some((e) => e.kind === 'retraction_accepted')).toBe(true);
       expect(events.events.some((e) => e.kind === 'artifact_retracted')).toBe(true);
     });
 
-    it('refuses a retraction that would orphan a live $ref, removing nothing', async () => {
-      // MessageList (and GET /msgs) reference Message; retracting Message alone dangles them.
-      const res = await call('POST', '/documents/rt/retract', {
-        body: { schemas: ['Message'] },
+    it('cannot accept your own retraction', async () => {
+      const p = await propose({ endpoints: [{ method: 'get', path: '/msgs' }] });
+      const acc = await call('POST', `/documents/rt/retractions/${p.id}/accept`, {
+        identity: 'host',
       });
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { code: string; issues?: { message: string }[] };
-      expect(body.code).toBe('spec_invalid');
-      // Nothing removed — Message is still the current accepted schema.
-      const cur = await call('GET', '/documents/rt/schemas/Message', {});
-      expect(cur.status).toBe(200);
+      expect(acc.status).toBe(403);
+      expect(((await acc.json()) as { code: string }).code).toBe('cannot_accept_own');
+      expect((await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {})).status).toBe(200);
     });
 
-    it('removes a coordinated set atomically (the wedged-doc escape)', async () => {
-      const res = await call('POST', '/documents/rt/retract', {
-        body: {
-          endpoints: [{ method: 'get', path: '/msgs' }],
-          schemas: ['MessageList', 'Message'],
-        },
+    it('rejecting keeps the artifact', async () => {
+      const p = await propose({ endpoints: [{ method: 'get', path: '/msgs' }] });
+      const rej = await call('POST', `/documents/rt/retractions/${p.id}/reject`, {
+        body: { reason: 'not yet — stream not accepted' },
+        identity: 'peer',
       });
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as { retracted: unknown[] };
-      expect(body.retracted).toHaveLength(3);
+      expect(rej.status).toBe(200);
+      expect((await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {})).status).toBe(200);
+    });
+
+    it('refuses to propose a retraction that would orphan a live $ref, proposing nothing', async () => {
+      // MessageList + GET /msgs reference Message; removing Message alone dangles them.
+      const p = await propose({ schemas: ['Message'] });
+      expect(p.status).toBe(400);
+      expect((p.json as { code: string }).code).toBe('spec_invalid');
+      expect(
+        (
+          (await (await call('GET', '/documents/rt/retractions', {})).json()) as {
+            retractions: unknown[];
+          }
+        ).retractions,
+      ).toHaveLength(0);
+    });
+
+    it('accepts a coordinated set atomically (the wedged-doc escape)', async () => {
+      const p = await propose({
+        endpoints: [{ method: 'get', path: '/msgs' }],
+        schemas: ['MessageList', 'Message'],
+      });
+      expect(p.status).toBe(201);
+      const acc = await call('POST', `/documents/rt/retractions/${p.id}/accept`, {
+        identity: 'peer',
+      });
+      expect(acc.status).toBe(200);
       for (const name of ['Message', 'MessageList']) {
-        const cur = await call('GET', `/documents/rt/schemas/${name}`, {});
-        expect(cur.status).toBe(404);
+        expect((await call('GET', `/documents/rt/schemas/${name}`, {})).status).toBe(404);
       }
     });
 
-    it('404s when a target has no accepted version, removing nothing', async () => {
-      const res = await call('POST', '/documents/rt/retract', {
-        body: { schemas: ['Nonexistent'] },
-      });
-      expect(res.status).toBe(404);
-      const body = (await res.json()) as { code: string };
-      expect(body.code).toBe('artifact_not_found');
-      // The real schema is untouched.
-      const cur = await call('GET', '/documents/rt/schemas/Message', {});
-      expect(cur.status).toBe(200);
+    it('404s proposing a retraction for a target with no accepted version', async () => {
+      const p = await propose({ schemas: ['Nonexistent'] });
+      expect(p.status).toBe(404);
+      expect((p.json as { code: string }).code).toBe('artifact_not_found');
     });
 
     it('lets a retracted artifact be re-proposed and re-accepted (comes back live)', async () => {
-      await call('POST', '/documents/rt/retract', {
-        body: { endpoints: [{ method: 'get', path: '/msgs' }] },
-      });
-      // Re-propose the same endpoint (no --force needed; latest version is the tombstone).
+      const p = await propose({ endpoints: [{ method: 'get', path: '/msgs' }] });
+      await call('POST', `/documents/rt/retractions/${p.id}/accept`, { identity: 'peer' });
       const re = await call('POST', '/documents/rt/endpoints', {
         body: {
           method: 'get',
@@ -791,8 +825,7 @@ describe('server (Unix-socket transport)', () => {
         identity: 'peer',
       });
       expect(acc.status).toBe(200);
-      const cur = await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {});
-      expect(cur.status).toBe(200);
+      expect((await call('GET', '/documents/rt/endpoints/GET%20%2Fmsgs', {})).status).toBe(200);
     });
   });
 
@@ -831,6 +864,8 @@ describe('server (Unix-socket transport)', () => {
       await call('POST', '/documents', { body: { name: 'a' }, identity: 'host' });
       await call('POST', '/documents', { body: { name: 'b' }, identity: 'host' });
       await call('POST', '/documents/a/messages', { body: { text: 'hi' }, identity: 'host' });
+      await deliver('a');
+      await deliver('b');
 
       const res = await call('GET', '/inbox', { identity: 'peer' });
       expect(res.status).toBe(200);
@@ -858,6 +893,7 @@ describe('server (Unix-socket transport)', () => {
         body: { reason: 'matches the API.md shape' },
       });
       expect(acc.status).toBe(200);
+      await deliver('r', 'peer'); // the accept event is the peer's
       // The reason should show up on the artifact_accepted event in the stream
       const events = (await (await call('GET', '/documents/r/events?since=0')).json()) as {
         events: { kind: string; reason?: string }[];
@@ -874,6 +910,7 @@ describe('server (Unix-socket transport)', () => {
       });
       const acc = await call('POST', '/documents/r2/schemas/Bar/accept', { identity: 'peer' });
       expect(acc.status).toBe(200);
+      await deliver('r2', 'peer');
       const events = (await (await call('GET', '/documents/r2/events?since=0')).json()) as {
         events: { kind: string; reason?: string }[];
       };

@@ -62,7 +62,7 @@ export function register(program: Command): void {
           if (opts.json) emitJson(v);
           else
             emit(
-              `proposed ${describeSchema(v)}\n  → peer's inbox will pick it up; \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
+              `proposed ${describeSchema(v)}\n  → \`brackish send ${doc} "<why>"\` if the diff isn't self-explanatory`,
             );
         }),
     );
