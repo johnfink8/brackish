@@ -102,7 +102,7 @@ Every brackish document assembles into a real OpenAPI 3.1 spec. There are three 
 | `schema` | JSON Schema component | `<Name>` (PascalCase) |
 | `convention` | document-level `{ info, servers, securitySchemes }` + top-level `security` + `x-brackish` | singleton per document |
 
-Chain of versions: `proposed → accepted | rejected`; you can't accept your own proposal. The "current contract" is the latest accepted version of each artifact. `withdraw` lets a proposer take back their own still-proposed version; `retract` removes an already-accepted artifact (a tombstone version — the doc must stay valid afterward).
+Chain of versions: `proposed → accepted | rejected`; you can't accept your own proposal. The "current contract" is the latest accepted version of each artifact. `withdraw` lets a proposer take back their own still-proposed version. Removing an already-accepted artifact is also negotiated: `retract propose` opens a grouped removal that the peer accepts (the set is tombstoned, validated still-valid) or rejects — nothing leaves the contract unilaterally.
 
 `x-brackish` extensions ride alongside the spec — `idempotent`, `sideEffects`, `timing` on operations; `naming: camelCase|snake_case` on the convention. They're OpenAPI Specification Extensions, ignored by codegen tools that don't understand them, surfaced by `brackish visualize`.
 
@@ -166,7 +166,8 @@ brackish schema accept <doc> User Order OrderItem    # variadic; stops on first 
 # Batch propose / validate / retract
 brackish propose-batch <doc> --manifest manifest.yaml [--lint-only]   # atomic: all-or-nothing
 brackish validate <doc> [--manifest manifest.yaml]                    # dry-run validity check; writes nothing
-brackish retract <doc> --endpoint "GET /a" --schema Foo [--convention] # remove accepted artifacts (atomic)
+brackish retract propose <doc> --endpoint "GET /a" --schema Foo       # negotiated removal; peer accepts/rejects
+brackish retract accept|reject|list|withdraw <doc> [id]
 
 # Visualize
 brackish visualize <doc> --format openapi --out spec.yaml

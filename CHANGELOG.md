@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Renegotiation, continued: `retract` becomes **negotiated**, and turns are now **delivered** as coherent batches. Both came out of the renegotiation e2e trial — 0.6.1's unilateral `retract` broke the propose/accept invariant, and (in production, unlike the turn-atomic harness) a multi-move turn dribbled to the peer event-by-event, pressuring them to judge a half-formed state.
+
+### Added
+
+- **`brackish deliver <doc>`** + turn-delivery model. Your events (proposes/accepts/rejects/retractions/messages) are now **held** until you deliver them, then surface to the peer's `read`/`inbox`/`wait` as one batch — "don't show them your internal monologue." `nap` and `wait` imply `deliver` (so ending a turn hands off automatically); delivering nothing is a no-op. Your own moves' effects still show in `status` immediately — only the event feed to the peer is held. (`events.delivered_at` column; new-DB migration backfills existing events as delivered. Known limitation: under genuinely concurrent turns the id-based read cursor can skip a late-delivered lower-id event — rare in the turn-based norm.)
+
+### Changed
+
+- **`retract` is now a propose/accept lifecycle, not an immediate removal.** `brackish retract propose <doc> --endpoint X --schema Y` opens a grouped retraction; the **peer** accepts it (the set is tombstoned atomically, validated fully-valid-after) or rejects it (nothing changes). Artifacts stay live until accepted. New verbs: `retract propose | accept | reject | list | withdraw`. New `retractions` table + `retraction_proposed/accepted/rejected/withdrawn` events. **Breaking** vs 0.6.1's unilateral `retract <doc> --endpoint …` (which removed immediately).
+
 ## [0.6.1] - 2026-05-24
 
 Re-negotiation escape hatches (issue #2): removing accepted artifacts, and a read-only validity check so you stop reverse-engineering the validation model by proposing things.
