@@ -28,6 +28,9 @@ export const DEFAULT_DEMO_ADMIN: Identity = creator.actor;
 export type SeedOptions = {
   socketPath: string;
   documentName?: DocumentName;
+  // Moves to replay. Defaults to the bundled chat-app demo (`brackish demo`); callers like the
+  // trial harness pass their own settled-contract seed instead.
+  moves?: DemoMove[];
   // Path to the daemon's SQLite file. When provided, after the replay completes the seed
   // rewrites events.created_at + artifact_versions.{proposed,accepted,rejected}_at to the
   // original trial timestamps from the move log — so the sidebar's wall-clock gaps show the
@@ -38,6 +41,7 @@ export type SeedOptions = {
 
 export async function seedDemo(opts: SeedOptions): Promise<{ documentName: DocumentName }> {
   const docName = DocumentNameSchema.parse(opts.documentName ?? demoData.document);
+  const moves = opts.moves ?? demoData.moves;
   const step = opts.onStep ?? ((_m: string) => {});
 
   const clients = new Map<Identity, BrackishClient>();
@@ -51,16 +55,19 @@ export async function seedDemo(opts: SeedOptions): Promise<{ documentName: Docum
   };
 
   try {
-    for (const move of demoData.moves) {
+    for (const move of moves) {
       await dispatch(move, clientFor(move.actor), docName, step);
     }
+    // Events are held until their author delivers — a seeded doc should land fully delivered so
+    // its history is visible in /ui and to both sides. Deliver each actor's events.
+    for (const c of clients.values()) await c.deliver(docName);
   } finally {
     await Promise.all([...clients.values()].map((c) => c.close()));
   }
 
   if (opts.dataPath !== undefined) {
     step('rewriting timestamps to original trial wall-clock');
-    patchTimestamps(opts.dataPath, docName, demoData.moves);
+    patchTimestamps(opts.dataPath, docName, moves);
   }
 
   return { documentName: docName };
