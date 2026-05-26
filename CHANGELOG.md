@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-05-26
+
+Optional TLS for cross-machine use — bring your own self-signed cert; the client pins it by fingerprint, no CA.
+
+### Added
+
+- **BYO-TLS on the TCP bind.** `brackish serve` / `up --tls-cert <pem> --tls-key <pem>` serve HTTPS on the bind; the Unix socket stays plain HTTP. The client **pins the cert by SHA-256 fingerprint**, carried in the `brackish connect … --tls-pin sha256:…` line that `invite` / `serve --invite` print and verified before the first token-bearing request — so cross-machine traffic is encrypted and MITM-resistant without provisioning a CA. `brackish tls gen` wraps `openssl` to mint a self-signed cert+key (clear error + the manual command if openssl is absent).
+
+### Removed
+
+- **`brackish install` no longer edits `settings.json` at all.** Dropped the stubbed-off `UserPromptSubmit` inbox hook (script + `activate`/`deactivate`/`hook-snippet` wiring) **and** the `--permission` allow-rule insertion. `install` now just copies the skill dir; `uninstall` removes it. Sync is the foreground `status`/`nap` loop. If you want Claude to skip per-command approval for brackish, add a `Bash(brackish *)` allow-rule to your `settings.json` yourself — brackish won't write it for you.
+
 ## [0.7.1] - 2026-05-26
 
 0.7.1 standardizes the CLI grammar (a breaking flip to **verb-first**) and makes **every command atomic**. On top of that: renegotiation got proper primitives — `counter` and a negotiated `retract` — and turns now deliver as coherent batches. Most of it came out of the e2e trials.

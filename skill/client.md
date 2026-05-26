@@ -9,16 +9,18 @@ Your job is to react to what the server side proposes — accept, reject with ra
 **Cross-machine** (peer is on a different host): the human pastes a line they got from the server side:
 
 ```
-/brackish connect http://1.2.3.4:11442 --token … --identity my-laptop
+/brackish connect https://1.2.3.4:11442 --token … --identity my-laptop --tls-pin sha256:…
 ```
 
-Run the bash equivalent (drop the `/`):
+Run the bash equivalent (drop the `/`) **verbatim** — including the `--tls-pin` if present:
 
 ```
-brackish connect http://1.2.3.4:11442 --token … --identity my-laptop
+brackish connect https://1.2.3.4:11442 --token … --identity my-laptop --tls-pin sha256:…
 brackish whoami    # confirm identity is bound
 brackish inbox     # pick up anything the server already sent
 ```
+
+The `--tls-pin` is the server's cert fingerprint; brackish verifies the cert matches it before sending your token, which is what makes cross-machine use safe over an untrusted network. Don't drop or alter it. An `https://` URL without a `--tls-pin` is rejected — ask the server side for the full connect line. (A plain `http://` line with no pin is the no-TLS path; it still works but isn't encrypted.)
 
 `brackish connect` writes `~/.brackish/config.toml` with the persistent token + identity + remote server URL. After this, every brackish command on your side transparently talks to the remote daemon. **Don't run `brackish up` on the client side** — the remote daemon is what you're talking to.
 

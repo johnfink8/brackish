@@ -1,5 +1,6 @@
 // Cross-machine bootstrap: invite (mint), connect (redeem), parties (list), revoke.
 
+import { readFileSync } from 'node:fs';
 import type { Command } from 'commander';
 import { redeemInvite } from '../client/client.js';
 import {
@@ -9,6 +10,7 @@ import {
   saveClientConfig,
 } from '../io/config.js';
 import { IdentitySchema } from '../lib/models.js';
+import { certFingerprint, normalizePin } from '../lib/tls.js';
 import { formatParties } from '../render/output.js';
 import { collect, emit, emitJson, errExit, inferReachableHost, withClient } from './common.js';
 
@@ -38,13 +40,15 @@ export function register(program: Command): void {
         const inv = await client.createInvite(identity, ttl, grantDocs);
         const cfg = await loadServerAddrForInvite();
         const url = cfg.tcpUrl;
+        const pinFlag = cfg.tlsPin ? ` --tls-pin ${cfg.tlsPin}` : '';
         if (opts.json) {
           emitJson({
             inviteToken: inv.inviteToken,
             identity: inv.identity,
             expiresAt: inv.expiresAt,
             grantDocs,
-            connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}`,
+            connectCommand: `brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${pinFlag}`,
+            ...(cfg.tlsPin ? { tlsPin: cfg.tlsPin } : {}),
             ...(cfg.hint ? { hint: cfg.hint } : {}),
           });
         } else {
@@ -55,7 +59,7 @@ export function register(program: Command): void {
               : `\n  (no docs granted — run \`brackish doc grant <doc> ${identity}\` after redeem)`;
           emit(
             `invite issued: identity=${identity}, expires=${inv.expiresAt}${grantLine}\n` +
-              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${hintLine}`,
+              `share with peer:\n  brackish connect ${url} --token ${inv.inviteToken} --identity ${identity}${pinFlag}${hintLine}`,
           );
         }
       }),
@@ -68,9 +72,28 @@ export function register(program: Command): void {
     )
     .requiredOption('--token <tok>', 'invite token from `brackish invite`')
     .requiredOption('--identity <name>', 'self-declared label for this client (must match invite)')
-    .action(async (url: string, opts: { token: string; identity: string }) => {
+    .option(
+      '--tls-pin <pin>',
+      'pin the server cert by sha256 fingerprint (copied from the invite line; required for https://)',
+    )
+    .action(async (url: string, opts: { token: string; identity: string; tlsPin?: string }) => {
       IdentitySchema.parse(opts.identity);
-      const persistent = await redeemInvite(url, opts.token);
+      let tlsPin: string | undefined;
+      if (opts.tlsPin !== undefined) {
+        try {
+          tlsPin = normalizePin(opts.tlsPin);
+        } catch (e) {
+          errExit(2, e instanceof Error ? e.message : String(e));
+        }
+      }
+      if (url.startsWith('https://') && tlsPin === undefined) {
+        errExit(2, 'connect: https:// requires --tls-pin (the fingerprint from the invite line)');
+      }
+      const persistent = await redeemInvite(
+        url,
+        opts.token,
+        tlsPin !== undefined ? { tlsPin } : {},
+      );
       if (persistent.identity !== opts.identity) {
         errExit(
           1,
@@ -81,6 +104,7 @@ export function register(program: Command): void {
         identity: persistent.identity,
         server: url,
         token: persistent.token,
+        ...(tlsPin !== undefined ? { tlsPin } : {}),
       });
       emit(
         `connected as ${persistent.identity} → ${url}\nconfig written to ${defaultClientConfigPath()}`,
@@ -111,7 +135,11 @@ export function register(program: Command): void {
     );
 }
 
-async function loadServerAddrForInvite(): Promise<{ tcpUrl: string; hint?: string }> {
+async function loadServerAddrForInvite(): Promise<{
+  tcpUrl: string;
+  hint?: string;
+  tlsPin?: string;
+}> {
   const fileCfg = loadServerConfig();
   if (fileCfg.bind === undefined) {
     errExit(
@@ -121,8 +149,16 @@ async function loadServerAddrForInvite(): Promise<{ tcpUrl: string; hint?: strin
   }
   const { host, port } = parseBindAddress(fileCfg.bind);
   const inferred = await inferReachableHost(host);
+  // https:// + the cert's pin when the daemon is configured for TLS; the peer needs the pin to
+  // verify the self-signed cert before sending their token.
+  const scheme = fileCfg.tlsCert !== undefined ? 'https' : 'http';
+  const tlsPin =
+    fileCfg.tlsCert !== undefined
+      ? certFingerprint(readFileSync(fileCfg.tlsCert, 'utf8'))
+      : undefined;
   return {
-    tcpUrl: `http://${inferred.host}:${port}`,
+    tcpUrl: `${scheme}://${inferred.host}:${port}`,
     ...(inferred.hint ? { hint: inferred.hint } : {}),
+    ...(tlsPin !== undefined ? { tlsPin } : {}),
   };
 }

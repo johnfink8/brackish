@@ -4,7 +4,13 @@
 // Socket mode: undici Agent with a unix-socket connect option; sends X-Brackish-Identity.
 // TCP mode:    plain fetch; sends Authorization: Bearer <token>.
 
-import { Agent, type Response as UndiciResponse, fetch as undiciFetch } from 'undici';
+import { TLSSocket } from 'node:tls';
+import {
+  Agent,
+  buildConnector,
+  type Response as UndiciResponse,
+  fetch as undiciFetch,
+} from 'undici';
 import { z } from 'zod';
 import {
   type AcceptBatchRequest,
@@ -67,6 +73,7 @@ import {
   WhoamiResponseSchema,
 } from '../lib/models.js';
 import { type OpenAPIDocument, OpenAPIDocumentSchema } from '../lib/openapi.js';
+import { normalizePin } from '../lib/tls.js';
 
 export type SpecIssue = { severity: 'error' | 'warn'; field: string; message: string };
 
@@ -96,10 +103,11 @@ type RequestFn = (
   init?: { method?: string; body?: unknown; query?: Record<string, string | number | undefined> },
 ) => Promise<UndiciResponse>;
 
-/** Discriminated union: socket-trust mode needs an identity; TCP mode needs a server+token. */
+/** Discriminated union: socket-trust mode needs an identity; TCP mode needs a server+token.
+ *  `tlsPin` is required when `server` is https:// (we pin the self-signed cert by fingerprint). */
 export type BrackishClientOptions =
   | { socketPath: string; identity: Identity }
-  | { server: string; token: string };
+  | { server: string; token: string; tlsPin?: string };
 
 export class BrackishClient {
   private readonly request: RequestFn;
@@ -120,13 +128,15 @@ export class BrackishClient {
     } else {
       const base = opts.server.replace(/\/$/, '');
       const token = opts.token;
+      const dispatcher = tlsDispatcher(base, opts.tlsPin);
       this.request = (path, init) =>
         undiciFetch(buildUrl(base, path, init?.query), {
           method: init?.method ?? 'GET',
           headers: jsonHeaders({ Authorization: `Bearer ${token}` }, init?.body),
+          ...(dispatcher ? { dispatcher } : {}),
           ...(init?.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
         });
-      this.cleanup = null;
+      this.cleanup = dispatcher ? () => dispatcher.close() : null;
     }
   }
 
@@ -786,6 +796,81 @@ export class BrackishClient {
 
 const HealthzResponseSchema = z.object({ ok: z.boolean(), version: z.string() });
 
+// --- TLS pinning ---
+//
+// For https:// servers we don't trust a CA chain — we pin the server's self-signed cert by
+// SHA-256 fingerprint (the pin rides in the connect line). The undici connector does the TLS
+// handshake with chain validation off, then accepts the socket ONLY if the presented cert's
+// fingerprint matches the pin. So an attacker can't substitute their own cert, and connecting
+// by raw IP works (no hostname/SAN matching needed). http:// uses no dispatcher, as before.
+
+/** Build the undici dispatcher for a TCP server URL. Returns null for http:// (default agent).
+ *  Throws if https:// has no pin (pinning is mandatory) or a pin is given for http://. */
+function tlsDispatcher(server: string, tlsPin: string | undefined): Agent | null {
+  if (!server.startsWith('https://')) {
+    if (tlsPin !== undefined) {
+      throw new Error(`--tls-pin given but server URL "${server}" is not https://`);
+    }
+    return null;
+  }
+  if (tlsPin === undefined) {
+    throw new Error(
+      `https:// server "${server}" requires a --tls-pin (the cert fingerprint from the invite line); ` +
+        'brackish pins the self-signed cert rather than trusting a CA',
+    );
+  }
+  const pin = normalizePin(tlsPin);
+  // Disable TLS session resumption (`maxCachedSessions: 0`). With resumption ON (undici's default
+  // caches ~100 sessions), only the FIRST connection per process does a full handshake that
+  // presents the cert; every later connection resumes with an abbreviated handshake, no cert is
+  // re-sent, and we'd be forced to skip the pin check — trusting that undici's session cache only
+  // ever holds pin-verified sessions. It doesn't reliably: a rejected MITM connection's session
+  // ticket can be cached before our destroy() (esp. TLS 1.2, where it arrives mid-handshake), so a
+  // later resume would bypass the pin. Off, every connection presents its cert and is pin-checked.
+  // No shade to undici, I just don't know enough about it to trust it and this costs very little.
+  const base = buildConnector({ rejectUnauthorized: false, maxCachedSessions: 0 });
+  const connector: typeof base = (connOpts, cb) => {
+    base(connOpts, (err, socket) => {
+      if (err !== null || socket === null) {
+        cb(err ?? new Error('TLS connect failed'), null);
+        return;
+      }
+      if (!(socket instanceof TLSSocket)) {
+        socket.destroy();
+        cb(new Error('expected a TLS connection for https://'), null);
+        return;
+      }
+      // Fail closed: if a session is ever reused despite caching being off, no cert is presented,
+      // so we cannot verify the pin — refuse rather than trust an unverified peer.
+      if (socket.isSessionReused()) {
+        socket.destroy();
+        cb(new Error('TLS session unexpectedly resumed; cannot verify cert pin — refusing'), null);
+        return;
+      }
+      const fp = socket.getPeerCertificate().fingerprint256;
+      if (typeof fp !== 'string') {
+        socket.destroy();
+        cb(new Error('TLS: server presented no certificate to pin'), null);
+        return;
+      }
+      const presented = normalizePin(fp);
+      if (presented !== pin) {
+        socket.destroy();
+        cb(
+          new Error(
+            `TLS cert pin mismatch: server presented ${presented}, expected ${pin} — ` +
+              'the cert changed or the connection is being intercepted',
+          ),
+          null,
+        );
+        return;
+      }
+      cb(null, socket);
+    });
+  };
+  return new Agent({ connect: connector });
+}
+
 // --- helpers ---
 
 function buildUrl(
@@ -838,16 +923,28 @@ async function okJson(res: UndiciResponse): Promise<unknown> {
 }
 
 /** Standalone bootstrap helper: trade an invite token for a persistent (identity, token) pair.
- *  Doesn't require an authenticated client because /connect is a public route. */
-export async function redeemInvite(server: string, inviteToken: string): Promise<ConnectResponse> {
+ *  Doesn't require an authenticated client because /connect is a public route. The pin (when the
+ *  server is https://) protects this very first, token-bearing request — there's no unverified
+ *  window. */
+export async function redeemInvite(
+  server: string,
+  inviteToken: string,
+  opts: { tlsPin?: string } = {},
+): Promise<ConnectResponse> {
   const url = `${server.replace(/\/$/, '')}/connect`;
-  const res = await undiciFetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ inviteToken }),
-  });
-  const body = await okJson(res);
-  return ConnectResponseSchema.parse(body);
+  const dispatcher = tlsDispatcher(server, opts.tlsPin);
+  try {
+    const res = await undiciFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inviteToken }),
+      ...(dispatcher ? { dispatcher } : {}),
+    });
+    const body = await okJson(res);
+    return ConnectResponseSchema.parse(body);
+  } finally {
+    if (dispatcher) await dispatcher.close();
+  }
 }
 
 /** Optional concurrency hints on `proposeEndpoint` / `proposeSchema` / `proposeConvention`. */
@@ -873,7 +970,11 @@ export function clientOptionsFromConfig(
     return { socketPath: cfg.socketPath, identity: cfg.identity };
   }
   if (cfg.server !== undefined && cfg.token !== undefined) {
-    return { server: cfg.server, token: cfg.token };
+    return {
+      server: cfg.server,
+      token: cfg.token,
+      ...(cfg.tlsPin !== undefined ? { tlsPin: cfg.tlsPin } : {}),
+    };
   }
   throw new Error(
     'client config has neither a socketPath nor a server+token pair; run `brackish init` first',

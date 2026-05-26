@@ -23,6 +23,7 @@ import {
   saveServerConfig,
 } from '../io/config.js';
 import { IdentitySchema, TokenSchema } from '../lib/models.js';
+import { normalizePin } from '../lib/tls.js';
 import {
   emit,
   emitJson,
@@ -44,12 +45,26 @@ export function register(program: Command): void {
     .option('--identity <name>', 'self-declared label for this client')
     .option('--server <url>', 'cross-machine: brackish server URL')
     .option('--token <tok>', 'cross-machine: persistent token issued by `brackish connect`')
+    .option('--tls-pin <pin>', 'cross-machine over https://: pin the server cert by fingerprint')
     .option('--socket-path <path>', 'override default socket path')
     .action(
-      async (opts: { identity?: string; server?: string; token?: string; socketPath?: string }) => {
+      async (opts: {
+        identity?: string;
+        server?: string;
+        token?: string;
+        tlsPin?: string;
+        socketPath?: string;
+      }) => {
         const identity = opts.identity ?? process.env.BRACKISH_IDENTITY;
         if (!identity) errExit(2, 'init: --identity is required (or set BRACKISH_IDENTITY)');
         IdentitySchema.parse(identity);
+        const tlsPin = opts.tlsPin !== undefined ? normalizePin(opts.tlsPin) : undefined;
+        if (opts.server?.startsWith('https://') && tlsPin === undefined) {
+          errExit(
+            2,
+            'init --server https:// requires --tls-pin (the fingerprint from the invite line)',
+          );
+        }
         const cfg = opts.server
           ? {
               identity,
@@ -57,6 +72,7 @@ export function register(program: Command): void {
               token: opts.token
                 ? TokenSchema.parse(opts.token)
                 : errExit(2, 'init --server requires --token (run `brackish connect` first)'),
+              ...(tlsPin !== undefined ? { tlsPin } : {}),
             }
           : {
               identity,
@@ -103,6 +119,11 @@ export function register(program: Command): void {
     .option('--data <path>', 'override sqlite db path')
     .option('--config <path>', 'load server config from FILE instead of default')
     .option(
+      '--tls-cert <path>',
+      'serve TLS on the TCP bind with this PEM cert (requires --bind; pairs with --tls-key). Generate one with `brackish tls gen`.',
+    )
+    .option('--tls-key <path>', 'PEM private key for --tls-cert')
+    .option(
       '--invite <identity>',
       'after starting, mint a one-time connect token for <identity> and print the connect command (requires --bind)',
     )
@@ -117,11 +138,23 @@ export function register(program: Command): void {
         socket?: string;
         data?: string;
         config?: string;
+        tlsCert?: string;
+        tlsKey?: string;
         invite?: string;
         inviteTtl: string;
       }) => {
         ensureBrackishHome();
         const fileCfg = loadServerConfig({ explicitPath: opts.config });
+
+        const tlsCert = opts.tlsCert ?? fileCfg.tlsCert;
+        const tlsKey = opts.tlsKey ?? fileCfg.tlsKey;
+        if ((tlsCert === undefined) !== (tlsKey === undefined)) {
+          errExit(2, 'serve: --tls-cert and --tls-key must be given together');
+        }
+        if (tlsCert !== undefined && tlsKey !== undefined) {
+          if (!existsSync(tlsCert)) errExit(2, `serve: --tls-cert file not found: ${tlsCert}`);
+          if (!existsSync(tlsKey)) errExit(2, `serve: --tls-key file not found: ${tlsKey}`);
+        }
 
         let inviteTtl: number | null = null;
         if (opts.invite !== undefined) {
@@ -148,33 +181,48 @@ export function register(program: Command): void {
                 const { host, port } = parseBindAddress(rawBind);
                 return `${host}:${port}`;
               })();
+        if (tlsCert !== undefined && bind === undefined) {
+          errExit(2, 'serve: --tls-cert/--tls-key require TCP — pass --bind (e.g. --bind 0.0.0.0)');
+        }
         const cfg = {
           socketPath: opts.socket ?? fileCfg.socketPath ?? defaultSocketPath(),
           dataPath: opts.data ?? fileCfg.dataPath ?? defaultDataPath(),
           ...(bind !== undefined ? { bind } : {}),
+          ...(tlsCert !== undefined && tlsKey !== undefined ? { tlsCert, tlsKey } : {}),
         };
         saveServerConfig(cfg, defaultServerConfigPath());
         const server = await startServer({ config: cfg });
         process.stderr.write(`brackish serve: socket=${server.socketPath}\n`);
         if (server.tcpAddress) {
           process.stderr.write(
-            `               tcp=http://${server.tcpAddress.host}:${server.tcpAddress.port}\n`,
+            `               tcp=${server.tcpScheme}://${server.tcpAddress.host}:${server.tcpAddress.port}\n`,
           );
+          if (server.tlsFingerprint) {
+            process.stderr.write(`               tls pin=${server.tlsFingerprint}\n`);
+          }
           // Bind-context banner. Suppressible via BRACKISH_QUIET_BIND_WARNING=1 for CI/demos.
           // Loopback gets a positive "not externally reachable" line so the user/agent sees
           // the security posture confirmed; non-loopback gets a louder warning naming the
-          // exposure. Brackish is local-coordination tooling, NOT production-hardened.
+          // exposure. Brackish is local-coordination tooling, NOT production-hardened. TLS, when
+          // on, encrypts + pins the channel — note that so a non-loopback bind reads as deliberate.
           if (!process.env.BRACKISH_QUIET_BIND_WARNING) {
             const isLoopback = isLoopbackHost(server.tcpAddress.host);
             if (isLoopback) {
               process.stderr.write(
                 `               (loopback only — NOT externally reachable; remote peers won't see this server)\n`,
               );
+            } else if (server.tlsFingerprint) {
+              process.stderr.write(
+                `\nbrackish is binding TLS on ${server.tcpAddress.host}:${server.tcpAddress.port} —\n` +
+                  `reachable from any host that can route here, but the channel is encrypted and the\n` +
+                  `peer pins the cert above. Peers still need a valid token. Use for cross-machine work.\n\n`,
+              );
             } else {
               process.stderr.write(
-                `\nWARNING: brackish is binding TCP on ${server.tcpAddress.host}:${server.tcpAddress.port} —\n` +
-                  `reachable from any host that can route to this address. Use ONLY if the user\n` +
-                  `indicated your peer is on another machine. Set BRACKISH_QUIET_BIND_WARNING=1 to silence.\n\n`,
+                `\nWARNING: brackish is binding TCP (no TLS) on ${server.tcpAddress.host}:${server.tcpAddress.port} —\n` +
+                  `reachable from any host that can route to this address, and traffic is in the clear.\n` +
+                  `Use ONLY if the user indicated your peer is on another machine; prefer --tls-cert/--tls-key.\n` +
+                  `Set BRACKISH_QUIET_BIND_WARNING=1 to silence.\n\n`,
               );
             }
           }
@@ -194,12 +242,13 @@ export function register(program: Command): void {
           try {
             const inv = await admin.createInvite(opts.invite, inviteTtl);
             const inferred = await inferReachableHost(server.tcpAddress.host);
-            const url = `http://${inferred.host}:${server.tcpAddress.port}`;
+            const url = `${server.tcpScheme}://${inferred.host}:${server.tcpAddress.port}`;
+            const pinFlag = server.tlsFingerprint ? ` --tls-pin ${server.tlsFingerprint}` : '';
             const lines = [
               '',
               `invite minted for "${opts.invite}", expires ${inv.expiresAt}`,
               'share with peer:',
-              `  brackish connect ${url} --token ${inv.inviteToken} --identity ${opts.invite}`,
+              `  brackish connect ${url} --token ${inv.inviteToken} --identity ${opts.invite}${pinFlag}`,
             ];
             if (inferred.hint) lines.push(`   ${inferred.hint}`);
             lines.push('');
@@ -246,48 +295,68 @@ export function register(program: Command): void {
       '--identity <name>',
       'client identity to write into config.toml if no client config exists (default: hostname)',
     )
-    .action(async (opts: { bind?: string | boolean; identity?: string }) => {
-      ensureBrackishHome();
-      await ensureClientConfig(opts.identity);
+    .option(
+      '--tls-cert <path>',
+      'serve TLS on the spawned daemon (requires --bind; pairs with --tls-key)',
+    )
+    .option('--tls-key <path>', 'PEM private key for --tls-cert')
+    .action(
+      async (opts: {
+        bind?: string | boolean;
+        identity?: string;
+        tlsCert?: string;
+        tlsKey?: string;
+      }) => {
+        ensureBrackishHome();
+        await ensureClientConfig(opts.identity);
 
-      const cfg = loadClientConfig();
-      if (cfg.server !== undefined && cfg.token !== undefined) {
+        const cfg = loadClientConfig();
+        if (cfg.server !== undefined && cfg.token !== undefined) {
+          process.stderr.write(
+            `brackish: client is configured for remote daemon at ${cfg.server} (no local daemon needed)\n`,
+          );
+          return;
+        }
+
+        if (await isDaemonRunning(defaultSocketPath())) {
+          process.stderr.write(
+            `brackish: daemon already running (socket=${defaultSocketPath()})\n`,
+          );
+          return;
+        }
+
+        const serveArgs = ['serve'];
+        if (opts.bind === true) serveArgs.push('--bind');
+        else if (typeof opts.bind === 'string') serveArgs.push('--bind', opts.bind);
+        if ((opts.tlsCert === undefined) !== (opts.tlsKey === undefined)) {
+          errExit(2, 'up: --tls-cert and --tls-key must be given together');
+        }
+        if (opts.tlsCert !== undefined && opts.tlsKey !== undefined) {
+          serveArgs.push('--tls-cert', opts.tlsCert, '--tls-key', opts.tlsKey);
+        }
+
+        const logPath = join(brackishHome(), 'serve.log');
+        const logFd = openSync(logPath, 'a');
+        const selfBin = fileURLToPath(import.meta.url);
+        const child = spawn(process.execPath, [selfBin, ...serveArgs], {
+          detached: true,
+          stdio: ['ignore', logFd, logFd],
+          env: process.env,
+        });
+        child.unref();
+
+        const ready = await waitForDaemon(defaultSocketPath(), 5000);
+        if (!ready) {
+          errExit(
+            2,
+            `daemon spawned (pid ${child.pid}) but socket didn't come up within 5s — check ${logPath}`,
+          );
+        }
         process.stderr.write(
-          `brackish: client is configured for remote daemon at ${cfg.server} (no local daemon needed)\n`,
+          `brackish: daemon started (pid ${child.pid}); socket=${defaultSocketPath()}; log=${logPath}\n`,
         );
-        return;
-      }
-
-      if (await isDaemonRunning(defaultSocketPath())) {
-        process.stderr.write(`brackish: daemon already running (socket=${defaultSocketPath()})\n`);
-        return;
-      }
-
-      const serveArgs = ['serve'];
-      if (opts.bind === true) serveArgs.push('--bind');
-      else if (typeof opts.bind === 'string') serveArgs.push('--bind', opts.bind);
-
-      const logPath = join(brackishHome(), 'serve.log');
-      const logFd = openSync(logPath, 'a');
-      const selfBin = fileURLToPath(import.meta.url);
-      const child = spawn(process.execPath, [selfBin, ...serveArgs], {
-        detached: true,
-        stdio: ['ignore', logFd, logFd],
-        env: process.env,
-      });
-      child.unref();
-
-      const ready = await waitForDaemon(defaultSocketPath(), 5000);
-      if (!ready) {
-        errExit(
-          2,
-          `daemon spawned (pid ${child.pid}) but socket didn't come up within 5s — check ${logPath}`,
-        );
-      }
-      process.stderr.write(
-        `brackish: daemon started (pid ${child.pid}); socket=${defaultSocketPath()}; log=${logPath}\n`,
-      );
-    });
+      },
+    );
 
   program
     .command('down')

@@ -55,6 +55,7 @@ const ClientConfigFileSchema = z.object({
   socket_path: z.string().optional(),
   server: z.string().url().optional(),
   token: TokenSchema.optional(),
+  tls_pin: z.string().optional(),
 });
 
 const ClientConfigSchema = z.object({
@@ -62,6 +63,7 @@ const ClientConfigSchema = z.object({
   socketPath: z.string().optional(),
   server: z.string().url().optional(),
   token: TokenSchema.optional(),
+  tlsPin: z.string().optional(),
 });
 export type ClientConfig = z.infer<typeof ClientConfigSchema>;
 
@@ -83,6 +85,7 @@ export function loadClientConfig(opts: { explicitPath?: string | undefined } = {
     socketPath: process.env.BRACKISH_SOCKET ?? fromFile.socket_path,
     server: process.env.BRACKISH_SERVER ?? fromFile.server,
     token: process.env.BRACKISH_TOKEN ?? fromFile.token,
+    tlsPin: process.env.BRACKISH_TLS_PIN ?? fromFile.tls_pin,
   };
 
   return ClientConfigSchema.parse(merged);
@@ -100,6 +103,7 @@ export function saveClientConfig(
   if (cfg.socketPath !== undefined) fileShape.socket_path = cfg.socketPath;
   if (cfg.server !== undefined) fileShape.server = cfg.server;
   if (cfg.token !== undefined) fileShape.token = cfg.token;
+  if (cfg.tlsPin !== undefined) fileShape.tls_pin = cfg.tlsPin;
   writeFileSync(path, stringifyToml(fileShape), { mode: 0o600 });
 }
 
@@ -109,12 +113,18 @@ const ServerConfigFileSchema = z.object({
   socket_path: z.string().optional(),
   bind: z.string().optional(),
   data_path: z.string().optional(),
+  tls_cert: z.string().optional(),
+  tls_key: z.string().optional(),
 });
 
 const ServerConfigSchema = z.object({
   socketPath: z.string(),
   bind: z.string().optional(),
   dataPath: z.string(),
+  // BYO PEM cert + key. When both are set (and `bind` is on), the TCP listener serves HTTPS;
+  // the Unix socket stays plain HTTP (it's filesystem-gated). See src/daemon/server.ts.
+  tlsCert: z.string().optional(),
+  tlsKey: z.string().optional(),
 });
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 
@@ -126,6 +136,8 @@ export function loadServerConfig(opts: { explicitPath?: string | undefined } = {
     socketPath: fromFile.socket_path ?? defaultSocketPath(),
     bind: fromFile.bind,
     dataPath: fromFile.data_path ?? defaultDataPath(),
+    tlsCert: fromFile.tls_cert,
+    tlsKey: fromFile.tls_key,
   };
   return ServerConfigSchema.parse(merged);
 }
@@ -140,6 +152,8 @@ export function saveServerConfig(
     data_path: cfg.dataPath,
   };
   if (cfg.bind !== undefined) fileShape.bind = cfg.bind;
+  if (cfg.tlsCert !== undefined) fileShape.tls_cert = cfg.tlsCert;
+  if (cfg.tlsKey !== undefined) fileShape.tls_key = cfg.tlsKey;
   writeFileSync(path, stringifyToml(fileShape), { mode: 0o600 });
 }
 

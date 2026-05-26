@@ -82,6 +82,17 @@ describe('config paths', () => {
       expect(loaded.token).toBe('a'.repeat(32));
     });
 
+    it('round-trips a tls pin (cross-machine over https)', () => {
+      const pin = `sha256:${'a'.repeat(64)}`;
+      saveClientConfig({
+        identity: 'frontend',
+        server: 'https://10.0.0.5:11442',
+        token: 'a'.repeat(32),
+        tlsPin: pin,
+      });
+      expect(loadClientConfig().tlsPin).toBe(pin);
+    });
+
     it('env vars override file contents', () => {
       saveClientConfig({ identity: 'fromfile', socketPath: '/file/sock' });
       process.env.BRACKISH_IDENTITY = 'fromenv';
@@ -142,6 +153,19 @@ describe('config paths', () => {
       expect(loaded.socketPath).toBe('/var/brackish.sock');
       expect(loaded.dataPath).toBe('/var/brackish.db');
       expect(loaded.bind).toBe('0.0.0.0:11442');
+    });
+
+    it('round-trips tls cert + key paths', () => {
+      saveServerConfig({
+        socketPath: '/var/brackish.sock',
+        dataPath: '/var/brackish.db',
+        bind: '0.0.0.0:11442',
+        tlsCert: '/etc/brackish/cert.pem',
+        tlsKey: '/etc/brackish/key.pem',
+      });
+      const loaded = loadServerConfig();
+      expect(loaded.tlsCert).toBe('/etc/brackish/cert.pem');
+      expect(loaded.tlsKey).toBe('/etc/brackish/key.pem');
     });
   });
 });
