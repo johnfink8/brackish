@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "harness/run-trial.ts",
+    "harness/validate-skill.ts",
+    "harness/extract-demo.ts",
+    "harness/view-trial.ts",
+    "tests/**/*.test.ts"
+  ],
+  "project": ["src/**/*.ts", "harness/**/*.ts"]
+}

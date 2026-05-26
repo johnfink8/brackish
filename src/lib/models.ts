@@ -22,7 +22,7 @@ export const DocumentNameSchema = z
 export const SchemaNameSchema = z
   .string()
   .regex(schemaNameRegex, 'schema name must match /^[A-Za-z][A-Za-z0-9_]{0,63}$/');
-export const CursorSchema = z.number().int().nonnegative();
+const CursorSchema = z.number().int().nonnegative();
 export const TokenSchema = z.string().min(16).max(256);
 
 export const HttpMethodSchema = z.enum([
@@ -40,16 +40,13 @@ export const PathSchema = z
   .string()
   .regex(/^\/[A-Za-z0-9._~\-/{}]*$/, 'path must start with / and contain only URL-safe chars');
 
-export const ArtifactKindSchema = z.enum(['operation', 'schema', 'convention']);
+const ArtifactKindSchema = z.enum(['operation', 'schema', 'convention']);
 
 export type Identity = z.infer<typeof IdentitySchema>;
 export type DocumentName = z.infer<typeof DocumentNameSchema>;
 export type SchemaName = z.infer<typeof SchemaNameSchema>;
 export type Cursor = z.infer<typeof CursorSchema>;
-export type Token = z.infer<typeof TokenSchema>;
 export type HttpMethod = z.infer<typeof HttpMethodSchema>;
-export type Path = z.infer<typeof PathSchema>;
-export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 
 // --- document ---
 
@@ -62,7 +59,7 @@ export type Document = z.infer<typeof DocumentSchema>;
 
 // --- party (TCP auth subject) ---
 
-export const PartySchema = z.object({
+const PartySchema = z.object({
   identity: IdentitySchema,
   createdAt: z.string().datetime(),
   lastSeenAt: z.string().datetime().nullable(),
@@ -71,7 +68,7 @@ export type Party = z.infer<typeof PartySchema>;
 
 // --- invite ---
 
-export const InviteSchema = z.object({
+const InviteSchema = z.object({
   token: TokenSchema,
   identity: IdentitySchema,
   createdAt: z.string().datetime(),
@@ -280,7 +277,7 @@ const summaryShape = {
   latestDelta: z.string().nullable(),
 };
 
-export const EndpointSummarySchema = z.object({
+const EndpointSummarySchema = z.object({
   method: HttpMethodSchema,
   path: PathSchema,
   summary: z.string().nullable(),
@@ -288,16 +285,11 @@ export const EndpointSummarySchema = z.object({
 });
 export type EndpointSummary = z.infer<typeof EndpointSummarySchema>;
 
-export const SchemaSummarySchema = z.object({
+const SchemaSummarySchema = z.object({
   name: SchemaNameSchema,
   ...summaryShape,
 });
 export type SchemaSummary = z.infer<typeof SchemaSummarySchema>;
-
-export const ConventionSummarySchema = z.object({
-  ...summaryShape,
-});
-export type ConventionSummary = z.infer<typeof ConventionSummarySchema>;
 
 // --- events (kind-discriminated, ordered by id within a document) ---
 
@@ -307,14 +299,14 @@ const eventBaseShape = {
   createdAt: z.string().datetime(),
 };
 
-export const MessageEventSchema = z.object({
+const MessageEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('message'),
   from: IdentitySchema,
   text: z.string().min(1),
 });
 
-export const ArtifactProposedEventSchema = z.object({
+const ArtifactProposedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_proposed'),
   from: IdentitySchema,
@@ -324,7 +316,7 @@ export const ArtifactProposedEventSchema = z.object({
   delta: z.string().nullable(), // null for v1; compact "+a; -b" summary for v≥2
 });
 
-export const ArtifactAcceptedEventSchema = z.object({
+const ArtifactAcceptedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_accepted'),
   from: IdentitySchema,
@@ -336,7 +328,7 @@ export const ArtifactAcceptedEventSchema = z.object({
   reason: z.string().min(1).optional(),
 });
 
-export const ArtifactRejectedEventSchema = z.object({
+const ArtifactRejectedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_rejected'),
   from: IdentitySchema,
@@ -346,7 +338,7 @@ export const ArtifactRejectedEventSchema = z.object({
   reason: z.string(),
 });
 
-export const ArtifactWithdrawnEventSchema = z.object({
+const ArtifactWithdrawnEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_withdrawn'),
   from: IdentitySchema,
@@ -357,7 +349,7 @@ export const ArtifactWithdrawnEventSchema = z.object({
 
 /** A previously-accepted artifact was tombstoned — emitted per target when a retraction is
  *  accepted by the peer. */
-export const ArtifactRetractedEventSchema = z.object({
+const ArtifactRetractedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('artifact_retracted'),
   from: IdentitySchema,
@@ -376,7 +368,7 @@ export const RetractionTargetSchema = z.discriminatedUnion('kind', [
 ]);
 export type RetractionTarget = z.infer<typeof RetractionTargetSchema>;
 
-export const RetractionProposedEventSchema = z.object({
+const RetractionProposedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('retraction_proposed'),
   from: IdentitySchema,
@@ -385,14 +377,14 @@ export const RetractionProposedEventSchema = z.object({
   reason: z.string().optional(),
 });
 
-export const RetractionAcceptedEventSchema = z.object({
+const RetractionAcceptedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('retraction_accepted'),
   from: IdentitySchema,
   retractionId: z.number().int().positive(),
 });
 
-export const RetractionRejectedEventSchema = z.object({
+const RetractionRejectedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('retraction_rejected'),
   from: IdentitySchema,
@@ -400,14 +392,14 @@ export const RetractionRejectedEventSchema = z.object({
   reason: z.string(),
 });
 
-export const RetractionWithdrawnEventSchema = z.object({
+const RetractionWithdrawnEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('retraction_withdrawn'),
   from: IdentitySchema,
   retractionId: z.number().int().positive(),
 });
 
-export const DocumentCreatedEventSchema = z.object({
+const DocumentCreatedEventSchema = z.object({
   ...eventBaseShape,
   kind: z.literal('document_created'),
   by: IdentitySchema,
@@ -427,18 +419,10 @@ export const EventSchema = z.discriminatedUnion('kind', [
   DocumentCreatedEventSchema,
 ]);
 export type Event = z.infer<typeof EventSchema>;
-export type MessageEvent = z.infer<typeof MessageEventSchema>;
-export type ArtifactProposedEvent = z.infer<typeof ArtifactProposedEventSchema>;
-export type ArtifactAcceptedEvent = z.infer<typeof ArtifactAcceptedEventSchema>;
-export type ArtifactRejectedEvent = z.infer<typeof ArtifactRejectedEventSchema>;
-export type ArtifactWithdrawnEvent = z.infer<typeof ArtifactWithdrawnEventSchema>;
-export type ArtifactRetractedEvent = z.infer<typeof ArtifactRetractedEventSchema>;
-export type RetractionProposedEvent = z.infer<typeof RetractionProposedEventSchema>;
-export type DocumentCreatedEvent = z.infer<typeof DocumentCreatedEventSchema>;
 
 // --- inbox summary ---
 
-export const InboxEntrySchema = z.object({
+const InboxEntrySchema = z.object({
   documentName: DocumentNameSchema,
   newCount: z.number().int().nonnegative(),
   lastEventAt: z.string().datetime(),
@@ -450,14 +434,14 @@ export type InboxEntry = z.infer<typeof InboxEntrySchema>;
 
 // --- JSON Patch (RFC 6902 — subset: add/remove/replace; we don't emit move/copy/test) ---
 
-export const JsonPatchOpSchema = z.discriminatedUnion('op', [
+const JsonPatchOpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('add'), path: z.string(), value: z.unknown() }),
   z.object({ op: z.literal('remove'), path: z.string() }),
   z.object({ op: z.literal('replace'), path: z.string(), value: z.unknown() }),
 ]);
 export type JsonPatchOp = z.infer<typeof JsonPatchOpSchema>;
 
-export const JsonPatchSchema = z.array(JsonPatchOpSchema);
+const JsonPatchSchema = z.array(JsonPatchOpSchema);
 export type JsonPatch = z.infer<typeof JsonPatchSchema>;
 
 // --- wire request bodies ---
@@ -465,38 +449,32 @@ export type JsonPatch = z.infer<typeof JsonPatchSchema>;
 export const CreateDocumentRequestSchema = z.object({
   name: DocumentNameSchema,
 });
-export type CreateDocumentRequest = z.infer<typeof CreateDocumentRequestSchema>;
 
 export const SendMessageRequestSchema = z.object({
   text: z.string().min(1),
 });
-export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 
 export const SendMessageResponseSchema = z.object({ event: EventSchema });
-export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
 
 export const ProposeEndpointRequestSchema = z.object({
   method: HttpMethodSchema,
   path: PathSchema,
   spec: OperationSpecSchema,
 });
-export type ProposeEndpointRequest = z.infer<typeof ProposeEndpointRequestSchema>;
 
 export const ProposeSchemaRequestSchema = z.object({
   name: SchemaNameSchema,
   spec: JSONSchemaSchema,
 });
-export type ProposeSchemaRequest = z.infer<typeof ProposeSchemaRequestSchema>;
 
 export const ProposeConventionRequestSchema = z.object({
   spec: ConventionSpecSchema,
 });
-export type ProposeConventionRequest = z.infer<typeof ProposeConventionRequestSchema>;
 
 // Per-item options inside a propose-batch request. Matches the per-propose query-string flags
 // (`?expected_version=N|new`, `?force=true`) but as a structured field on each batch item so
 // each artifact can carry its own concurrency intent.
-export const BatchItemOptionsSchema = z
+const BatchItemOptionsSchema = z
   .object({
     expectedVersion: z.union([z.literal('new'), z.number().int().positive()]).optional(),
     force: z.boolean().optional(),
@@ -660,16 +638,88 @@ export const ProposeBatchResponseSchema = z.object({
 });
 export type ProposeBatchResponse = z.infer<typeof ProposeBatchResponseSchema>;
 
+// Atomic batch accept: name a coordinated set of proposed artifacts (schemas + endpoints) to accept
+// together. The server overlays all of them onto the accepted doc, meta-schema-validates once, and
+// commits all-or-nothing — so a mutually-referencing set accepts together (the per-item path would
+// reject the first for a dangling $ref), and a set that would wedge the doc is refused whole.
+// (Convention is singleton — accept it on its own. One rationale rides the whole batch.)
+export const AcceptBatchRequestSchema = z
+  .object({
+    endpoints: z.array(z.object({ method: HttpMethodSchema, path: PathSchema })).optional(),
+    schemas: z.array(SchemaNameSchema).optional(),
+    rationale: z.string().min(1).optional(),
+    // Opt-in: also accept the still-proposed schemas the named targets $ref (transitively), in the
+    // same atomic batch. Default off → an endpoint whose schema isn't accepted yet is refused.
+    includeDependencies: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      (b.endpoints !== undefined && b.endpoints.length > 0) ||
+      (b.schemas !== undefined && b.schemas.length > 0),
+    { message: 'accept-batch request must name at least one of: endpoints, schemas' },
+  );
+export type AcceptBatchRequest = z.infer<typeof AcceptBatchRequestSchema>;
+
+// Counter = atomically reject the current proposed version + propose a replacement. One discriminated
+// route serves all three nouns (the spec type differs per kind). `reason` is the reject rationale.
+export const CounterRequestSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('endpoint'),
+    method: HttpMethodSchema,
+    path: PathSchema,
+    spec: OperationSpecSchema,
+    reason: z.string().min(1),
+    options: BatchItemOptionsSchema.optional(),
+  }),
+  z.object({
+    kind: z.literal('schema'),
+    name: SchemaNameSchema,
+    spec: JSONSchemaSchema,
+    reason: z.string().min(1),
+    options: BatchItemOptionsSchema.optional(),
+  }),
+  z.object({
+    kind: z.literal('convention'),
+    spec: ConventionSpecSchema,
+    reason: z.string().min(1),
+    options: BatchItemOptionsSchema.optional(),
+  }),
+]);
+export type CounterRequest = z.infer<typeof CounterRequestSchema>;
+
+export const CounterResponseSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('endpoint'), envelope: OperationArtifactSchema }),
+  z.object({ kind: z.literal('schema'), envelope: SchemaArtifactSchema }),
+  z.object({ kind: z.literal('convention'), envelope: ConventionArtifactSchema }),
+]);
+
+const AcceptedItemSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('schema'), name: SchemaNameSchema, envelope: SchemaArtifactSchema }),
+  z.object({
+    kind: z.literal('endpoint'),
+    method: HttpMethodSchema,
+    path: PathSchema,
+    envelope: OperationArtifactSchema,
+  }),
+]);
+
+export const AcceptBatchResponseSchema = z.object({
+  // The artifacts you named.
+  accepted: z.array(AcceptedItemSchema),
+  // Extra artifacts pulled in by --include-dependencies (the proposed $ref-closure), accepted in the
+  // same transaction. Empty unless --include-dependencies pulled something in.
+  dependencies: z.array(AcceptedItemSchema).default([]),
+});
+
 export const RejectArtifactRequestSchema = z.object({
   reason: z.string().min(1),
 });
-export type RejectArtifactRequest = z.infer<typeof RejectArtifactRequestSchema>;
 
 /** Optional acceptance rationale that rides on the artifact_accepted event. */
 export const AcceptArtifactRequestSchema = z.object({
   reason: z.string().min(1).optional(),
 });
-export type AcceptArtifactRequest = z.infer<typeof AcceptArtifactRequestSchema>;
 
 export const CreateInviteRequestSchema = z.object({
   identity: IdentitySchema,
@@ -681,14 +731,12 @@ export const CreateInviteRequestSchema = z.object({
   /** Optional list of documents the redeeming party is automatically granted membership of. */
   grantDocs: z.array(DocumentNameSchema).optional(),
 });
-export type CreateInviteRequest = z.infer<typeof CreateInviteRequestSchema>;
 
 /** Add a member to a document. Role is mandatory ('owner' for co-owner; 'member' for read+propose). */
 export const AddMemberRequestSchema = z.object({
   identity: IdentitySchema,
   role: z.enum(['owner', 'member']),
 });
-export type AddMemberRequest = z.infer<typeof AddMemberRequestSchema>;
 
 export const DocumentMemberSchema = z.object({
   identity: IdentitySchema,
@@ -701,7 +749,6 @@ export type DocumentMember = z.infer<typeof DocumentMemberSchema>;
 export const RedeemInviteRequestSchema = z.object({
   inviteToken: TokenSchema,
 });
-export type RedeemInviteRequest = z.infer<typeof RedeemInviteRequestSchema>;
 
 // --- wire response bodies ---
 
@@ -760,7 +807,7 @@ export type DiffResponse = z.infer<typeof DiffResponseSchema>;
 
 // --- rationale (per-version history) ---
 
-export const RationaleEntrySchema = z.object({
+const RationaleEntrySchema = z.object({
   version: z.number().int().positive(),
   status: z.enum(['proposed', 'accepted', 'rejected']),
   proposedBy: IdentitySchema,

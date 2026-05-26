@@ -62,12 +62,12 @@ export function bundledSkillDir(): string {
 
 // --- inspection ---
 
-export type SkillInspection = {
+type SkillInspection = {
   destPath: string;
   exists: boolean;
 };
 
-export type HookInspection = {
+type HookInspection = {
   scriptPath: string;
   settingsPath: string;
   settingsExists: boolean;
@@ -79,7 +79,7 @@ export type HookInspection = {
   otherHookCount: number;
 };
 
-export type PermissionInspection = {
+type PermissionInspection = {
   pattern: string;
   settingsPath: string;
   alreadyInstalled: boolean;

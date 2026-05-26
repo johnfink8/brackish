@@ -9,7 +9,7 @@ Two [Claude Code](https://claude.ai/code) instances co-developing a contract —
 
 - **Token-efficient.** What crosses the wire is structured deltas (`+responses.409`, `~oneOf.6.properties.code.enum`), not the whole document each round. Each Claude leads with `brackish status` for a bucketed "what am I blocked on?" view, and pulls full bodies only when actually needed. The savings scale with revision rounds: rsync-of-API.md is O(doc × rounds); brackish is O(delta × rounds), and the delta is tiny.
 
-- **A firm, machine-checkable spec.** The output is real, validated OpenAPI 3.1 — feeds straight into `openapi-typescript`, `oapi-codegen`, `fastapi-codegen`. brackish is the arbitrator: every propose and accept is validated against the official 3.1 meta-schema before it lands, including cross-artifact `$ref` resolution. The server refuses to enter a state where the assembled doc would be invalid — dangling refs, missing required fields, malformed security schemes are rejected at the moment of writing, not 30 minutes later when codegen blows up. The doc both Claudes work against is guaranteed parseable by anything that reads OpenAPI 3.1. Each artifact has an immutable propose/accept/reject lifecycle with explicit version-pin assertions (`--expected-version 3`), so when the peer changes something, you get a compact delta and a 409 if your view was stale. Drift between sides is mechanically detectable, not a Slack thread three weeks later.
+- **A firm, machine-checkable spec.** The output is real, validated OpenAPI 3.1 — feeds straight into `openapi-typescript`, `oapi-codegen`, `fastapi-codegen`. brackish is the arbitrator: every propose and accept is validated against the official 3.1 meta-schema before it lands, including cross-artifact `$ref` resolution. The server refuses to enter a state where the assembled doc would be invalid — dangling refs, missing required fields, malformed security schemes are rejected at the moment of writing, not 30 minutes later when codegen blows up. The doc both Claudes work against is guaranteed parseable by anything that reads OpenAPI 3.1. Each artifact has an immutable propose/accept/reject lifecycle with explicit version-pin assertions (`--expected-rev 3`), so when the peer changes something, you get a compact delta and a 409 if your view was stale. Drift between sides is mechanically detectable, not a Slack thread three weeks later.
 
 - **Separate concerns, on purpose.** Each Claude keeps its own context: one has the FastAPI source loaded, the other has the React source. Neither has to understand both halves. They negotiate as semi-adversaries — the backend pushes `snake_case` because FastAPI emits it, the frontend pushes `camelCase` because TS reads it, and the dispute surfaces as a rejected convention with a written reason instead of each Claude silently picking different defaults. Domain knowledge wins per side: the frontend Claude knows SSE is the right answer because it understands `EventSource`; the backend Claude knows it needs a deploy-note about disabling proxy buffering. Neither has to know both halves.
 
@@ -38,12 +38,12 @@ If you want a multi-tenant API contract server with real auth — brackish isn't
 
 ```sh
 npm install -g brackish-cli           # one binary: `brackish`
-brackish install                       # installs the Claude skill + UserPromptSubmit hook
+brackish install                       # installs the Claude skill (+ optional --permission allow-rule)
 ```
 
-`brackish install` puts a [skill](https://docs.claude.com/en/docs/claude-code/skills) at `~/.claude/skills/brackish/` (or `./.claude/skills/brackish/` with `--local`) so Claude reaches for brackish at the right moments — when you're about to type a TS `interface`, a pydantic model, an OpenAPI fragment, or anything else a paired component owns the other side of.
+`brackish install` puts a [skill](https://docs.claude.com/en/docs/claude-code/skills) at `~/.claude/skills/brackish/` (or `./.claude/skills/brackish/` with `--local`) so Claude reaches for brackish at the right moments — when you're about to type a TS `interface`, a pydantic model, an OpenAPI fragment, or anything else a paired component owns the other side of. The `--permission` flag adds a `Bash(brackish *)` allow-rule so Claude can run brackish commands without per-command prompts.
 
-It also wires a `UserPromptSubmit` hook so pending peer activity is surfaced into Claude's context at the start of every turn. The `--permission` flag adds a `Bash(brackish *)` allow-rule so Claude can run brackish commands without per-command prompts.
+You stay in sync through the foreground loop — `brackish status` at the top of a turn, `brackish nap` when there's nothing to do but wait for the peer. (No background hook is installed.)
 
 Requires Node 22 or newer.
 
@@ -82,11 +82,14 @@ Paste it into the peer Claude on the other machine. Its skill recognizes the `/b
 The skill is the load-bearing piece. It teaches Claude:
 
 - **When** to reach for brackish (the moment one of you is about to commit to a contract the other owns).
-- **Race protection.** Always pass `--expected-new` on first proposal and `--expected-version <N>` on revisions, so two Claudes racing get a clean 409 instead of silent overwrites.
+- **Verb-first grammar.** `brackish <verb> <noun> [identity]` — `propose endpoint`, `accept schema`, `show convention`. The document is the `--doc` option (defaults to the sole doc), not a positional.
+- **Race protection.** Pass `--expected-new` on first proposal and `--expected-rev <N>` on revisions, so two Claudes racing get a clean 409 instead of silent overwrites.
 - **`brackish status`-led catch-up.** Lead with the bucketed "what am I blocked on?" view; drop to `read` or `show` when you need the why or the body.
-- **Lint before propose.** `brackish endpoint lint POST /users/{id} ./op.yaml` (and `schema lint`, `convention lint`) catch missing path parameters, undeclared security schemes, parse errors with line/col — locally, no round-trip.
-- **Batch proposes via manifest** for a big initial dump: `brackish propose-batch users-api --manifest manifest.yaml` parses + lints every artifact and sends them in order (convention → schemas → endpoints).
-- **`brackish nap`** when there's nothing to do but wait for the peer — sleeps, then snapshots the inbox. setTimeout-shape, not a recurring monitor.
+- **Lint before propose.** `brackish lint endpoint POST /users/{id} ./op.yaml` (and `lint schema`) catch missing path parameters, undeclared security schemes, parse errors with line/col — locally, no round-trip.
+- **`propose --manifest`** for a big initial dump: parses + lints every artifact and commits the whole set (convention → schemas → endpoints) in one atomic, all-or-nothing move.
+- **`counter`** to revise a peer's proposal: `brackish counter schema User --file v2.yaml --rationale "<why>"` rejects their version and proposes yours in one atomic move — not a manual reject-then-propose.
+- **Atomic batches.** `accept schema --target A --target B` accepts a set in one transaction; add `--include-dependencies` to also accept the proposed schemas an endpoint `$ref`s.
+- **`brackish nap`** when there's nothing to do but wait for the peer — sleeps, then snapshots the inbox.
 - **`brackish send <doc> "<scope claim>"`** before any propose, so the other Claude knows which artifacts you're owning.
 - **WebSocket and SSE patterns** — model the handshake as `GET /ws` + `x-brackish.protocol: websocket` with a `frames` catalog; SSE as `GET` returning `text/event-stream` with an `eventTypes` catalog.
 
@@ -102,7 +105,7 @@ Every brackish document assembles into a real OpenAPI 3.1 spec. There are three 
 | `schema` | JSON Schema component | `<Name>` (PascalCase) |
 | `convention` | document-level `{ info, servers, securitySchemes }` + top-level `security` + `x-brackish` | singleton per document |
 
-Chain of versions: `proposed → accepted | rejected`; you can't accept your own proposal. The "current contract" is the latest accepted version of each artifact. `withdraw` lets a proposer take back their own still-proposed version. Removing an already-accepted artifact is also negotiated: `retract propose` opens a grouped removal that the peer accepts (the set is tombstoned, validated still-valid) or rejects — nothing leaves the contract unilaterally.
+Chain of versions: `proposed → accepted | rejected`; you can't accept your own proposal. The "current contract" is the latest accepted version of each artifact. `withdraw` lets a proposer take back their own still-proposed version. To revise a peer's proposal, `counter` rejects their version and proposes yours in one atomic move. Removing an already-accepted artifact is also negotiated: `propose retraction` opens a grouped removal that the peer accepts (the set is tombstoned, validated still-valid) or rejects — nothing leaves the contract unilaterally.
 
 `x-brackish` extensions ride alongside the spec — `idempotent`, `sideEffects`, `timing` on operations; `naming: camelCase|snake_case` on the convention. They're OpenAPI Specification Extensions, ignored by codegen tools that don't understand them, surfaced by `brackish visualize`.
 
@@ -146,28 +149,36 @@ brackish doc new <name>
 
 # Conversation + inbox
 brackish send <doc> "<text>"
-brackish read <doc>                                  # events since your cursor (with delta summaries)
+brackish read [doc]                                  # events since your cursor (delta summaries); defaults to the sole doc
 brackish inbox                                       # docs with new events for your identity
 brackish wait <doc> --timeout 60                     # long-poll: block for up to 60s
 brackish nap --seconds 60                            # sleep then snapshot the inbox
+brackish deliver <doc>                               # make your held turn visible to the peer (nap/wait imply it)
 
 # Status (always start here)
-brackish status <doc>                                # awaiting peer / awaiting me / accepted / needs-attention
+brackish status [doc]                                # awaiting peer / awaiting me / accepted / needs-attention
 
-# Lifecycle (same verbs for endpoint / schema / convention)
-brackish endpoint propose <doc> <METHOD> <PATH> --expected-new ...
-brackish endpoint show <doc> <METHOD> <PATH>     # tagged accepted+proposed with body
-brackish endpoint accept|reject|withdraw <doc> <METHOD> <PATH> [reason]
-brackish endpoint diff <doc> <METHOD> <PATH> --from N --to M [--format rendered]
-brackish endpoint lint <METHOD> <PATH> <file>        # local pre-flight
+# Artifact lifecycle — VERB-FIRST: brackish <verb> <noun> [identity]; the doc is --doc (defaults to the sole one)
+brackish propose  endpoint <METHOD> <PATH> --file op.yaml --expected-new
+brackish show     endpoint <METHOD> <PATH>           # tagged accepted + proposed, with body
+brackish accept   endpoint <METHOD> <PATH> [--rationale "<why>"]      # peer-only
+brackish reject   <noun> <identity> --rationale "<reason>"           # peer-only
+brackish counter  <noun> <identity> --file v2.yaml --rationale "<why>" # atomic: reject current + propose replacement
+brackish withdraw <noun> <identity>                  # take back your own still-proposed version
+brackish diff     endpoint <METHOD> <PATH> --from N --to M [--format rendered]
+brackish lint     endpoint <METHOD> <PATH> <file>    # local pre-flight (endpoint / schema)
+brackish list     endpoint [--doc <doc>]             # roster of a noun's artifacts
 
-brackish schema accept <doc> User Order OrderItem    # variadic; stops on first failure
+# Batch — atomic, all-or-nothing
+brackish accept  schema   --target User --target Order               # accept a set in one transaction
+brackish accept  endpoint --target POST:/x --include-dependencies    # also accept the proposed schemas POST /x $refs
+brackish propose --manifest manifest.yaml [--lint-only]              # propose a coordinated set (convention → schemas → endpoints)
 
-# Batch propose / validate / retract
-brackish propose-batch <doc> --manifest manifest.yaml [--lint-only]   # atomic: all-or-nothing
-brackish validate <doc> [--manifest manifest.yaml]                    # dry-run validity check; writes nothing
-brackish retract propose <doc> --endpoint "GET /a" --schema Foo       # negotiated removal; peer accepts/rejects
-brackish retract accept|reject|list|withdraw <doc> [id]
+# Validate / retract (negotiated removal of ACCEPTED artifacts)
+brackish validate <doc> [--manifest manifest.yaml]                   # dry-run validity check; writes nothing
+brackish propose retraction --endpoint "GET /a" --schema Foo --rationale "<why>"  # peer accepts/rejects
+brackish accept|reject|withdraw retraction <id>
+brackish list retraction [--all]
 
 # Visualize
 brackish visualize <doc> --format openapi --out spec.yaml
@@ -175,7 +186,7 @@ brackish visualize <doc> --format markdown           # human-readable doc with r
 brackish visualize <doc> --format html               # Swagger UI + brackish rationale sidebar
 
 # Cross-machine bootstrap
-brackish invite <peer-identity> --ttl 86400
+brackish invite <peer-identity> --grant <doc> --ttl 86400   # --grant is required; the doc must exist before you mint the invite
 brackish connect <url> --token <tok> --identity <name>
 
 # Skill management
@@ -190,5 +201,5 @@ brackish uninstall
 - **Transport detection:** the server is dual-bound (Unix socket + optional TCP) and picks auth by inspecting the underlying connection — `X-Brackish-Identity` for socket peers, `Authorization: Bearer <token>` for TCP.
 - **Validation:** every propose builds the projected wide doc (accepted + currently-proposed + this propose) and runs it through `@seriousme/openapi-schema-validator` against the official 3.1 meta-schema. Every accept projects the accepted-only doc with this accept applied and validates that. The doc that `brackish visualize` renders and the doc the validator runs against are produced by the same code path — no drift.
 - **Stack:** Node 22+, Hono, better-sqlite3, zod, commander, undici, smol-toml, @seriousme/openapi-schema-validator.
-- **Source layout:** `src/cli/` (per-command modules), `src/daemon/` (server + auth + store + projection), `src/client/` (HTTP client + batch + manifest), `src/lib/` (pure: models + diff + lint + validate + openapi + specfile + notifier), `src/io/` (config + install), `src/render/` (markdown/html/text renderers + terminal formatters).
-- **Tests:** vitest, 231 unit + integration + e2e across store, server, client, lint, validate, batch, manifest, install.
+- **Source layout:** `src/cli/` (per-command modules + `lifecycle/` — the verb×noun capability tables), `src/daemon/` (server + auth + store + projection), `src/client/` (HTTP client + batch + manifest), `src/lib/` (pure: models + diff + lint + validate + openapi + specfile + notifier), `src/io/` (config + install), `src/render/` (markdown/html/text renderers + terminal formatters).
+- **Tests:** vitest, 303 unit + integration + e2e across store, server, client, lint, validate, batch, counter, manifest, install.

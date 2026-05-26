@@ -7,15 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Renegotiation, continued: `retract` becomes **negotiated**, and turns are now **delivered** as coherent batches. Both came out of the renegotiation e2e trial — 0.6.1's unilateral `retract` broke the propose/accept invariant, and (in production, unlike the turn-atomic harness) a multi-move turn dribbled to the peer event-by-event, pressuring them to judge a half-formed state.
+0.7.0 standardizes the CLI grammar (a breaking flip to **verb-first**) and makes **every command atomic**. On top of that: renegotiation got proper primitives — `counter` and a negotiated `retract` — and turns now deliver as coherent batches. Most of it came out of the e2e trials.
 
 ### Added
 
-- **`brackish deliver <doc>`** + turn-delivery model. Your events (proposes/accepts/rejects/retractions/messages) are now **held** until you deliver them, then surface to the peer's `read`/`inbox`/`wait` as one batch — "don't show them your internal monologue." `nap` and `wait` imply `deliver` (so ending a turn hands off automatically); delivering nothing is a no-op. Your own moves' effects still show in `status` immediately — only the event feed to the peer is held. (`events.delivered_at` column; new-DB migration backfills existing events as delivered. Known limitation: under genuinely concurrent turns the id-based read cursor can skip a late-delivered lower-id event — rare in the turn-based norm.)
+- **`brackish counter <noun> <id> --file <f> --rationale "<why>"`** — atomically rejects the peer's current proposed version and proposes your replacement in one transaction (no rejected-with-no-counter window). Replaces the manual reject-then-propose two-step, and reads in the log as a counter rather than a refusal.
+- **`brackish accept <noun> --target … --include-dependencies`** — opt-in: also accepts the still-proposed schemas the targets `$ref` (transitive closure), in the same atomic batch. Default off; without it, accepting an endpoint whose schema isn't accepted yet is refused with `accept_orphans_ref`, which names the missing schema and how to accept it.
+- **`brackish deliver <doc>`** + turn-delivery model. Your events (proposes/accepts/rejects/retractions/messages) are **held** until you deliver them, then surface to the peer's `read`/`inbox`/`wait` as one batch. `nap`/`wait` imply `deliver`; your own moves still show in `status` immediately. (`events.delivered_at` column; migration backfills existing events as delivered.)
 
 ### Changed
 
-- **`retract` is now a propose/accept lifecycle, not an immediate removal.** `brackish retract propose <doc> --endpoint X --schema Y` opens a grouped retraction; the **peer** accepts it (the set is tombstoned atomically, validated fully-valid-after) or rejects it (nothing changes). Artifacts stay live until accepted. New verbs: `retract propose | accept | reject | list | withdraw`. New `retractions` table + `retraction_proposed/accepted/rejected/withdrawn` events. **Breaking** vs 0.6.1's unilateral `retract <doc> --endpoint …` (which removed immediately).
+- **BREAKING: the CLI is verb-first** — `brackish <verb> <noun> [identity]` (`accept endpoint GET /users`, not `endpoint accept`). The document is the **`--doc` option** (defaults to the sole doc), no longer a positional. `propose` is **file-only** (`--file`; the inline field/response/security builders are gone). `--version`/`--expected-version` → **`--rev`/`--expected-rev`**. `propose-batch <doc> --manifest` → **`propose --manifest`**. Variadic `accept <doc> A B C` → **`accept <noun> --target A --target B`**. Standalone convention lint removed (`propose --manifest` pre-flight + `validate` cover it).
+- **Every command is atomic — all-or-nothing.** Batch accept now commits the whole set in one server transaction (was a client-side loop that could leave a partial accept); a mutually-referencing set accepts together, and any failure rolls back with nothing written. `propose --manifest` and `counter` likewise.
+- **`retract` is now a negotiated propose/accept lifecycle under the `retraction` noun.** `brackish propose retraction --endpoint X --schema Y --rationale "<why>"` opens a grouped removal; the **peer** accepts it (tombstoned atomically, validated fully-valid-after) or rejects it. Verb-first: `propose | accept | reject | withdraw | list retraction`. New `retractions` table + `retraction_*` events. **Breaking** vs 0.6.1's unilateral `retract` (which removed immediately).
+- **`brackish read`** infers the sole document when `<doc>` is omitted (matching `status`), and no longer truncates rejection/acceptance reasons or deltas.
+- **`brackish install` no longer wires a `UserPromptSubmit` hook** — skill (+ optional `--permission`) only; the foreground `status`/`nap` loop is the sync model. `activate`/`deactivate` are no-ops for now.
 
 ## [0.6.1] - 2026-05-24
 

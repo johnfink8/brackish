@@ -148,14 +148,16 @@ function getDocumentSummary(
   // 'observer' identity reads via the socket; the socket transport is peer-trust so the harness
   // can self-declare any identity. Using a dedicated one keeps cursor state from polluting either side.
   const endpointsRes = brackishCall(brackishBin, brackishHome, 'observer', [
-    'endpoint',
     'list',
+    'endpoint',
+    '--doc',
     documentName,
     '--json',
   ]);
   const schemasRes = brackishCall(brackishBin, brackishHome, 'observer', [
-    'schema',
     'list',
+    'schema',
+    '--doc',
     documentName,
     '--json',
   ]);
@@ -590,9 +592,10 @@ async function main(): Promise<void> {
   // production a Claude doesn't have an inlined plugin teaching in CLAUDE.md; it has the skill
   // installed via `brackish install`. The trial matches that path: we run `brackish install
   // --local --yes --permission --force` in each side's dir below, which drops the project-scope
-  // skill into `.claude/skills/brackish/`, the UserPromptSubmit hook into `.claude/settings.json`,
-  // and the `Bash(brackish *)` allow-rule. The sub-Claude discovers the skill the same way a
-  // real user's Claude does.
+  // skill into `.claude/skills/brackish/` and the `Bash(brackish *)` allow-rule into
+  // `.claude/settings.json`. (The UserPromptSubmit inbox hook is currently stubbed off — see
+  // HOOK_ENABLED in src/cli/install.ts — so trials run the foreground status/nap loop.) The
+  // sub-Claude discovers the skill the same way a real user's Claude does.
   writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend);
   writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend);
   writeFileSync(

@@ -264,6 +264,49 @@ export interface Store {
     by: Identity,
   ): Promise<BatchProposeSucceededItem[]>;
 
+  /**
+   * Atomically accept a coordinated set of proposed artifacts (each by its resolved version). All
+   * flips run inside one transaction — any failure (e.g. a target no longer proposed, or own
+   * proposal) rolls back the whole batch, so partial acceptance is impossible. The caller validates
+   * the resulting accepted doc before invoking (mirrors batchPropose).
+   */
+  batchAccept(
+    documentName: DocumentName,
+    body: BatchAcceptInput,
+    by: Identity,
+    reason?: string,
+  ): Promise<BatchAcceptedItem[]>;
+
+  /**
+   * Counter a proposal: reject the current proposed version (peer-only) and propose a replacement,
+   * atomically (one transaction — no rejected-with-no-counter partial state). The caller validates
+   * the replacement against the assembled doc before invoking (mirrors propose).
+   */
+  counterEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<OperationArtifact>;
+  counterSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<SchemaArtifact>;
+  counterConvention(
+    documentName: DocumentName,
+    spec: ConventionSpec,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<ConventionArtifact>;
+
   // --- retractions (negotiated, grouped removals) ---
   /**
    * Propose removing a coordinated set of accepted artifacts. Validates each target has a live
@@ -309,5 +352,14 @@ export type BatchProposeInput = {
 
 export type BatchProposeSucceededItem =
   | { kind: 'convention'; envelope: ConventionArtifact }
+  | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
+  | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };
+
+export type BatchAcceptInput = {
+  schemas?: Array<{ name: SchemaName; version: number }>;
+  endpoints?: Array<{ method: HttpMethod; path: string; version: number }>;
+};
+
+export type BatchAcceptedItem =
   | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
   | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };

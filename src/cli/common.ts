@@ -3,12 +3,7 @@
 
 import { createSocket as createDgramSocket } from 'node:dgram';
 import { stringify as yamlStringify } from 'yaml';
-import {
-  BrackishClient,
-  ClientError,
-  clientOptionsFromConfig,
-  type ProposeOptionsWire,
-} from '../client/client.js';
+import { BrackishClient, ClientError, clientOptionsFromConfig } from '../client/client.js';
 import { loadClientConfig } from '../io/config.js';
 import type { LintIssue, LintResult } from '../lib/lint.js';
 import type { DiffResponse } from '../lib/models.js';
@@ -26,7 +21,7 @@ export function emitJson(value: unknown): void {
 }
 
 /** Emit a tagged `show` result: metadata (label + headers) to stderr, spec body to stdout, so
- *  `brackish <kind> show <doc> <id> > file.yaml` captures only the spec. */
+ *  `brackish show <noun> <id> > file.yaml` captures only the spec. */
 export function emitShow(rendered: { meta: string; body: string }): void {
   process.stderr.write(`${rendered.meta}\n`);
   if (rendered.body.length > 0) process.stdout.write(`${rendered.body}\n`);
@@ -53,9 +48,23 @@ async function remindHeld(client: BrackishClient): Promise<void> {
   );
 }
 
+/** Thrown by errExit. The CLI's single top-level handler (cli.ts) writes the message + exits; an
+ *  empty message means "exit silently" (output was already emitted, e.g. for --json). Throwing
+ *  rather than process.exit keeps command logic composable and the CLI testable in-process. */
+export class ExitError extends Error {
+  constructor(
+    readonly code: number,
+    message = '',
+  ) {
+    super(message);
+    this.name = 'ExitError';
+  }
+}
+
+/** Abort the current command with an exit code (and optional message). Returns `never` — it throws,
+ *  caught once at the top level. Pass an empty message to exit without printing anything more. */
 export function errExit(code: number, message: string): never {
-  process.stderr.write(`brackish: ${message}\n`);
-  process.exit(code);
+  throw new ExitError(code, message);
 }
 
 // --- repeatable commander option accumulator ---
@@ -70,14 +79,6 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// --- propose concurrency ---
-
-export type ConcurrencyOpts = {
-  expectedNew?: boolean;
-  expectedVersion?: string;
-  force?: boolean;
-};
-
 /** Run a client call that may 404 with `artifact_not_found`, return null on that
  *  specific failure mode, rethrow anything else. Used by `show` to fetch the
  *  accepted + proposed versions in parallel without one's absence killing the
@@ -89,60 +90,6 @@ export async function getOrNull<T>(fn: () => Promise<T>): Promise<T | null> {
     if (e instanceof ClientError && e.code === 'artifact_not_found') return null;
     throw e;
   }
-}
-
-/** Resolve a reject reason from either the positional form or `--rationale`. Either
- *  works; passing both is ambiguous; passing neither is invalid. Kept here so all
- *  three reject verbs (endpoint/schema/convention) share the same validation.
- *  Throws on misuse — `withClient`'s top-level catch routes through `errExit`. */
-export function resolveRejectReason(
-  positional: string | undefined,
-  rationale: string | undefined,
-): string {
-  if (positional !== undefined && rationale !== undefined) {
-    throw new Error(
-      'pass the reason positionally OR via --rationale, not both — they would conflict',
-    );
-  }
-  const reason = positional ?? rationale;
-  if (!reason || reason.length === 0) {
-    throw new Error(
-      'a reject reason is required — pass it positionally or via --rationale "<text>"',
-    );
-  }
-  return reason;
-}
-
-export function parseConcurrencyOpts(opts: ConcurrencyOpts): ProposeOptionsWire {
-  if (opts.expectedNew && opts.expectedVersion !== undefined) {
-    errExit(2, 'pass at most one of --expected-new or --expected-version');
-  }
-  const out: ProposeOptionsWire = {};
-  if (opts.expectedNew) out.expectedVersion = 'new';
-  else if (opts.expectedVersion !== undefined) {
-    const n = Number.parseInt(opts.expectedVersion, 10);
-    if (!Number.isFinite(n) || n < 1) {
-      errExit(2, `--expected-version must be a positive integer (got "${opts.expectedVersion}")`);
-    }
-    out.expectedVersion = n;
-  }
-  if (opts.force) {
-    if (out.expectedVersion !== undefined) {
-      errExit(
-        2,
-        '--force is meaningless with --expected-* (the version assertion already governs racing)',
-      );
-    }
-    out.force = true;
-  }
-  return out;
-}
-
-export function warnFileClobbers(filePath: string, ignored: string[]): void {
-  if (ignored.length === 0) return;
-  process.stderr.write(
-    `warning: --file ${filePath} replaces other flags; ignoring ${ignored.join(', ')}\n`,
-  );
 }
 
 // --- diff output ---
@@ -216,7 +163,7 @@ export async function finalizeLint(
     } else {
       process.stderr.write(`${parsed.message}\n`);
     }
-    process.exit(1);
+    errExit(1, ''); // already emitted the error; just set the exit code
   }
   const result = await doLint(parsed.data);
   const effectiveErrors: LintIssue[] = opts.strict
@@ -230,7 +177,7 @@ export async function finalizeLint(
     if (all.length === 0) emit('ok');
     else emit(formatLintIssues(all));
   }
-  if (effectiveErrors.length > 0) process.exit(1);
+  if (effectiveErrors.length > 0) errExit(1, '');
 }
 
 // --- client wrapper ---
@@ -252,6 +199,9 @@ export async function withClient(
     // After any successful command, nudge about undelivered moves (once, centrally). Best-effort.
     await remindHeld(client);
   } catch (err) {
+    // A command that already decided its exit (errExit → ExitError) must pass through unchanged —
+    // otherwise its code/message would be rewritten as a generic Error below.
+    if (err instanceof ExitError) throw err;
     if (err instanceof ClientError) {
       const code = err.status >= 500 ? 2 : 1;
       const hint = recoveryHint(err.code);
@@ -267,25 +217,43 @@ export async function withClient(
   }
 }
 
+/** The document to act on: the explicit name if given, else the only one. Mirrors `status` — zero is
+ *  an error (nothing to do), several requires an explicit name. Shared by the lifecycle verbs
+ *  (`--doc`) and the standalone `read`. */
+export async function resolveDoc(
+  client: BrackishClient,
+  explicit: string | undefined,
+): Promise<string> {
+  if (explicit !== undefined) return explicit;
+  const docs = await client.listDocuments();
+  const only = docs.length === 1 ? docs[0] : undefined;
+  if (only !== undefined) return only.name;
+  if (docs.length === 0) errExit(2, 'no documents yet — create one with `brackish doc new <name>`');
+  errExit(
+    2,
+    `several documents exist — pass the doc name (have: ${docs.map((x) => x.name).join(', ')})`,
+  );
+}
+
 /** Map a ClientError code to a one-line recovery suggestion. Null = no useful hint
  *  (server's message is already actionable). The CLI is the surface Claude reads mid-task; an
  *  error without a "→ try this next" is a turn-burner. */
 function recoveryHint(code: string | null): string | null {
   switch (code) {
     case 'version_in_flight':
-      return 'read the in-flight version with `brackish <kind> show <id>`, then accept/reject — or override with `--expected-version <N>` / `--force`';
+      return 'read the in-flight version with `brackish show <noun> <id>`, then accept/reject — or override with `--expected-rev <N>` / `--force`';
     case 'version_mismatch':
-      return 'state drifted from your --expected-version; `brackish read <doc>` to reconcile, then retry with the actual latest';
+      return 'state drifted from your --expected-rev; `brackish read <doc>` to reconcile, then retry with the actual latest';
     case 'cannot_accept_own':
-      return 'this is your proposal; only the peer can accept it. To take it back yourself: `brackish <kind> withdraw <id>`';
+      return 'this is your proposal; only the peer can accept it. To take it back yourself: `brackish withdraw <noun> <id>`';
     case 'cannot_reject_own':
-      return 'this is your proposal; only the peer can reject it. To take it back yourself: `brackish <kind> withdraw <id>`';
+      return 'this is your proposal; only the peer can reject it. To take it back yourself: `brackish withdraw <noun> <id>`';
     case 'cannot_withdraw_others':
       return 'only the proposer can withdraw; reject it with a reason instead';
     case 'artifact_not_pending':
       return 'this version is already accepted or rejected — no pending version to act on. Check with `brackish status <doc>` for what is actually awaiting you';
     case 'artifact_not_found':
-      return '`brackish endpoint list <doc>` or `brackish schema list <doc>` to confirm the identity key';
+      return '`brackish list endpoint` or `brackish list schema` to confirm the identity key';
     case 'document_not_found':
       return '`brackish documents` to list existing docs (alias `brackish docs`)';
     case 'document_exists':
@@ -295,7 +263,7 @@ function recoveryHint(code: string | null): string | null {
     case 'invite_expired':
       return 'ask the inviter for a fresh `/brackish connect …` line';
     case 'spec_invalid':
-      return 'the assembled doc does not validate as OpenAPI 3.1. If the cited field-paths are NOT the artifact you are touching, the doc is already invalid from other artifacts — run `brackish validate <doc>` to see every problem, then fix or `brackish retract` them together (you cannot repair a wedged doc one artifact at a time)';
+      return 'the assembled doc does not validate as OpenAPI 3.1. If the cited field-paths are NOT the artifact you are touching, the doc is already invalid from other artifacts — run `brackish validate <doc>` to see every problem, then fix or retract them together with `brackish propose retraction` (one proposal can list several --endpoint/--schema/--convention targets; you cannot repair a wedged doc one artifact at a time)';
     default:
       return null;
   }

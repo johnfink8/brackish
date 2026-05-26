@@ -35,7 +35,7 @@ export function defaultServerConfigPath(): string {
   return join(brackishHome(), 'server.toml');
 }
 
-export function projectClientConfigPath(): string {
+function projectClientConfigPath(): string {
   return join(process.cwd(), '.brackish.toml');
 }
 
@@ -57,7 +57,7 @@ const ClientConfigFileSchema = z.object({
   token: TokenSchema.optional(),
 });
 
-export const ClientConfigSchema = z.object({
+const ClientConfigSchema = z.object({
   identity: IdentitySchema,
   socketPath: z.string().optional(),
   server: z.string().url().optional(),
@@ -111,7 +111,7 @@ const ServerConfigFileSchema = z.object({
   data_path: z.string().optional(),
 });
 
-export const ServerConfigSchema = z.object({
+const ServerConfigSchema = z.object({
   socketPath: z.string(),
   bind: z.string().optional(),
   dataPath: z.string(),
@@ -146,11 +146,11 @@ export function saveServerConfig(
 // --- bind-address parsing ---
 
 /** Default TCP port used when --bind is given without one (e.g. `--bind 0.0.0.0` → 0.0.0.0:11442). */
-export const DEFAULT_BIND_PORT = 11442;
+const DEFAULT_BIND_PORT = 11442;
 
 /** Default `--bind` value used when the flag is passed alone (e.g. `--bind` → 127.0.0.1:11442).
  *  Loopback-only — pass `--bind 0.0.0.0` explicitly to expose on the LAN. */
-export const DEFAULT_BIND_ADDR = `127.0.0.1:${DEFAULT_BIND_PORT}`;
+const DEFAULT_BIND_ADDR = `127.0.0.1:${DEFAULT_BIND_PORT}`;
 
 /**
  * Parse a bind spec into structured form. Accepts:

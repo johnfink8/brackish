@@ -50,6 +50,8 @@ import {
 } from '../../lib/models.js';
 import type { EventNotifier } from '../../lib/notifier.js';
 import type {
+  BatchAcceptedItem,
+  BatchAcceptInput,
   BatchProposeInput,
   BatchProposeSucceededItem,
   ProposeOptions,
@@ -611,14 +613,14 @@ export class SqliteStore implements Store {
         if (prev !== undefined) {
           throw new StoreError(
             'version_mismatch',
-            `--expected-new failed: ${kind} "${identityKey}" already at v${prevVersion} (${prev.status} by ${prev.proposed_by}). Review it (\`brackish ${kind === 'operation' ? 'endpoint' : kind} show\`) before proposing.`,
+            `--expected-new failed: ${kind} "${identityKey}" already at v${prevVersion} (${prev.status} by ${prev.proposed_by}). Review it (\`brackish show ${kind === 'operation' ? 'endpoint' : kind}\`) before proposing.`,
           );
         }
       } else if (typeof opts.expectedVersion === 'number') {
         if (prevVersion !== opts.expectedVersion) {
           throw new StoreError(
             'version_mismatch',
-            `--expected-version ${opts.expectedVersion} failed: ${kind} "${identityKey}" latest is v${prevVersion}${prev ? ` (${prev.status} by ${prev.proposed_by})` : ' (none)'}. Re-read state and retry.`,
+            `--expected-rev ${opts.expectedVersion} failed: ${kind} "${identityKey}" latest is v${prevVersion}${prev ? ` (${prev.status} by ${prev.proposed_by})` : ' (none)'}. Re-read state and retry.`,
           );
         }
       } else if (prev?.status === 'proposed' && !opts.force) {
@@ -1815,6 +1817,122 @@ export class SqliteStore implements Store {
     return succeeded;
   }
 
+  // --- atomic batch accept ---
+
+  async batchAccept(
+    documentName: DocumentName,
+    body: BatchAcceptInput,
+    by: Identity,
+    reason?: string,
+  ): Promise<BatchAcceptedItem[]> {
+    // One outer transaction; each acceptRaw runs as a savepoint inside it (better-sqlite3 nests
+    // inner transactions as savepoints). Any throw rolls back every flip, so a partial accept is
+    // impossible. The caller already validated the assembled accepted doc, so refs resolve.
+    const accepted: BatchAcceptedItem[] = [];
+    const tx = this.db.transaction(() => {
+      for (const s of body.schemas ?? []) {
+        const row = this.acceptRaw(documentName, 'schema', s.name, s.version, by, reason);
+        accepted.push({ kind: 'schema', name: s.name, envelope: this.rowToSchemaArtifact(row) });
+      }
+      for (const e of body.endpoints ?? []) {
+        const row = this.acceptRaw(
+          documentName,
+          'operation',
+          operationIdentityKey(e.method, e.path),
+          e.version,
+          by,
+          reason,
+        );
+        accepted.push({
+          kind: 'endpoint',
+          method: e.method,
+          path: e.path,
+          envelope: this.rowToOperationArtifact(row),
+        });
+      }
+    });
+    tx();
+    return accepted;
+  }
+
+  // --- counter (atomic reject-current-proposed + propose-replacement) ---
+
+  /** Reject the current proposed version (peer-only) and propose a replacement, in ONE transaction.
+   *  Either both land or neither does — no rejected-with-no-counter partial state. The caller
+   *  validates the replacement against the assembled doc first (mirrors propose). */
+  private counterRaw(
+    documentName: DocumentName,
+    kind: 'operation' | 'schema' | 'convention',
+    identityKey: string,
+    spec: unknown,
+    by: Identity,
+    reason: string,
+    opts: ProposeOptions = {},
+  ): ArtifactRow {
+    let row: ArtifactRow | undefined;
+    const tx = this.db.transaction(() => {
+      const proposed = this.getRaw(documentName, kind, identityKey, { status: 'proposed' });
+      if (!proposed) {
+        throw new StoreError(
+          'artifact_not_pending',
+          `no proposed ${kind} "${identityKey}" to counter`,
+        );
+      }
+      this.rejectRaw(documentName, kind, identityKey, proposed.version, reason, by);
+      row = this.proposeRaw(documentName, kind, identityKey, spec, by, opts);
+    });
+    tx();
+    if (!row) throw new Error('counterRaw: row missing after propose');
+    return row;
+  }
+
+  async counterEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
+    by: Identity,
+    reason: string,
+    opts: ProposeOptions = {},
+  ): Promise<OperationArtifact> {
+    return this.rowToOperationArtifact(
+      this.counterRaw(
+        documentName,
+        'operation',
+        operationIdentityKey(method, path),
+        spec,
+        by,
+        reason,
+        opts,
+      ),
+    );
+  }
+
+  async counterSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    by: Identity,
+    reason: string,
+    opts: ProposeOptions = {},
+  ): Promise<SchemaArtifact> {
+    return this.rowToSchemaArtifact(
+      this.counterRaw(documentName, 'schema', name, spec, by, reason, opts),
+    );
+  }
+
+  async counterConvention(
+    documentName: DocumentName,
+    spec: ConventionSpec,
+    by: Identity,
+    reason: string,
+    opts: ProposeOptions = {},
+  ): Promise<ConventionArtifact> {
+    return this.rowToConventionArtifact(
+      this.counterRaw(documentName, 'convention', CONVENTION_KEY, spec, by, reason, opts),
+    );
+  }
+
   // --- retractions (negotiated, grouped removals) ---
 
   async proposeRetraction(
@@ -2114,7 +2232,7 @@ function truncate(s: string, n: number): string {
 // </system-reminder> would break out of the wrapper and turn into a forged
 // reminder. Replace angle brackets with visually-similar non-tag codepoints
 // (U+2039, U+203A) and strip C0 control characters.
-export function neutralizeForReminder(s: string): string {
+function neutralizeForReminder(s: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping C0 controls is the point
   return s.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[<>]/g, (c) => (c === '<' ? '‹' : '›'));
 }

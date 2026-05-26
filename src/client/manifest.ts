@@ -46,14 +46,13 @@ const EndpointEntrySchema = z
   })
   .strict();
 
-export const ManifestSchema = z
+const ManifestSchema = z
   .object({
     convention: ConventionEntrySchema.optional(),
     schemas: z.array(SchemaEntrySchema).optional(),
     endpoints: z.array(EndpointEntrySchema).optional(),
   })
   .strict();
-export type Manifest = z.infer<typeof ManifestSchema>;
 
 /** File paths in the manifest resolve relative to the manifest file's own dir. */
 export type LoadedManifest = {

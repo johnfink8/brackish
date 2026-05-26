@@ -25,9 +25,9 @@ const empty = (): LintResult => ({ errors: [], warnings: [] });
 
 /** Re-used pattern for `{var}` placeholders in operation paths. Kept in one place so
  *  buildOperationSpec and lint stay in sync. */
-export const PATH_PLACEHOLDER_RE = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const PATH_PLACEHOLDER_RE = /\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
-export function pathPlaceholders(path: string): string[] {
+function pathPlaceholders(path: string): string[] {
   return [...path.matchAll(PATH_PLACEHOLDER_RE)].map((m) => m[1] as string);
 }
 

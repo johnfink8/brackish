@@ -14,7 +14,7 @@
 // Cross-machine browser UI is an explicit non-goal; ssh-forward to loopback, or use the CLI.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Context, MiddlewareHandler } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { type Identity, IdentitySchema } from '../lib/models.js';
 import type { RateLimiter } from './limiter.js';
 import type { Store } from './store/index.js';
@@ -31,8 +31,6 @@ export type AppBindings = {
   incoming: IncomingMessage;
   outgoing: ServerResponse;
 };
-
-export type AppContext = Context<{ Variables: AppVariables; Bindings: AppBindings }>;
 
 /** Minimal surface of node:net Socket that `detectTransport` actually uses.
  *  Narrow on purpose so tests don't have to fake a whole IncomingMessage. */

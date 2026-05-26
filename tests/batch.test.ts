@@ -2,11 +2,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { acceptEndpoints, acceptSchemas } from '../src/client/batch.js';
 import { BrackishClient } from '../src/client/client.js';
 import { type RunningServer, startServer } from '../src/daemon/server.js';
 
-describe('acceptSchemas', () => {
+// Batch accept is ATOMIC: BrackishClient.batchAcceptSchemas/Endpoints submit the whole set to one
+// server transaction. It either returns every accepted version or rejects with NOTHING accepted —
+// there is no partial-success / `remaining` shape. The "accepts nothing on failure" assertions
+// prove the rollback: the still-valid items remain `proposed` (a follow-up single accept succeeds).
+
+describe('batchAcceptSchemas (atomic)', () => {
   let tmp: string;
   let server: RunningServer;
   let host: BrackishClient;
@@ -17,10 +21,7 @@ describe('acceptSchemas', () => {
     tmp = mkdtempSync(join(tmpdir(), 'brackish-batch-test-'));
     process.env.BRACKISH_HOME = tmp;
     server = await startServer({
-      config: {
-        socketPath: join(tmp, 'brackish.sock'),
-        dataPath: join(tmp, 'brackish.db'),
-      },
+      config: { socketPath: join(tmp, 'brackish.sock'), dataPath: join(tmp, 'brackish.db') },
     });
     host = new BrackishClient({ socketPath: server.socketPath, identity: 'host' });
     peer = new BrackishClient({ socketPath: server.socketPath, identity: 'peer' });
@@ -36,52 +37,81 @@ describe('acceptSchemas', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('accepts every schema in order when all succeed', async () => {
+  it('accepts the whole set when all succeed', async () => {
     await peer.proposeSchema('d', 'User', { type: 'object' });
     await peer.proposeSchema('d', 'Order', { type: 'object' });
     await peer.proposeSchema('d', 'OrderItem', { type: 'object' });
-    const result = await acceptSchemas(host, 'd', ['User', 'Order', 'OrderItem']);
-    expect(result.failed).toBeNull();
-    expect(result.accepted.map((a) => a.name)).toEqual(['User', 'Order', 'OrderItem']);
-    expect(result.remaining).toEqual([]);
+    const { accepted } = await host.batchAcceptSchemas('d', ['User', 'Order', 'OrderItem']);
+    expect(accepted.map((a) => a.name)).toEqual(['User', 'Order', 'OrderItem']);
   });
 
-  it('stops on the first failure, leaving remaining items unaccepted', async () => {
+  it('rejects the whole batch and accepts nothing when one item fails (cannot_accept_own)', async () => {
     await peer.proposeSchema('d', 'User', { type: 'object' });
     await peer.proposeSchema('d', 'Order', { type: 'object' });
-    // host proposes Customer themselves — accepting their own should fail with cannot_accept_own
-    await host.proposeSchema('d', 'Customer', { type: 'object' });
-    await peer.proposeSchema('d', 'Address', { type: 'object' });
+    await host.proposeSchema('d', 'Customer', { type: 'object' }); // host can't accept its own
 
-    const result = await acceptSchemas(host, 'd', ['User', 'Order', 'Customer', 'Address']);
-    expect(result.accepted.map((a) => a.name)).toEqual(['User', 'Order']);
-    expect(result.failed?.name).toBe('Customer');
-    expect(result.failed?.code).toBe('cannot_accept_own');
-    expect(result.remaining).toEqual(['Address']);
+    await expect(host.batchAcceptSchemas('d', ['User', 'Order', 'Customer'])).rejects.toMatchObject(
+      { code: 'cannot_accept_own' },
+    );
+
+    // Nothing committed — checked directly: User + Order have no accepted version (currentVersion
+    // null) and are still proposed. A non-atomic loop would have accepted both before Customer failed.
+    const summaries = await host.listSchemas('d');
+    for (const name of ['User', 'Order']) {
+      const s = summaries.find((x) => x.name === name);
+      expect(s?.currentVersion).toBeNull();
+      expect(s?.latestProposedVersion).toBe(1);
+    }
+    // And they remain in flight: accepting them now succeeds (confirms the rollback, not a tombstone).
+    const { accepted: recovered } = await host.batchAcceptSchemas('d', ['User', 'Order']);
+    expect(recovered.map((a) => a.name)).toEqual(['User', 'Order']);
   });
 
-  it('reports a not-found name without touching the rest', async () => {
+  it('rejects the whole batch when an item is not found', async () => {
     await peer.proposeSchema('d', 'User', { type: 'object' });
-    await peer.proposeSchema('d', 'Order', { type: 'object' });
-    const result = await acceptSchemas(host, 'd', ['User', 'Missing', 'Order']);
-    expect(result.accepted.map((a) => a.name)).toEqual(['User']);
-    expect(result.failed?.name).toBe('Missing');
-    expect(result.failed?.code).toBe('artifact_not_found');
-    expect(result.remaining).toEqual(['Order']);
+    await expect(host.batchAcceptSchemas('d', ['User', 'Missing'])).rejects.toMatchObject({
+      code: 'artifact_not_found',
+    });
+    const { accepted: recovered } = await host.batchAcceptSchemas('d', ['User']);
+    expect(recovered.map((a) => a.name)).toEqual(['User']);
   });
 
-  it('a duplicate name fails the second hit (no proposed version left to accept)', async () => {
-    await peer.proposeSchema('d', 'User', { type: 'object' });
-    const result = await acceptSchemas(host, 'd', ['User', 'User']);
-    expect(result.accepted.map((a) => a.name)).toEqual(['User']);
-    expect(result.failed?.name).toBe('User');
-    // The server resolves "latest proposed" before accepting; once accepted, there's nothing in
-    // flight, so the second hit is artifact_not_found, not artifact_not_pending.
-    expect(result.failed?.code).toBe('artifact_not_found');
+  it('accepts a mutually-referencing set together that a single accept would reject', async () => {
+    await peer.proposeSchema('d', 'OrderItem', { type: 'object' });
+    await peer.proposeSchema('d', 'Order', {
+      type: 'object',
+      properties: { item: { $ref: '#/components/schemas/OrderItem' } },
+    });
+    // Accepting Order alone would orphan its $ref to the still-proposed OrderItem. The error names
+    // the missing ref and points at accepting it too — not the generic "doc is wedged" message.
+    await expect(host.batchAcceptSchemas('d', ['Order'])).rejects.toMatchObject({
+      code: 'accept_orphans_ref',
+      message: expect.stringContaining('OrderItem'),
+    });
+    // Accepting both together validates as one assembled doc and commits atomically.
+    const { accepted } = await host.batchAcceptSchemas('d', ['Order', 'OrderItem']);
+    expect(accepted.map((a) => a.name)).toEqual(['Order', 'OrderItem']);
+  });
+
+  it('--include-dependencies pulls in the proposed $ref-closure, accepting it atomically', async () => {
+    await peer.proposeSchema('d', 'OrderItem', { type: 'object' });
+    await peer.proposeSchema('d', 'Order', {
+      type: 'object',
+      properties: { item: { $ref: '#/components/schemas/OrderItem' } },
+    });
+    // Accept Order alone, but opt into dependencies → OrderItem comes along in the same batch.
+    const res = await host.batchAcceptSchemas('d', ['Order'], undefined, true);
+    expect(res.accepted.map((a) => a.name)).toEqual(['Order']);
+    expect(res.dependencies).toEqual(['schema OrderItem']);
+    // Both are now accepted.
+    const summaries = await host.listSchemas('d');
+    for (const name of ['Order', 'OrderItem']) {
+      expect(summaries.find((s) => s.name === name)?.currentVersion).toBe(1);
+    }
   });
 });
 
-describe('acceptEndpoints', () => {
+describe('batchAcceptEndpoints (atomic)', () => {
   let tmp: string;
   let server: RunningServer;
   let host: BrackishClient;
@@ -93,10 +123,7 @@ describe('acceptEndpoints', () => {
     tmp = mkdtempSync(join(tmpdir(), 'brackish-batch-test-'));
     process.env.BRACKISH_HOME = tmp;
     server = await startServer({
-      config: {
-        socketPath: join(tmp, 'brackish.sock'),
-        dataPath: join(tmp, 'brackish.db'),
-      },
+      config: { socketPath: join(tmp, 'brackish.sock'), dataPath: join(tmp, 'brackish.db') },
     });
     host = new BrackishClient({ socketPath: server.socketPath, identity: 'host' });
     peer = new BrackishClient({ socketPath: server.socketPath, identity: 'peer' });
@@ -112,68 +139,46 @@ describe('acceptEndpoints', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('accepts every endpoint in order when all succeed', async () => {
+  it('accepts the whole set when all succeed', async () => {
     await peer.proposeEndpoint('d', 'get', '/users', minOp);
     await peer.proposeEndpoint('d', 'post', '/users', minOp);
     await peer.proposeEndpoint('d', 'get', '/users/{id}', minOp);
-    const result = await acceptEndpoints(host, 'd', [
+    const { accepted } = await host.batchAcceptEndpoints('d', [
       { method: 'get', path: '/users' },
       { method: 'post', path: '/users' },
       { method: 'get', path: '/users/{id}' },
     ]);
-    expect(result.failed).toBeNull();
-    expect(result.accepted.map((a) => `${a.method} ${a.path}`)).toEqual([
+    expect(accepted.map((a) => `${a.method} ${a.path}`)).toEqual([
       'get /users',
       'post /users',
       'get /users/{id}',
     ]);
-    expect(result.remaining).toEqual([]);
   });
 
-  it('stops on the first failure, leaving remaining targets unaccepted', async () => {
+  it('rejects the whole batch and accepts nothing when one target fails', async () => {
     await peer.proposeEndpoint('d', 'get', '/users', minOp);
     await peer.proposeEndpoint('d', 'post', '/users', minOp);
-    // host proposes /admin themselves → accepting their own fails with cannot_accept_own.
-    await host.proposeEndpoint('d', 'delete', '/admin', minOp);
-    await peer.proposeEndpoint('d', 'get', '/health', minOp);
+    await host.proposeEndpoint('d', 'delete', '/admin', minOp); // host can't accept its own
 
-    const result = await acceptEndpoints(host, 'd', [
+    await expect(
+      host.batchAcceptEndpoints('d', [
+        { method: 'get', path: '/users' },
+        { method: 'post', path: '/users' },
+        { method: 'delete', path: '/admin' },
+      ]),
+    ).rejects.toMatchObject({ code: 'cannot_accept_own' });
+
+    // Nothing committed — checked directly: neither /users endpoint has an accepted version.
+    const summaries = await host.listEndpoints('d');
+    const getUsers = summaries.find((e) => e.method === 'get' && e.path === '/users');
+    const postUsers = summaries.find((e) => e.method === 'post' && e.path === '/users');
+    expect(getUsers?.currentVersion).toBeNull();
+    expect(postUsers?.currentVersion).toBeNull();
+
+    const { accepted: recovered } = await host.batchAcceptEndpoints('d', [
       { method: 'get', path: '/users' },
       { method: 'post', path: '/users' },
-      { method: 'delete', path: '/admin' },
-      { method: 'get', path: '/health' },
     ]);
-    expect(result.accepted.map((a) => `${a.method} ${a.path}`)).toEqual([
-      'get /users',
-      'post /users',
-    ]);
-    expect(result.failed?.target).toEqual({ method: 'delete', path: '/admin' });
-    expect(result.failed?.code).toBe('cannot_accept_own');
-    expect(result.remaining).toEqual([{ method: 'get', path: '/health' }]);
-  });
-
-  it('reports a not-found target without touching the rest', async () => {
-    await peer.proposeEndpoint('d', 'get', '/users', minOp);
-    await peer.proposeEndpoint('d', 'post', '/orders', minOp);
-    const result = await acceptEndpoints(host, 'd', [
-      { method: 'get', path: '/users' },
-      { method: 'get', path: '/missing' },
-      { method: 'post', path: '/orders' },
-    ]);
-    expect(result.accepted.map((a) => `${a.method} ${a.path}`)).toEqual(['get /users']);
-    expect(result.failed?.target).toEqual({ method: 'get', path: '/missing' });
-    expect(result.failed?.code).toBe('artifact_not_found');
-    expect(result.remaining).toEqual([{ method: 'post', path: '/orders' }]);
-  });
-
-  it('a duplicate target fails the second hit (no proposed version left to accept)', async () => {
-    await peer.proposeEndpoint('d', 'get', '/users', minOp);
-    const result = await acceptEndpoints(host, 'd', [
-      { method: 'get', path: '/users' },
-      { method: 'get', path: '/users' },
-    ]);
-    expect(result.accepted.map((a) => `${a.method} ${a.path}`)).toEqual(['get /users']);
-    expect(result.failed?.target).toEqual({ method: 'get', path: '/users' });
-    expect(result.failed?.code).toBe('artifact_not_found');
+    expect(recovered.map((a) => `${a.method} ${a.path}`)).toEqual(['get /users', 'post /users']);
   });
 });

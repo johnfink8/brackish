@@ -2,7 +2,7 @@
 
 import type { Command } from 'commander';
 import { formatEvents, formatEventsStream, formatInbox } from '../render/output.js';
-import { emit, emitJson, errExit, readStdin, sleep, withClient } from './common.js';
+import { emit, emitJson, errExit, readStdin, resolveDoc, sleep, withClient } from './common.js';
 
 export function register(program: Command): void {
   program
@@ -18,9 +18,9 @@ export function register(program: Command): void {
     );
 
   program
-    .command('read <doc>')
+    .command('read [doc]')
     .description(
-      "list events in <doc> since the caller's cursor (advances the cursor). --tail N peeks at the last N events without advancing.",
+      "list events in <doc> since the caller's cursor (advances the cursor). Omit <doc> to use the sole document. --tail N peeks at the last N events without advancing.",
     )
     .option('--since <n>', 'override cursor (exclusive lower bound)')
     .option('--limit <n>', 'max events to return', '200')
@@ -28,10 +28,11 @@ export function register(program: Command): void {
     .option('--json', 'output JSON')
     .action(
       async (
-        document: string,
+        docArg: string | undefined,
         opts: { since?: string; limit: string; tail?: string; json?: boolean },
       ) =>
         withClient(async (client) => {
+          const document = await resolveDoc(client, docArg);
           const tailN = opts.tail !== undefined ? Number.parseInt(opts.tail, 10) : undefined;
           if (tailN !== undefined && opts.since !== undefined) {
             errExit(2, 'read: --tail and --since are mutually exclusive');

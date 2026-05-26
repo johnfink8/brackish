@@ -13,7 +13,7 @@ import {
   SchemaNameSchema,
 } from './models.js';
 
-export const DemoMoveSchema = z.discriminatedUnion('t', [
+const DemoMoveSchema = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('create_document'),
     actor: IdentitySchema,

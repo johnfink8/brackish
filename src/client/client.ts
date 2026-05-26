@@ -7,11 +7,15 @@
 import { Agent, type Response as UndiciResponse, fetch as undiciFetch } from 'undici';
 import { z } from 'zod';
 import {
+  type AcceptBatchRequest,
+  AcceptBatchResponseSchema,
   type ConnectResponse,
   ConnectResponseSchema,
   type ConventionArtifact,
   ConventionArtifactSchema,
   type ConventionSpec,
+  type CounterRequest,
+  CounterResponseSchema,
   type DeliverResponse,
   DeliverResponseSchema,
   type DiffResponse,
@@ -65,6 +69,15 @@ import {
 import { type OpenAPIDocument, OpenAPIDocumentSchema } from '../lib/openapi.js';
 
 export type SpecIssue = { severity: 'error' | 'warn'; field: string; message: string };
+
+/** One-line label for an auto-included (--include-dependencies) artifact, for CLI reporting. */
+function acceptedItemLabel(
+  item: { kind: 'schema'; name: string } | { kind: 'endpoint'; method: string; path: string },
+): string {
+  return item.kind === 'schema'
+    ? `schema ${item.name}`
+    : `endpoint ${item.method.toUpperCase()} ${item.path}`;
+}
 
 export class ClientError extends Error {
   constructor(
@@ -193,6 +206,110 @@ export class BrackishClient {
       ProposeBatchResponseSchema,
       { method: 'POST', body },
     );
+  }
+
+  /** Atomically accept a set of proposed schemas. All-or-nothing: on any failure nothing is
+   *  accepted (the call rejects). Returns the accepted versions on success. */
+  async batchAcceptSchemas(
+    document: DocumentName,
+    names: SchemaName[],
+    rationale?: string,
+    includeDependencies?: boolean,
+  ): Promise<{ accepted: SchemaArtifact[]; dependencies: string[] }> {
+    const body: AcceptBatchRequest = { schemas: names };
+    if (rationale !== undefined) body.rationale = rationale;
+    if (includeDependencies === true) body.includeDependencies = true;
+    const res = await this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/accept-batch`,
+      AcceptBatchResponseSchema,
+      { method: 'POST', body },
+    );
+    const accepted: SchemaArtifact[] = [];
+    for (const item of res.accepted) if (item.kind === 'schema') accepted.push(item.envelope);
+    return { accepted, dependencies: res.dependencies.map(acceptedItemLabel) };
+  }
+
+  /** Atomically accept a set of proposed endpoints. All-or-nothing (see batchAcceptSchemas). */
+  async batchAcceptEndpoints(
+    document: DocumentName,
+    targets: Array<{ method: HttpMethod; path: string }>,
+    rationale?: string,
+    includeDependencies?: boolean,
+  ): Promise<{ accepted: OperationArtifact[]; dependencies: string[] }> {
+    const body: AcceptBatchRequest = { endpoints: targets };
+    if (rationale !== undefined) body.rationale = rationale;
+    if (includeDependencies === true) body.includeDependencies = true;
+    const res = await this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/accept-batch`,
+      AcceptBatchResponseSchema,
+      { method: 'POST', body },
+    );
+    const accepted: OperationArtifact[] = [];
+    for (const item of res.accepted) if (item.kind === 'endpoint') accepted.push(item.envelope);
+    return { accepted, dependencies: res.dependencies.map(acceptedItemLabel) };
+  }
+
+  /** Counter a proposed endpoint: reject the current proposed version + propose `spec`, atomically. */
+  async counterEndpoint(
+    document: DocumentName,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
+    reason: string,
+    concurrency: ProposeOptionsWire = {},
+  ): Promise<OperationArtifact> {
+    const body: CounterRequest = { kind: 'endpoint', method, path, spec, reason };
+    if (concurrency.expectedVersion !== undefined || concurrency.force !== undefined) {
+      body.options = concurrency;
+    }
+    const res = await this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/counter`,
+      CounterResponseSchema,
+      { method: 'POST', body },
+    );
+    if (res.kind !== 'endpoint') throw new Error('counter: unexpected response kind');
+    return res.envelope;
+  }
+
+  /** Counter a proposed schema (see counterEndpoint). */
+  async counterSchema(
+    document: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    reason: string,
+    concurrency: ProposeOptionsWire = {},
+  ): Promise<SchemaArtifact> {
+    const body: CounterRequest = { kind: 'schema', name, spec, reason };
+    if (concurrency.expectedVersion !== undefined || concurrency.force !== undefined) {
+      body.options = concurrency;
+    }
+    const res = await this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/counter`,
+      CounterResponseSchema,
+      { method: 'POST', body },
+    );
+    if (res.kind !== 'schema') throw new Error('counter: unexpected response kind');
+    return res.envelope;
+  }
+
+  /** Counter the proposed convention (see counterEndpoint). */
+  async counterConvention(
+    document: DocumentName,
+    spec: ConventionSpec,
+    reason: string,
+    concurrency: ProposeOptionsWire = {},
+  ): Promise<ConventionArtifact> {
+    const body: CounterRequest = { kind: 'convention', spec, reason };
+    if (concurrency.expectedVersion !== undefined || concurrency.force !== undefined) {
+      body.options = concurrency;
+    }
+    const res = await this.fetchAndParse(
+      `/documents/${encodeURIComponent(document)}/counter`,
+      CounterResponseSchema,
+      { method: 'POST', body },
+    );
+    if (res.kind !== 'convention') throw new Error('counter: unexpected response kind');
+    return res.envelope;
   }
 
   /** Deliver the caller's held events — make this turn's moves visible to the peer. */

@@ -1,7 +1,6 @@
-// Client-side composition over single-artifact server routes: batch accept + batch propose-from-manifest.
-//
-// Both halves share the "stop on first failure, report what succeeded + what's left" semantics so
-// the CLI presentation stays uniform.
+// Client-side propose-from-manifest: load a manifest, pre-flight (parse + lint) locally, then submit
+// the whole set as one atomic propose-batch request. (Batch ACCEPT is a single atomic server call —
+// see BrackishClient.batchAcceptSchemas / batchAcceptEndpoints — so it isn't composed here.)
 
 import {
   type LintIssue,
@@ -15,87 +14,15 @@ import {
   type DocumentName,
   type HttpMethod,
   JSONSchemaSchema,
-  type OperationArtifact,
   OperationSpecSchema,
   type ProposeBatchRequest,
-  type SchemaArtifact,
-  type SchemaName,
 } from '../lib/models.js';
 import { parseSpecFile } from '../lib/specfile.js';
 import { type BrackishClient, ClientError, type SpecIssue } from './client.js';
 import { type LoadedManifest, loadManifest, type ManifestExpected } from './manifest.js';
 
-export type BatchAcceptResult = {
-  accepted: SchemaArtifact[];
-  failed: { name: string; code: string | null; message: string } | null;
-  /** Names that were never attempted because an earlier accept failed. */
-  remaining: string[];
-};
-
-/** Sequentially accept schemas in the given order. On the first failure, stop.
- *  When `reason` is passed, it's attached to each accept event in the batch. */
-export async function acceptSchemas(
-  client: BrackishClient,
-  document: DocumentName,
-  names: SchemaName[],
-  reason?: string,
-): Promise<BatchAcceptResult> {
-  const accepted: SchemaArtifact[] = [];
-  for (let i = 0; i < names.length; i++) {
-    const n = names[i];
-    if (n === undefined) continue;
-    try {
-      const v = await client.acceptSchema(document, n, undefined, reason);
-      accepted.push(v);
-    } catch (e) {
-      const code = e instanceof ClientError ? e.code : null;
-      const message = e instanceof Error ? e.message : String(e);
-      return {
-        accepted,
-        failed: { name: n, code, message },
-        remaining: names.slice(i + 1),
-      };
-    }
-  }
-  return { accepted, failed: null, remaining: [] };
-}
-
+/** A batch-accept target identity (also the endpoint noun's Id). */
 export type EndpointTarget = { method: HttpMethod; path: string };
-
-export type EndpointBatchAcceptResult = {
-  accepted: OperationArtifact[];
-  failed: { target: EndpointTarget; code: string | null; message: string } | null;
-  /** Targets that were never attempted because an earlier accept failed. */
-  remaining: EndpointTarget[];
-};
-
-/** Sequentially accept endpoints in the given order. On the first failure, stop. Mirrors
- *  `acceptSchemas`; the only structural difference is `(method, path)` per target. */
-export async function acceptEndpoints(
-  client: BrackishClient,
-  document: DocumentName,
-  targets: EndpointTarget[],
-  reason?: string,
-): Promise<EndpointBatchAcceptResult> {
-  const accepted: OperationArtifact[] = [];
-  for (let i = 0; i < targets.length; i++) {
-    const t = targets[i];
-    if (t === undefined) continue;
-    try {
-      const v = await client.acceptEndpoint(document, t.method, t.path, undefined, reason);
-      accepted.push(v);
-    } catch (e) {
-      const code = e instanceof ClientError ? e.code : null;
-      const message = e instanceof Error ? e.message : String(e);
-      return {
-        accepted,
-        failed: { target: t, code, message },
-        remaining: targets.slice(i + 1),
-      };
-    }
-  }
-  return { accepted, failed: null, remaining: [] };
-}
 
 // --- propose-batch -----------------------------------------------------------
 
@@ -103,6 +30,13 @@ export type ArtifactKey =
   | { kind: 'convention' }
   | { kind: 'schema'; name: string }
   | { kind: 'endpoint'; method: HttpMethod; path: string };
+
+/** One-line label for an artifact key — shared by the propose --manifest and validate presenters. */
+export function describeArtifactKey(key: ArtifactKey): string {
+  if (key.kind === 'convention') return 'convention';
+  if (key.kind === 'schema') return `schema ${key.name}`;
+  return `endpoint ${key.method.toUpperCase()} ${key.path}`;
+}
 
 export type BatchProposeFailure =
   | { stage: 'manifest'; message: string }
