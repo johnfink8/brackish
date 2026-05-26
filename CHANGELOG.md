@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.1] - 2026-05-26
 
-0.7.0 standardizes the CLI grammar (a breaking flip to **verb-first**) and makes **every command atomic**. On top of that: renegotiation got proper primitives — `counter` and a negotiated `retract` — and turns now deliver as coherent batches. Most of it came out of the e2e trials.
+0.7.1 standardizes the CLI grammar (a breaking flip to **verb-first**) and makes **every command atomic**. On top of that: renegotiation got proper primitives — `counter` and a negotiated `retract` — and turns now deliver as coherent batches. Most of it came out of the e2e trials.
 
 ### Added
 
