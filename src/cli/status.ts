@@ -10,7 +10,7 @@ import type { ConventionArtifact } from '../lib/models.js';
 import { findBlockingRefs } from '../lib/refs.js';
 import { emit, emitJson, type LoadedClientCfg, withClient } from './common.js';
 
-export type StatusRow = {
+type StatusRow = {
   kind: 'endpoint' | 'schema' | 'convention';
   label: string;
   version: number | null;
@@ -129,7 +129,11 @@ async function emitSingleDocStatus(
     buckets.accepted.length +
     buckets.needsAttention.length;
   if (totalRows === 0) {
-    lines.push('', '(nothing yet)', `→ start with: brackish convention propose ${doc}`);
+    lines.push(
+      '',
+      '(nothing yet)',
+      `→ start with: brackish propose convention --doc ${doc} --file <convention.yaml>`,
+    );
   } else {
     const hint = buildNextHint(doc, buckets);
     if (hint) lines.push('', hint);
@@ -339,21 +343,22 @@ function buildNextHint(doc: string, b: DocBuckets): string | null {
     const endpoints = b.awaitingMe.filter((r) => r.kind === 'endpoint');
     const convention = b.awaitingMe.find((r) => r.kind === 'convention');
     if (convention) {
-      return `→ next: brackish convention accept ${doc}   # or reject with a reason`;
+      return `→ next: brackish accept convention --doc ${doc}   # or reject --rationale "<why>"`;
     }
     if (schemas.length >= 2) {
-      return `→ next: brackish schema accept ${doc} ${schemas.join(' ')}   # batch accept`;
+      const targets = schemas.map((s) => `--target ${s}`).join(' ');
+      return `→ next: brackish accept schema --doc ${doc} ${targets}   # batch accept`;
     }
     if (endpoints.length >= 2) {
       const targets = endpoints.map((r) => `--target ${r.label.replace(' ', ':')}`).join(' ');
-      return `→ next: brackish endpoint accept ${doc} ${targets}   # batch accept`;
+      return `→ next: brackish accept endpoint --doc ${doc} ${targets}   # batch accept`;
     }
     if (schemas[0]) {
-      return `→ next: brackish schema show ${doc} ${schemas[0]}   # then accept or reject`;
+      return `→ next: brackish show schema ${schemas[0]} --doc ${doc}   # then accept or reject`;
     }
     if (endpoints[0]) {
       const [method, path] = endpoints[0].label.split(' ');
-      return `→ next: brackish endpoint show ${doc} ${method} ${path}   # then accept or reject`;
+      return `→ next: brackish show endpoint ${method} ${path} --doc ${doc}   # then accept or reject`;
     }
   }
   if (b.awaitingPeer.length > 0) {
@@ -362,7 +367,7 @@ function buildNextHint(doc: string, b: DocBuckets): string | null {
   if (b.accepted.length > 0 && b.awaitingMe.length === 0 && b.awaitingPeer.length === 0) {
     return (
       `→ current milestone looks settled. If further proposals would be out-of-scope, brackish send ${doc} "<doc> is settled at <milestone>; <X> out of scope — hold for next round"\n` +
-      `→ done negotiating? \`brackish deactivate\` mutes the hook + stops the daemon so you can focus on implementing the contract.`
+      `→ done negotiating? \`brackish down\` stops the daemon so you can focus on implementing the contract.`
     );
   }
   return null;

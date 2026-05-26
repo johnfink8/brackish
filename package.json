@@ -1,6 +1,6 @@
 {
   "name": "brackish-cli",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Claude-to-Claude contract negotiation: OpenAPI 3.1 propose/accept lifecycle (endpoints + schemas + convention), JSON-Patch diffs, browser UI via Swagger UI. For two Claude Code instances co-developing paired components.",
   "type": "module",
   "bin": {
@@ -58,7 +58,7 @@
     "@biomejs/biome": "^2.4.15",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.0",
-    "playwright": "^1.60.0",
+    "ajv": "^8.20.0",
     "tsup": "^8.5.1",
     "tsx": "^4.22.2",
     "typescript": "^6.0.3",

@@ -28,25 +28,43 @@ const eventPreview = (e: Event): string => {
       // Multi-line spills are fine; the next event starts with an id column that re-anchors.
       return e.text;
     case 'artifact_proposed': {
-      const delta = e.delta ? ` ${trim(e.delta, 60)}` : '';
+      const delta = e.delta ? ` ${e.delta}` : '';
       return `${e.artifactKind} ${e.identityKey} v${e.version}${delta}`;
     }
     case 'artifact_accepted':
       return e.reason
-        ? `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`
+        ? `${e.artifactKind} ${e.identityKey} v${e.version}: ${e.reason}`
         : `${e.artifactKind} ${e.identityKey} v${e.version}`;
     case 'artifact_rejected':
-      return `${e.artifactKind} ${e.identityKey} v${e.version}: ${trim(e.reason, 60)}`;
+      return `${e.artifactKind} ${e.identityKey} v${e.version}: ${e.reason}`;
     case 'artifact_withdrawn':
       return `${e.artifactKind} ${e.identityKey} v${e.version} (withdrawn by proposer)`;
     case 'artifact_retracted':
       return e.reason
-        ? `${e.artifactKind} ${e.identityKey} removed (was v${e.version}): ${trim(e.reason, 60)}`
+        ? `${e.artifactKind} ${e.identityKey} removed (was v${e.version}): ${e.reason}`
         : `${e.artifactKind} ${e.identityKey} removed (was v${e.version})`;
+    case 'retraction_proposed': {
+      const what = e.targets.map(describeRetractionTarget).join(', ');
+      return e.reason
+        ? `retraction #${e.retractionId} — remove ${what}: ${e.reason}`
+        : `retraction #${e.retractionId} — remove ${what}`;
+    }
+    case 'retraction_accepted':
+      return `retraction #${e.retractionId} accepted — artifacts removed`;
+    case 'retraction_rejected':
+      return `retraction #${e.retractionId} rejected: ${e.reason}`;
+    case 'retraction_withdrawn':
+      return `retraction #${e.retractionId} withdrawn by proposer`;
     case 'document_created':
       return `created by ${e.by}`;
   }
 };
+
+function describeRetractionTarget(t: import('../lib/models.js').RetractionTarget): string {
+  if (t.kind === 'endpoint') return `${t.method.toUpperCase()} ${t.path}`;
+  if (t.kind === 'schema') return `schema ${t.name}`;
+  return 'convention';
+}
 
 const eventFrom = (e: Event): string => {
   if ('from' in e) return e.from;

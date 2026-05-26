@@ -3,16 +3,19 @@
 // can answer "is this valid / would this batch land?" without proposing things to find out.
 
 import type { Command } from 'commander';
-import { type BatchProposeFailure, validateFromManifest } from '../client/batch.js';
+import {
+  type BatchProposeFailure,
+  describeArtifactKey,
+  validateFromManifest,
+} from '../client/batch.js';
 import type { SpecIssue } from '../client/client.js';
-import { describeArtifactKey } from './batch.js';
 import { emit, emitJson, withClient } from './common.js';
 
 export function register(program: Command): void {
   program
     .command('validate <doc>')
     .description(
-      'dry-run: check that the doc assembles into a valid OpenAPI 3.1 spec — writes nothing. With --manifest, previews proposing that whole set together (same atomic assembly as propose-batch).',
+      'dry-run: check that the doc assembles into a valid OpenAPI 3.1 spec — writes nothing. With --manifest, previews proposing that whole set together (same atomic assembly as `propose --manifest`).',
     )
     .option(
       '--manifest <file>',
@@ -39,7 +42,7 @@ export function register(program: Command): void {
               result.view,
               result.issues,
               `proposing these ${result.itemCount} artifact(s) together`,
-              'run `brackish propose-batch` to commit them atomically',
+              'run `brackish propose --manifest` to commit them atomically',
             );
           }
           if (!result.valid) process.exit(1);

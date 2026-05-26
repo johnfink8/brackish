@@ -12,9 +12,12 @@ import { ZodError } from 'zod';
 import pkg from '../../package.json' with { type: 'json' };
 import { ensureBrackishHome, parseBindAddress, type ServerConfig } from '../io/config.js';
 import { generatePatch } from '../lib/diff.js';
+import type { LintIssue } from '../lib/lint-types.js';
 import {
   AcceptArtifactRequestSchema,
+  AcceptBatchRequestSchema,
   AddMemberRequestSchema,
+  CounterRequestSchema,
   CreateDocumentRequestSchema,
   CreateInviteRequestSchema,
   type Cursor,
@@ -31,6 +34,8 @@ import {
   parseOperationIdentityKey,
   RedeemInviteRequestSchema,
   RejectArtifactRequestSchema,
+  type RetractionTarget,
+  type RetractRequest,
   RetractRequestSchema,
   SchemaNameSchema,
   SendMessageRequestSchema,
@@ -59,13 +64,13 @@ const EVENT_PAGE_MAX = 1000;
 
 type AppEnv = { Variables: AppVariables; Bindings: AppBindings };
 
-export type BuildAppOptions = {
+type BuildAppOptions = {
   store: Store;
   notifier: EventNotifier;
 };
 
-/** Build the Hono app. Exported so tests can hit `app.fetch` directly without binding a port. */
-export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
+/** Build the Hono app — the in-process core that `startServer` binds to a socket/TCP. */
+function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
   const { store, notifier } = opts;
   const app = new Hono<AppEnv>();
 
@@ -221,6 +226,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     return c.json({ event }, 201);
   });
 
+  // Deliver the caller's held events — make this turn's moves visible to the peer as one batch.
+  app.post('/documents/:name/deliver', async (c) => {
+    const name = DocumentNameSchema.parse(c.req.param('name'));
+    const delivered = await store.deliver(name, c.get('identity'));
+    return c.json({ delivered });
+  });
+
   app.get('/documents/:name/events', async (c) => {
     const name = DocumentNameSchema.parse(c.req.param('name'));
     const identity = c.get('identity');
@@ -256,6 +268,13 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     const identity = c.get('identity');
     const documents = await store.inboxSummary(identity);
     return c.json({ identity, documents });
+  });
+
+  // Read-only: the caller's own held (undelivered) moves, grouped by doc — drives the
+  // "you have undelivered moves" reminder.
+  app.get('/held', async (c) => {
+    const held = await store.heldByDoc(c.get('identity'));
+    return c.json({ held });
   });
 
   // --- dry-run validation ---
@@ -345,25 +364,181 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
     }
   });
 
-  // --- atomic retract ---
+  // --- atomic batch accept ---
   //
-  // Remove a coordinated set of accepted artifacts. Assembles the accepted doc with the set
-  // removed and requires it still valid (so you can't orphan a live $ref), then commits the
-  // tombstones all-or-nothing. Unilateral and effective immediately; the peer sees the
-  // artifact_retracted events. The "fully valid after" rule means a doc that's invalid for
-  // reasons beyond what you're removing must have those artifacts included too (or fixed first).
-  app.post('/documents/:name/retract', async (c) => {
+  // The peer accepts a coordinated set of proposed artifacts at once. Resolves each target's latest
+  // proposed version, overlays them ALL onto the accepted doc, meta-schema-validates the whole once,
+  // then commits all-or-nothing via Store.batchAccept. So a mutually-referencing set accepts together
+  // (the per-item accept route would reject the first for a dangling $ref), and a set that would
+  // wedge the accepted doc is refused whole. Symmetric with propose-batch, in the accept direction.
+  app.post('/documents/:name/accept-batch', async (c) => {
     const docName = DocumentNameSchema.parse(c.req.param('name'));
-    const body = RetractRequestSchema.parse(await c.req.json());
+    const body = AcceptBatchRequestSchema.parse(await c.req.json());
 
-    const removeOperations = new Set<string>(
-      (body.endpoints ?? []).map((e) => operationKey(e.method, e.path)),
-    );
-    const removeSchemas = new Set<string>(body.schemas ?? []);
-    const overlay: Overlay = { removeOperations, removeSchemas };
-    if (body.convention) overlay.removeConvention = true;
+    const overlay: Overlay = {};
+    const input: import('./store/index.js').BatchAcceptInput = {};
+
+    if (body.schemas && body.schemas.length > 0) {
+      overlay.schemas = new Map();
+      input.schemas = [];
+      for (const name of body.schemas) {
+        const version = await resolveSchemaTargetVersion(store, docName, name, undefined);
+        const candidate = await store.getSchemaByVersion(docName, name, version);
+        if (!candidate)
+          return c.json({ error: 'no such version', code: 'artifact_not_found' }, 404);
+        overlay.schemas.set(name, candidate.spec);
+        input.schemas.push({ name, version });
+      }
+    }
+    if (body.endpoints && body.endpoints.length > 0) {
+      overlay.operations = new Map();
+      input.endpoints = [];
+      for (const e of body.endpoints) {
+        const version = await resolveEndpointTargetVersion(
+          store,
+          docName,
+          e.method,
+          e.path,
+          undefined,
+        );
+        const candidate = await store.getEndpointByVersion(docName, e.method, e.path, version);
+        if (!candidate)
+          return c.json({ error: 'no such version', code: 'artifact_not_found' }, 404);
+        overlay.operations.set(operationKey(e.method, e.path), {
+          method: e.method,
+          path: e.path,
+          spec: candidate.spec,
+        });
+        input.endpoints.push({ method: e.method, path: e.path, version });
+      }
+    }
+
+    // --include-dependencies: expand the batch to the transitive $ref-closure of still-PROPOSED
+    // schemas the named targets reference, so accepting an endpoint also accepts the schemas it needs
+    // (in one atomic batch). Already-accepted refs are left alone; refs that aren't even proposed are
+    // left for validation to flag.
+    if (body.includeDependencies) {
+      overlay.schemas ??= new Map();
+      input.schemas ??= [];
+      const inBatch = new Set<string>(input.schemas.map((s) => s.name));
+      const queue: unknown[] = [
+        ...overlay.schemas.values(),
+        ...(overlay.operations ? [...overlay.operations.values()].map((o) => o.spec) : []),
+      ];
+      while (queue.length > 0) {
+        const refs = new Set<string>();
+        collectSchemaRefs(queue.shift(), refs);
+        for (const name of refs) {
+          if (inBatch.has(name)) continue;
+          inBatch.add(name);
+          if (await store.getSchemaCurrent(docName, name)) continue; // already in the accepted doc
+          const proposed = await store.getSchemaProposed(docName, name);
+          if (!proposed) continue; // not proposed → genuinely missing; validation will catch it
+          overlay.schemas.set(name, proposed.spec);
+          input.schemas.push({ name, version: proposed.version });
+          queue.push(proposed.spec);
+        }
+      }
+    }
+
     const projected = await projectDocument(store, docName, 'accepted', overlay);
     const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) return acceptInvalidResponse(c, store, docName, invalid.errors);
+
+    const namedSchemas = new Set<string>(body.schemas ?? []);
+    try {
+      const result = await store.batchAccept(docName, input, c.get('identity'), body.rationale);
+      // Partition: the artifacts the caller named vs the schemas --include-dependencies pulled in.
+      const accepted: typeof result = [];
+      const dependencies: typeof result = [];
+      for (const item of result) {
+        if (item.kind === 'schema' && !namedSchemas.has(item.name)) dependencies.push(item);
+        else accepted.push(item);
+      }
+      return c.json({ accepted, dependencies });
+    } catch (err) {
+      // The whole batch rolled back — no partial state to report (mirrors propose-batch).
+      const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
+      const message = err instanceof Error ? err.message : String(err);
+      const code = err instanceof StoreError ? err.code : null;
+      return c.json({ error: message, code }, status);
+    }
+  });
+
+  // --- counter (atomic reject-current + propose-replacement) ---
+  //
+  // One discriminated route for all three nouns. Validates the replacement against the assembled
+  // doc exactly as propose does, then commits the reject+propose atomically via Store.counter*.
+  // StoreError (artifact_not_pending / cannot_reject_own / version_mismatch) propagates to onError.
+  app.post('/documents/:name/counter', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = CounterRequestSchema.parse(await c.req.json());
+    const identity = c.get('identity');
+
+    const overlay: Overlay =
+      body.kind === 'endpoint'
+        ? {
+            operations: new Map([
+              [
+                operationKey(body.method, body.path),
+                { method: body.method, path: body.path, spec: body.spec },
+              ],
+            ]),
+          }
+        : body.kind === 'schema'
+          ? { schemas: new Map([[body.name, body.spec]]) }
+          : { convention: body.spec };
+    const projected = await projectDocument(store, docName, 'wide', overlay);
+    const invalid = await validateDocument(projected);
+    if (invalid.errors.length > 0) {
+      return c.json(
+        { error: 'invalid OpenAPI 3.1 spec', code: 'spec_invalid', issues: invalid.errors },
+        400,
+      );
+    }
+
+    const opts = toProposeOptions(body.options);
+    if (body.kind === 'endpoint') {
+      const v = await store.counterEndpoint(
+        docName,
+        body.method,
+        body.path,
+        body.spec,
+        identity,
+        body.reason,
+        opts,
+      );
+      return c.json({ kind: 'endpoint', envelope: v }, 201);
+    }
+    if (body.kind === 'schema') {
+      const v = await store.counterSchema(
+        docName,
+        body.name,
+        body.spec,
+        identity,
+        body.reason,
+        opts,
+      );
+      return c.json({ kind: 'schema', envelope: v }, 201);
+    }
+    const v = await store.counterConvention(docName, body.spec, identity, body.reason, opts);
+    return c.json({ kind: 'convention', envelope: v }, 201);
+  });
+
+  // --- retractions (negotiated, grouped removals) ---
+  //
+  // A retraction proposes removing a coordinated set of accepted artifacts. The peer accepts
+  // (the set is tombstoned atomically, after validating the post-removal doc is still fully
+  // valid — no orphaned $ref) or rejects (nothing changes). Symmetric with propose/accept:
+  // nothing leaves the contract without both sides. The artifacts stay live while pending.
+  app.post('/documents/:name/retractions', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const body = RetractRequestSchema.parse(await c.req.json());
+    const targets = targetsFromRetractRequest(body);
+    // Preview: would removing these leave the doc invalid? (binding re-check is at accept.)
+    const invalid = await validateDocument(
+      await projectDocument(store, docName, 'accepted', overlayForTargets(targets)),
+    );
     if (invalid.errors.length > 0) {
       return c.json(
         {
@@ -374,21 +549,75 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
         400,
       );
     }
+    const retraction = await store.proposeRetraction(
+      docName,
+      targets,
+      c.get('identity'),
+      body.reason,
+    );
+    return c.json({ retraction }, 201);
+  });
 
-    const input: import('./store/index.js').RetractInput = {};
-    if (body.endpoints && body.endpoints.length > 0) input.endpoints = body.endpoints;
-    if (body.schemas && body.schemas.length > 0) input.schemas = body.schemas;
-    if (body.convention) input.convention = true;
-    try {
-      const retracted = await store.batchRetract(docName, input, c.get('identity'), body.reason);
-      return c.json({ retracted });
-    } catch (err) {
-      // Whole batch rolled back (e.g. a target had no accepted version). Nothing was removed.
-      const status = err instanceof StoreError ? storeErrorStatus(err.code) : 500;
-      const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof StoreError ? err.code : null;
-      return c.json({ error: message, code }, status);
+  app.get('/documents/:name/retractions', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const statusQ = c.req.query('status');
+    const opts: { status?: 'proposed' | 'accepted' | 'rejected' | 'withdrawn' } = {};
+    if (
+      statusQ === 'proposed' ||
+      statusQ === 'accepted' ||
+      statusQ === 'rejected' ||
+      statusQ === 'withdrawn'
+    ) {
+      opts.status = statusQ;
     }
+    const retractions = await store.listRetractions(docName, opts);
+    return c.json({ retractions });
+  });
+
+  app.get('/documents/:name/retractions/:id', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const retraction = await store.getRetraction(docName, id);
+    if (!retraction) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+    return c.json({ retraction });
+  });
+
+  app.post('/documents/:name/retractions/:id/accept', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const retraction = await store.getRetraction(docName, id);
+    if (!retraction) return c.json({ error: 'not found', code: 'artifact_not_found' }, 404);
+    // Binding fully-valid-after gate: assemble the accepted doc with this set removed.
+    const invalid = await validateDocument(
+      await projectDocument(store, docName, 'accepted', overlayForTargets(retraction.targets)),
+    );
+    if (invalid.errors.length > 0) {
+      return c.json(
+        {
+          error: 'accepting this retraction would leave the doc invalid',
+          code: 'spec_invalid',
+          issues: invalid.errors,
+        },
+        400,
+      );
+    }
+    const v = await store.acceptRetraction(docName, id, c.get('identity'));
+    return c.json({ retraction: v });
+  });
+
+  app.post('/documents/:name/retractions/:id/reject', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const body = RejectArtifactRequestSchema.parse(await c.req.json());
+    const v = await store.rejectRetraction(docName, id, body.reason, c.get('identity'));
+    return c.json({ retraction: v });
+  });
+
+  app.post('/documents/:name/retractions/:id/withdraw', async (c) => {
+    const docName = DocumentNameSchema.parse(c.req.param('name'));
+    const id = parseRetractionId(c.req.param('id'));
+    const v = await store.withdrawRetraction(docName, id, c.get('identity'));
+    return c.json({ retraction: v });
   });
 
   // --- endpoints (operation artifacts) ---
@@ -473,16 +702,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       operations: new Map([[operationKey(method, path), { method, path, spec: candidate.spec }]]),
     });
     const invalid = await validateDocument(projected);
-    if (invalid.errors.length > 0) {
-      return c.json(
-        {
-          error: 'accepting would leave the doc invalid',
-          code: 'spec_invalid',
-          issues: invalid.errors,
-        },
-        400,
-      );
-    }
+    if (invalid.errors.length > 0) return acceptInvalidResponse(c, store, docName, invalid.errors);
     const reason = await parseOptionalAcceptBody(c);
     const v = await store.acceptEndpoint(docName, method, path, version, c.get('identity'), reason);
     return c.json(v);
@@ -616,16 +836,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       schemas: new Map([[schemaName, candidate.spec]]),
     });
     const invalid = await validateDocument(projected);
-    if (invalid.errors.length > 0) {
-      return c.json(
-        {
-          error: 'accepting would leave the doc invalid',
-          code: 'spec_invalid',
-          issues: invalid.errors,
-        },
-        400,
-      );
-    }
+    if (invalid.errors.length > 0) return acceptInvalidResponse(c, store, docName, invalid.errors);
     const reason = await parseOptionalAcceptBody(c);
     const v = await store.acceptSchema(docName, schemaName, version, c.get('identity'), reason);
     return c.json(v);
@@ -746,16 +957,7 @@ export function buildApp(opts: BuildAppOptions): Hono<AppEnv> {
       convention: candidate.spec,
     });
     const invalid = await validateDocument(projected);
-    if (invalid.errors.length > 0) {
-      return c.json(
-        {
-          error: 'accepting would leave the doc invalid',
-          code: 'spec_invalid',
-          issues: invalid.errors,
-        },
-        400,
-      );
-    }
+    if (invalid.errors.length > 0) return acceptInvalidResponse(c, store, docName, invalid.errors);
     const reason = await parseOptionalAcceptBody(c);
     const v = await store.acceptConvention(docName, version, c.get('identity'), reason);
     return c.json(v);
@@ -901,6 +1103,66 @@ function storeErrorStatus(code: string): 400 | 401 | 403 | 404 | 409 {
   }
 }
 
+/** Walk a spec (object/array) collecting the name X of every `#/components/schemas/X` $ref. Drives
+ *  the --include-dependencies expansion: which schemas an accepted artifact transitively requires. */
+function collectSchemaRefs(node: unknown, out: Set<string>): void {
+  if (Array.isArray(node)) {
+    for (const x of node) collectSchemaRefs(x, out);
+    return;
+  }
+  if (node !== null && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) {
+      if (k === '$ref' && typeof v === 'string') {
+        const m = v.match(/^#\/components\/schemas\/([A-Za-z][A-Za-z0-9_]*)$/);
+        if (m?.[1] !== undefined) out.add(m[1]);
+      } else {
+        collectSchemaRefs(v, out);
+      }
+    }
+  }
+}
+
+/** Build the 400 response for an accept that would invalidate the doc. If the cause is dangling
+ *  `$ref`(s) to schema(s) that are merely PROPOSED-not-yet-accepted (the accept-ordering footgun),
+ *  name them and point at accepting those first — the generic `spec_invalid` advice (validate /
+ *  propose retraction) is for the propose path and misleads on accept. Falls back to that generic
+ *  message for any other validation failure. */
+async function acceptInvalidResponse(
+  c: import('hono').Context<AppEnv>,
+  store: Store,
+  docName: DocumentName,
+  issues: LintIssue[],
+): Promise<Response> {
+  const refNames = new Set<string>();
+  for (const issue of issues) {
+    for (const m of issue.message.matchAll(/#\/components\/schemas\/([A-Za-z0-9_.-]+)/g)) {
+      if (m[1] !== undefined) refNames.add(m[1]);
+    }
+  }
+  const orphans: string[] = [];
+  for (const name of refNames) {
+    if (await store.getSchemaCurrent(docName, name)) continue; // already accepted ⇒ not the cause
+    if (await store.getSchemaProposed(docName, name)) orphans.push(name);
+  }
+  if (orphans.length === 0) {
+    return c.json(
+      { error: 'accepting would leave the doc invalid', code: 'spec_invalid', issues },
+      400,
+    );
+  }
+  const targets = orphans.map((n) => `--target ${n}`).join(' ');
+  return c.json(
+    {
+      error:
+        `accepting would orphan a $ref: this references schema(s) ${orphans.join(', ')}, which are ` +
+        `proposed but not yet accepted. Accept those first — \`brackish accept schema ${targets}\` — then retry.`,
+      code: 'accept_orphans_ref',
+      issues,
+    },
+    400,
+  );
+}
+
 /** Turn a validate/propose-batch request body into a projection Overlay. `hasOverlay` is false
  *  only for an empty body (nothing to overlay → validate the current doc). Shared by the
  *  validate and propose-batch routes so both assemble identically. */
@@ -928,6 +1190,37 @@ function buildOverlay(body: ValidateRequest): { overlay: Overlay; hasOverlay: bo
     hasOverlay = true;
   }
   return { overlay, hasOverlay };
+}
+
+/** Normalize a retract request body ({endpoints, schemas, convention}) into RetractionTargets. */
+function targetsFromRetractRequest(body: RetractRequest): RetractionTarget[] {
+  const targets: RetractionTarget[] = [];
+  for (const e of body.endpoints ?? [])
+    targets.push({ kind: 'endpoint', method: e.method, path: e.path });
+  for (const n of body.schemas ?? []) targets.push({ kind: 'schema', name: n });
+  if (body.convention) targets.push({ kind: 'convention' });
+  return targets;
+}
+
+/** A projection Overlay that removes the retraction's targets — used to validate fully-valid-after. */
+function overlayForTargets(targets: RetractionTarget[]): Overlay {
+  const removeOperations = new Set<string>();
+  const removeSchemas = new Set<string>();
+  let removeConvention = false;
+  for (const t of targets) {
+    if (t.kind === 'endpoint') removeOperations.add(operationKey(t.method, t.path));
+    else if (t.kind === 'schema') removeSchemas.add(t.name);
+    else removeConvention = true;
+  }
+  const overlay: Overlay = { removeOperations, removeSchemas };
+  if (removeConvention) overlay.removeConvention = true;
+  return overlay;
+}
+
+function parseRetractionId(raw: string): number {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) throw new HttpError(400, 'invalid retraction id');
+  return n;
 }
 
 /** Strip undefined values from a batch-item options object before handing to the store
@@ -1192,7 +1485,7 @@ async function advanceCursorForRead(
   return last.id;
 }
 
-export class HttpError extends Error {
+class HttpError extends Error {
   constructor(
     readonly status: ContentfulStatusCode,
     message: string,

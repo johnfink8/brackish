@@ -17,6 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import { z } from 'zod';
+import { seedDemo } from '../src/demo.js';
 import {
   EndpointListResponseSchema,
   EventListResponseSchema,
@@ -25,6 +26,7 @@ import {
 } from '../src/lib/models.js';
 import { extractDemoFromTrial, writeDemoDataFile } from './extract-demo.js';
 import { chatAppScenario } from './scenarios/chat-app.js';
+import { renegotiationScenario } from './scenarios/renegotiation.js';
 import type { DocumentSummary, Scenario, Side } from './types.js';
 
 // Final-text shape from `claude -p --output-format json`. Only the fields we read.
@@ -43,6 +45,7 @@ const REPO_ROOT = resolve(__dirname, '..');
 
 const SCENARIOS: Record<string, Scenario> = {
   'chat-app': chatAppScenario,
+  renegotiation: renegotiationScenario,
 };
 
 // --- shell-out helpers ---
@@ -145,14 +148,16 @@ function getDocumentSummary(
   // 'observer' identity reads via the socket; the socket transport is peer-trust so the harness
   // can self-declare any identity. Using a dedicated one keeps cursor state from polluting either side.
   const endpointsRes = brackishCall(brackishBin, brackishHome, 'observer', [
-    'endpoint',
     'list',
+    'endpoint',
+    '--doc',
     documentName,
     '--json',
   ]);
   const schemasRes = brackishCall(brackishBin, brackishHome, 'observer', [
-    'schema',
     'list',
+    'schema',
+    '--doc',
     documentName,
     '--json',
   ]);
@@ -367,7 +372,76 @@ function meetsSuccessCriterion(summary: DocumentSummary, scenario: Scenario): bo
   ) {
     return false;
   }
+  // Renegotiation delta: a seeded settled v1 must not satisfy the criterion on its own — the
+  // specific architectural move (new surface accepted, obsolete surface gone) must have landed.
+  const accEps = new Set(summary.acceptedEndpoints.map((e) => e.toUpperCase()));
+  const accSchemas = new Set(summary.acceptedSchemas);
+  for (const e of c.requireAcceptedEndpoints ?? []) if (!accEps.has(e.toUpperCase())) return false;
+  for (const e of c.requireAbsentEndpoints ?? []) if (accEps.has(e.toUpperCase())) return false;
+  for (const s of c.requireAcceptedSchemas ?? []) if (!accSchemas.has(s)) return false;
+  for (const s of c.requireAbsentSchemas ?? []) if (accSchemas.has(s)) return false;
   return true;
+}
+
+/** Set-diff the seed baseline against the final doc — the at-a-glance "did the re-arch happen". */
+function renderSeedDelta(baseline: DocumentSummary, final: DocumentSummary | undefined): string[] {
+  const finalEps = new Set(final?.acceptedEndpoints ?? []);
+  const finalSchemas = new Set(final?.acceptedSchemas ?? []);
+  const baseEps = new Set(baseline.acceptedEndpoints);
+  const baseSchemas = new Set(baseline.acceptedSchemas);
+  const addedEps = [...finalEps].filter((e) => !baseEps.has(e));
+  const removedEps = [...baseEps].filter((e) => !finalEps.has(e));
+  const addedSchemas = [...finalSchemas].filter((s) => !baseSchemas.has(s));
+  const removedSchemas = [...baseSchemas].filter((s) => !finalSchemas.has(s));
+  return [
+    '',
+    '## seed → final delta',
+    `endpoints added:   ${addedEps.join(', ') || '(none)'}`,
+    `endpoints removed: ${removedEps.join(', ') || '(none)'}`,
+    `schemas added:     ${addedSchemas.join(', ') || '(none)'}`,
+    `schemas removed:   ${removedSchemas.join(', ') || '(none)'}`,
+  ];
+}
+
+/** Write a NOTES.md (what/why/how + the seed baseline + criterion, empty Findings) into the
+ *  trial dir, per trial-data-discipline. Never clobbers an existing NOTES.md. */
+function writeNotesStub(
+  trialDir: string,
+  scenario: Scenario,
+  seedBaseline: DocumentSummary | undefined,
+): void {
+  const notesPath = join(trialDir, 'NOTES.md');
+  if (existsSync(notesPath)) return;
+  const n = scenario.notes;
+  const baseline = seedBaseline
+    ? [
+        '',
+        '## Seed baseline (post-seed, pre-negotiation)',
+        `- accepted endpoints: ${seedBaseline.acceptedEndpoints.join(', ') || '(none)'}`,
+        `- accepted schemas: ${seedBaseline.acceptedSchemas.join(', ') || '(none)'}`,
+        `- convention: ${seedBaseline.conventionStatus}`,
+        `- rejections: ${seedBaseline.rejectionCount}`,
+      ]
+    : [];
+  const body = [
+    `# trial: ${scenario.name}`,
+    '',
+    '## What',
+    n?.what ?? '(fill in)',
+    '',
+    '## Why',
+    n?.why ?? '(fill in)',
+    '',
+    '## How',
+    n?.how ?? '(fill in)',
+    `\nSuccess criterion: ${JSON.stringify(scenario.successCriterion)}`,
+    ...baseline,
+    '',
+    '## Findings',
+    '(fill in after reading transcripts/, brackish-calls.log, critiques/)',
+    '',
+  ].join('\n');
+  writeFileSync(notesPath, body);
 }
 
 // --- final render ---
@@ -434,12 +508,14 @@ function parseArgs(): {
   maxRoundsOverride?: number;
   budgetOverride?: number;
   demoDataPath?: string;
+  seedOnly: boolean;
 } {
   const args = process.argv.slice(2);
   let scenarioName = 'chat-app';
   let maxRoundsOverride: number | undefined;
   let budgetOverride: number | undefined;
   let demoDataPath: string | undefined;
+  let seedOnly = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--max-rounds') {
@@ -454,6 +530,8 @@ function parseArgs(): {
       const next = args[++i];
       if (!next) throw new Error('--demo-data requires a path');
       demoDataPath = next;
+    } else if (a === '--seed-only') {
+      seedOnly = true;
     } else if (a && !a.startsWith('--')) {
       scenarioName = a;
     } else {
@@ -465,7 +543,8 @@ function parseArgs(): {
     maxRoundsOverride?: number;
     budgetOverride?: number;
     demoDataPath?: string;
-  } = { scenarioName };
+    seedOnly: boolean;
+  } = { scenarioName, seedOnly };
   if (maxRoundsOverride !== undefined) result.maxRoundsOverride = maxRoundsOverride;
   if (budgetOverride !== undefined) result.budgetOverride = budgetOverride;
   if (demoDataPath !== undefined) result.demoDataPath = demoDataPath;
@@ -473,7 +552,7 @@ function parseArgs(): {
 }
 
 async function main(): Promise<void> {
-  const { scenarioName, maxRoundsOverride, budgetOverride, demoDataPath } = parseArgs();
+  const { scenarioName, maxRoundsOverride, budgetOverride, demoDataPath, seedOnly } = parseArgs();
   const baseScenario = SCENARIOS[scenarioName];
   if (!baseScenario) {
     console.error(`unknown scenario: ${scenarioName}. known: ${Object.keys(SCENARIOS).join(', ')}`);
@@ -513,9 +592,10 @@ async function main(): Promise<void> {
   // production a Claude doesn't have an inlined plugin teaching in CLAUDE.md; it has the skill
   // installed via `brackish install`. The trial matches that path: we run `brackish install
   // --local --yes --permission --force` in each side's dir below, which drops the project-scope
-  // skill into `.claude/skills/brackish/`, the UserPromptSubmit hook into `.claude/settings.json`,
-  // and the `Bash(brackish *)` allow-rule. The sub-Claude discovers the skill the same way a
-  // real user's Claude does.
+  // skill into `.claude/skills/brackish/` and the `Bash(brackish *)` allow-rule into
+  // `.claude/settings.json`. (The UserPromptSubmit inbox hook is currently stubbed off — see
+  // HOOK_ENABLED in src/cli/install.ts — so trials run the foreground status/nap loop.) The
+  // sub-Claude discovers the skill the same way a real user's Claude does.
   writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend);
   writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend);
   writeFileSync(
@@ -588,6 +668,54 @@ async function main(): Promise<void> {
   await waitForSocket(socketPath, 5000);
   console.error(`harness: brackish daemon ready at ${socketPath}`);
 
+  // Seed a pre-existing settled contract (renegotiation scenarios). Greenfield scenarios omit
+  // seedingMoves and the doc is created by the first Claude's turn.
+  let seedBaseline: DocumentSummary | undefined;
+  if (scenario.seedingMoves && scenario.seedingMoves.length > 0) {
+    console.error(
+      `harness: seeding ${scenario.seedingMoves.length} moves into ${scenario.documentName}`,
+    );
+    await seedDemo({
+      socketPath,
+      documentName: scenario.documentName,
+      moves: scenario.seedingMoves,
+      onStep: (m) => console.error(`harness:   seed: ${m}`),
+    });
+    seedBaseline = getDocumentSummary(brackishBin, brackishHome, scenario.documentName);
+    console.error(
+      `harness: seed baseline — endpoints=${seedBaseline.acceptedEndpoints.length}, schemas=${seedBaseline.acceptedSchemas.length}, convention=${seedBaseline.conventionStatus}, in-flight=${seedBaseline.proposedEndpoints.length + seedBaseline.proposedSchemas.length}, rejections=${seedBaseline.rejectionCount}`,
+    );
+  }
+
+  writeNotesStub(trialDir, scenario, seedBaseline);
+
+  // --seed-only: a zero-spend pre-check. Render the seeded doc + report the baseline, then stop
+  // before any paid Claude turn. Confirms the seed assembles to valid OpenAPI 3.1 and that the
+  // success criterion is NOT already satisfied (no round-1 false positive).
+  if (seedOnly) {
+    try {
+      renderFinal(brackishBin, brackishHome, scenario.documentName, finalDir);
+    } catch (e) {
+      console.error(`harness: render failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const baseline =
+      seedBaseline ?? getDocumentSummary(brackishBin, brackishHome, scenario.documentName);
+    const alreadyMet = meetsSuccessCriterion(baseline, scenario);
+    console.error('\nharness: --seed-only complete.');
+    console.error(`  accepted endpoints: ${baseline.acceptedEndpoints.join(', ') || '(none)'}`);
+    console.error(`  accepted schemas:   ${baseline.acceptedSchemas.join(', ') || '(none)'}`);
+    console.error(`  convention:         ${baseline.conventionStatus}`);
+    console.error(
+      `  in-flight:          ${baseline.proposedEndpoints.length + baseline.proposedSchemas.length}`,
+    );
+    console.error(`  rejections:         ${baseline.rejectionCount}`);
+    console.error(`  rendered doc:       ${join(finalDir, 'openapi.yaml')}`);
+    console.error(`  success criterion already met (should be false): ${alreadyMet}`);
+    server.kill('SIGTERM');
+    await sleep(200);
+    process.exit(alreadyMet ? 1 : 0);
+  }
+
   // Drive the negotiation.
   let round = 1;
   let standDownStreak = 0;
@@ -632,6 +760,11 @@ async function main(): Promise<void> {
       console.error(
         `harness:   done in ${(wallMs / 1000).toFixed(1)}s ($${turn.costUsd.toFixed(3)}, ${turn.numTurns} model-turns, stand_down=${turn.saidStandDown})`,
       );
+
+      // The process exiting is this side's turn boundary — deliver its held events so the peer's
+      // inbox (which drives handoff) sees them. A deliver-driven harness: agents that learn to
+      // `deliver`/`nap` themselves still work; this just guarantees handoff for ones that don't.
+      brackishCall(brackishBin, brackishHome, nextSide, ['deliver', scenario.documentName]);
 
       turnLog.push({
         round,
@@ -760,6 +893,7 @@ async function main(): Promise<void> {
     `convention: ${lastSummary?.conventionStatus ?? 'none'}`,
     `rejections during run: ${lastSummary?.rejectionCount ?? 0}`,
     `total events: ${lastSummary?.eventCount ?? 0}`,
+    ...(seedBaseline ? renderSeedDelta(seedBaseline, lastSummary) : []),
     '',
     '## per-round',
     ...turnLog.map(

@@ -29,7 +29,7 @@ export function register(program: Command): void {
         if (opts.json) emitJson(t);
         else
           emit(
-            `created document "${t.name}" by ${t.createdBy}\n  → next: brackish convention propose ${t.name}   # set doc-level defaults (info, security, naming) before schemas/endpoints`,
+            `created document "${t.name}" by ${t.createdBy}\n  → next: brackish propose convention --doc ${t.name} --file <convention.yaml>   # set doc-level defaults (info, security, naming) before schemas/endpoints`,
           );
       }),
     );

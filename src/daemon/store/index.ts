@@ -21,6 +21,8 @@ import type {
   OperationArtifact,
   OperationSpec,
   Party,
+  Retraction,
+  RetractionTarget,
   SchemaArtifact,
   SchemaName,
   SchemaSummary,
@@ -68,6 +70,11 @@ export interface Store {
   /** Last N events in chronological order; no cursor needed. */
   listLastEvents(documentName: DocumentName, limit: number): Promise<Event[]>;
   latestCursor(documentName: DocumentName): Promise<Cursor>;
+  /** Deliver the caller's held events (make them visible to the peer); returns the count
+   *  delivered. No-op + no notification when nothing is pending. */
+  deliver(documentName: DocumentName, by: Identity): Promise<number>;
+  /** Read-only: the caller's own still-held (undelivered) events, grouped by doc. */
+  heldByDoc(by: Identity): Promise<Array<{ documentName: DocumentName; held: number }>>;
 
   // --- endpoint artifacts (OpenAPI Operation Objects) ---
   proposeEndpoint(
@@ -257,34 +264,80 @@ export interface Store {
     by: Identity,
   ): Promise<BatchProposeSucceededItem[]>;
 
-  // --- atomic batch retract ---
   /**
-   * Atomically remove a coordinated set of currently-accepted artifacts from the doc, in one
-   * transaction. Each target must have a live accepted version (else artifact_not_found) and is
-   * tombstoned with a new `retracted` version. The caller is responsible for validating that the
-   * post-removal assembled doc is still valid (no orphaned $ref) before invoking this.
+   * Atomically accept a coordinated set of proposed artifacts (each by its resolved version). All
+   * flips run inside one transaction — any failure (e.g. a target no longer proposed, or own
+   * proposal) rolls back the whole batch, so partial acceptance is impossible. The caller validates
+   * the resulting accepted doc before invoking (mirrors batchPropose).
    */
-  batchRetract(
+  batchAccept(
     documentName: DocumentName,
-    input: RetractInput,
+    body: BatchAcceptInput,
     by: Identity,
     reason?: string,
-  ): Promise<RetractedItem[]>;
+  ): Promise<BatchAcceptedItem[]>;
+
+  /**
+   * Counter a proposal: reject the current proposed version (peer-only) and propose a replacement,
+   * atomically (one transaction — no rejected-with-no-counter partial state). The caller validates
+   * the replacement against the assembled doc before invoking (mirrors propose).
+   */
+  counterEndpoint(
+    documentName: DocumentName,
+    method: HttpMethod,
+    path: string,
+    spec: OperationSpec,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<OperationArtifact>;
+  counterSchema(
+    documentName: DocumentName,
+    name: SchemaName,
+    spec: JSONSchema,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<SchemaArtifact>;
+  counterConvention(
+    documentName: DocumentName,
+    spec: ConventionSpec,
+    by: Identity,
+    reason: string,
+    opts?: ProposeOptions,
+  ): Promise<ConventionArtifact>;
+
+  // --- retractions (negotiated, grouped removals) ---
+  /**
+   * Propose removing a coordinated set of accepted artifacts. Validates each target has a live
+   * accepted version; the artifacts stay live until the peer accepts. The fully-valid-after check
+   * (no orphaned $ref once the set is removed) is the caller's, run at accept time.
+   */
+  proposeRetraction(
+    documentName: DocumentName,
+    targets: RetractionTarget[],
+    by: Identity,
+    reason?: string,
+  ): Promise<Retraction>;
+  /** Accept a proposed retraction (peer only): tombstone every target atomically and mark it
+   *  accepted. The caller validates the post-removal doc is fully valid before invoking. */
+  acceptRetraction(documentName: DocumentName, id: number, by: Identity): Promise<Retraction>;
+  rejectRetraction(
+    documentName: DocumentName,
+    id: number,
+    reason: string,
+    by: Identity,
+  ): Promise<Retraction>;
+  withdrawRetraction(documentName: DocumentName, id: number, by: Identity): Promise<Retraction>;
+  getRetraction(documentName: DocumentName, id: number): Promise<Retraction | null>;
+  listRetractions(
+    documentName: DocumentName,
+    opts?: { status?: Retraction['status'] },
+  ): Promise<Retraction[]>;
 
   // --- lifecycle ---
   close(): Promise<void>;
 }
-
-export type RetractInput = {
-  endpoints?: Array<{ method: HttpMethod; path: string }>;
-  schemas?: SchemaName[];
-  convention?: boolean;
-};
-
-export type RetractedItem =
-  | { kind: 'convention'; version: number }
-  | { kind: 'schema'; name: SchemaName; version: number }
-  | { kind: 'endpoint'; method: HttpMethod; path: string; version: number };
 
 export type BatchProposeInput = {
   convention?: { spec: ConventionSpec; opts?: ProposeOptions };
@@ -299,5 +352,14 @@ export type BatchProposeInput = {
 
 export type BatchProposeSucceededItem =
   | { kind: 'convention'; envelope: ConventionArtifact }
+  | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
+  | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };
+
+export type BatchAcceptInput = {
+  schemas?: Array<{ name: SchemaName; version: number }>;
+  endpoints?: Array<{ method: HttpMethod; path: string; version: number }>;
+};
+
+export type BatchAcceptedItem =
   | { kind: 'schema'; name: SchemaName; envelope: SchemaArtifact }
   | { kind: 'endpoint'; method: HttpMethod; path: string; envelope: OperationArtifact };

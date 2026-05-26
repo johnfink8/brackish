@@ -38,20 +38,25 @@ If `status` shows the convention is rejected or withdrawn in "needs attention", 
 
 For schemas:
 ```
-brackish schema accept <doc> User Order OrderItem Customer Address
+brackish accept schema --target User --target Order --target OrderItem --target Customer --target Address
 ```
 
-Variadic — accepts all five in order, stops on first failure with a `remaining (unaccepted): …` line. `--version` is only valid with N=1 (different schemas have different version chains).
+Repeat `--target` per schema — the batch is **atomic**: the whole set is accepted in one transaction, or (if any target fails, or accepting them would leave the doc invalid) nothing is. So a mutually-referencing set accepts together, and a failure is safe to fix and re-run — there's no partial state. `--rev` (pin a specific revision) is only valid with a single `--target`; different schemas have different revision chains.
 
 For endpoints (the colon separator is unambiguous; HTTP methods don't contain colons):
 ```
-brackish endpoint accept <doc> \
+brackish accept endpoint \
   --target GET:/users \
   --target POST:/users \
   --target GET:/users/{id}
 ```
 
-Same stop-on-first-failure semantics. Mixing positional `<method> <path>` with `--target` is rejected — pick one form.
+Same atomic all-or-nothing semantics. A single accept can take positional `<method> <path>` instead; mixing positional with `--target` is rejected — pick one form.
+
+**Accept schemas before the endpoints that `$ref` them** — accepting an endpoint while its schema is still proposed leaves a dangling `$ref`, so brackish refuses it (`accept_orphans_ref`, naming the missing schema). Either accept the schemas first, or add **`--include-dependencies`** to the endpoint accept to pull the proposed `$ref`-closure into the same atomic batch:
+```
+brackish accept endpoint --target POST:/users --include-dependencies   # also accepts the proposed schemas POST /users references
+```
 
 **Don't accept everything blindly.** Reject anything that doesn't fit your consumer's needs (more on that in Step 4).
 
@@ -60,23 +65,17 @@ Same stop-on-first-failure semantics. Mixing positional `<method> <path>` with `
 Reject with a reason — the reason is attached to the reject event and renders in the rationale, so a separate `brackish send` is usually redundant:
 
 ```
-brackish endpoint reject <doc> POST /users "201 Created with Location header would let me skip a GET round-trip after create"
-brackish schema   reject <doc> User "id should be UUID string, not integer — we use string IDs through the stack and codegen produces incompatible types otherwise"
+brackish reject endpoint POST /users --rationale "201 Created with Location header would let me skip a GET round-trip after create"
+brackish reject schema   User --rationale "id should be UUID string, not integer — we use string IDs through the stack and codegen produces incompatible types otherwise"
 ```
 
-If you have a concrete alternative spec in mind, **reject first, then propose**:
+If you have a concrete alternative in mind, that's a **counter**, not a plain reject — use `brackish counter` to reject the current proposal **and** propose your replacement in one atomic move:
 
 ```
-# 1. Reject with rationale
-brackish endpoint reject <doc> POST /users "..."
-
-# 2. Propose your alternative as v2
-brackish endpoint propose <doc> POST /users --expected-version 1 \
-  --response '201:application/json:User:created' \
-  --response '409:application/json:Error:duplicate email'
+brackish counter endpoint POST /users --file ./POST-users.v2.yaml --rationale "201 Created + Location header would save me a GET round-trip after create"
 ```
 
-`--expected-version <N>` means "I saw v<N>; refuse my propose if state has drifted." If you get a 409 `version_mismatch`, the peer slipped in their own v2 — re-read with `brackish read <doc>` and reconcile.
+One transaction: either both land or neither does, so there's never a rejected-with-no-replacement window, and the move reads as a counter (not a refusal) in the log. The `--file` body is the full replacement spec (file-only — no inline `--response`/`--field` builders); `--rationale` is the reject reason. `--expected-rev <N>` means "I saw v<N>; refuse if state has drifted" — a 409 `version_mismatch` means the peer slipped in their own version, so re-read with `brackish read <doc>` and reconcile. (A plain `reject` with no `--file` is for when you just want it gone.)
 
 ## Step 5 — propose what the server doesn't know about
 
@@ -84,9 +83,9 @@ The server-side Claude sees its own emit/handler sites and proposes from there. 
 
 - **The error envelope.** Servers often handwave error responses; you need a stable shape for your error-handling UI. Propose `Error` schema (and reject error responses that disagree).
 - **Pagination + cursors.** What you actually need for an infinite-scroll UI vs what a backend might think is enough.
-- **Idempotency keys.** If your client retries a POST, you need the server to dedupe — propose with `--idempotent` and/or an explicit idempotency-key header parameter.
+- **Idempotency keys.** If your client retries a POST, you need the server to dedupe — set `x-brackish.idempotent: true` in the endpoint's `--file` body (see [`patterns.md`](patterns.md)) and declare the idempotency-key header as a `parameters` entry in that body.
 
-**If you're proposing 3 or more artifacts in a single turn, use `brackish propose-batch <doc> --manifest manifest.yaml`** instead of N separate `propose` calls. One round-trip, atomic commit, mutual refs resolve within the bundle. See [`propose.md`](propose.md) for the propose flag reference + manifest shape (and [`patterns.md`](patterns.md) if SSE or WebSocket is in scope — those have canonical shapes you'll want to copy verbatim).
+**If you're proposing 3 or more artifacts in a single turn, use `brackish propose --manifest manifest.yaml`** instead of N separate `propose` calls. One round-trip, atomic commit (all-or-nothing), mutual refs resolve within the set. See [`propose.md`](propose.md) for the propose flag reference + manifest shape (and [`patterns.md`](patterns.md) if SSE or WebSocket is in scope — those have canonical shapes you'll want to copy verbatim).
 
 ## Step 6 — wait between rounds
 
@@ -114,8 +113,8 @@ Use the compact paths in this order:
 
 1. **`brackish status <doc>`** first. The "what am I blocked on?" view. Always start a turn here.
 2. `brackish read <doc>` — events with `delta` summaries like `+responses.409`; reach for it after `status` when you need *why*, not just *what*.
-3. `brackish endpoint show <doc> METHOD /path` — tagged accepted/proposed with body inline. Shows both when both exist (peer revising an already-accepted artifact), with a `delta vs accepted` annotation on the proposed.
-4. `brackish <kind> diff <doc> <id> --from N --to M` — RFC 6902 JSON Patch between versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
+3. `brackish show endpoint METHOD /path` — tagged accepted/proposed with body inline. Shows both when both exist (peer revising an already-accepted artifact), with a `delta vs accepted` annotation on the proposed.
+4. `brackish diff <noun> <id> --from N --to M` — RFC 6902 JSON Patch between versions. For "I rejected v1, what's different in v2", this is the smallest possible context cost.
 5. `brackish visualize <doc>` — table-of-contents view; `--format openapi` writes the assembled YAML; `--format markdown` is human-readable with rationale interleaved.
 
 **Don't pull a full spec body until you've decided you need it.** The delta summary + diff tell you what changed at a fraction of the bytes.
@@ -127,4 +126,4 @@ If the server side sends a "we're settled at <milestone>; X/Y/Z out of scope" ch
 - **Genuinely needed for the client to function** — propose it, but acknowledge in the propose rationale (`brackish send`) that you saw the freeze and explain why this one is essential rather than nice-to-have.
 - **Nice-to-have / "while we're here"** — hold for the next round. Don't propose now; jot it in `notes.md` (or a comment) for later.
 
-If the server rejects your post-freeze proposal with an "out of scope" reason, accept it — withdraw your proposal (`brackish <kind> withdraw <doc> <selector>`) and move on. Don't argue.
+If the server rejects your post-freeze proposal with an "out of scope" reason, accept it — withdraw your proposal (`brackish withdraw <noun> <selector>`) and move on. Don't argue.

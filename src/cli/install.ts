@@ -1,7 +1,7 @@
 // `brackish install` / `uninstall` / `hook-snippet` / `activate` / `deactivate` —
-// Claude Code skill + hook wiring. `activate`/`deactivate` are the day-to-day mute toggle for
-// when you're switching from negotiating contracts to implementing them and don't want the
-// UserPromptSubmit hook re-pinging.
+// Claude Code skill + hook wiring. NOTE: the UserPromptSubmit inbox hook is currently stubbed off
+// (see HOOK_ENABLED below): install wires only the skill (+ optional permission), and
+// activate/deactivate are no-ops. The hook machinery is retained for an easy re-enable.
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -28,11 +28,18 @@ import {
 } from '../io/install.js';
 import { errExit, sanitizeIdentity } from './common.js';
 
+// The UserPromptSubmit inbox hook is stubbed off for now (2026-05-25): `install` won't wire it into
+// settings.json, and `activate`/`deactivate` are no-ops (no settings.json mutation). We're trialing
+// the foreground loop (status / nap / wait) without the per-turn auto-ping to see whether the hook
+// earns its keep — and to avoid silently editing users' settings.json. Flip this to `true` (nothing
+// else) to restore the previous behavior; the installHook/uninstallHook machinery is kept intact.
+const HOOK_ENABLED: boolean = false;
+
 export function register(program: Command): void {
   program
     .command('install')
     .description(
-      'install the brackish skill and (with confirmation) the inbox UserPromptSubmit hook',
+      'install the brackish skill (the inbox UserPromptSubmit hook is stubbed off for now — skill + optional --permission only)',
     )
     .option('--skill-only', 'install just the skill, not the hook')
     .option('--hook-only', 'install just the hook, not the skill')
@@ -67,6 +74,15 @@ export function register(program: Command): void {
         if (opts.skillOnly && opts.hookOnly) {
           errExit(2, 'install: pass at most one of --skill-only or --hook-only');
         }
+        if (!HOOK_ENABLED && opts.hookOnly) {
+          errExit(
+            2,
+            'install: the inbox hook is stubbed off for now — nothing to install with --hook-only',
+          );
+        }
+        // When the hook is stubbed off, install behaves as skill-only (+ optional permission); the
+        // hook plan/prompt/summary below all gate on this, so settings.json is left untouched.
+        const skillOnly = opts.skillOnly === true || !HOOK_ENABLED;
         const scope = await resolveScope(opts);
         const home = claudeHome(scope);
         const dest = opts.dest ?? defaultSkillDest(home);
@@ -81,7 +97,7 @@ export function register(program: Command): void {
             : 'create';
           process.stderr.write(`  skill: ${plan.skill.destPath}\n    ${skillNote}\n`);
         }
-        if (!opts.skillOnly) {
+        if (!skillOnly) {
           if (plan.hook.settingsParseError) {
             errExit(
               2,
@@ -105,7 +121,7 @@ export function register(program: Command): void {
         const doSkill = !opts.hookOnly && (opts.yes || (await confirm('Install skill?', true)));
         const hookSettled = plan.hook.alreadyInstalled && !plan.hook.needsMigration;
         const doHook =
-          !opts.skillOnly && !hookSettled && (opts.yes || (await confirm('Install hook?', true)));
+          !skillOnly && !hookSettled && (opts.yes || (await confirm('Install hook?', true)));
         const doPermission = plan.permission.alreadyInstalled
           ? false
           : opts.permission === true
@@ -129,7 +145,7 @@ export function register(program: Command): void {
             summary.push(
               `  hook: added entry → ${res.settingsPath}${res.backupPath ? ` (backup: ${res.backupPath})` : ''}`,
             );
-        } else if (!opts.skillOnly) {
+        } else if (!skillOnly) {
           summary.push(hookSettled ? '  hook: already installed (skipped)' : '  hook: skipped');
         }
         if (doPermission) {
@@ -284,7 +300,7 @@ export function register(program: Command): void {
   program
     .command('deactivate')
     .description(
-      "mute brackish for now: stop the daemon (if running) and remove the UserPromptSubmit hook. Skill files + permission rule stay in place. Use when you're switching from negotiating to implementing and don't want the hook re-pinging.",
+      'no-op for now (the inbox hook is stubbed off). Previously muted the hook + stopped the daemon; to stop the daemon use `brackish down`.',
     )
     .option('--scope <user|project>', 'which `.claude/` home to edit; auto-detects if omitted')
     .option('--global', 'shortcut for --scope user')
@@ -299,6 +315,12 @@ export function register(program: Command): void {
         dest?: string;
         yes?: boolean;
       }) => {
+        if (!HOOK_ENABLED) {
+          process.stderr.write(
+            'brackish deactivate: no-op for now — the inbox hook is stubbed off, so there is nothing in settings.json to remove. To stop the daemon, run `brackish down`.\n',
+          );
+          return;
+        }
         const scope = await resolveScope(opts);
         const home = claudeHome(scope);
         const dest = opts.dest ?? defaultSkillDest(home);
@@ -326,7 +348,7 @@ export function register(program: Command): void {
   program
     .command('activate')
     .description(
-      're-enable the brackish UserPromptSubmit hook (the inverse of `brackish deactivate`). Daemon stays down — start it explicitly with `brackish up` when ready.',
+      'no-op for now (the inbox hook is stubbed off). Previously re-enabled the UserPromptSubmit hook.',
     )
     .option('--scope <user|project>', 'which `.claude/` home to edit; auto-detects if omitted')
     .option('--global', 'shortcut for --scope user')
@@ -341,6 +363,12 @@ export function register(program: Command): void {
         dest?: string;
         yes?: boolean;
       }) => {
+        if (!HOOK_ENABLED) {
+          process.stderr.write(
+            'brackish activate: no-op for now — the inbox hook is stubbed off. (When re-enabled, this will re-add the UserPromptSubmit hook to settings.json.)\n',
+          );
+          return;
+        }
         const scope = await resolveScope(opts);
         const home = claudeHome(scope);
         const dest = opts.dest ?? defaultSkillDest(home);

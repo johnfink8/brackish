@@ -56,7 +56,7 @@ The output's `connectCommand` field is a bash string. **Replace the leading `bra
 
 Don't wait for the peer to ask "what are we negotiating?". Sniff your own cwd briefly (≤30s) and drop a high-confidence starter set.
 
-**Use `brackish propose-batch` for the initial drop, not N separate `propose` calls.** A starter set is almost always 3+ artifacts (convention + 2-4 schemas + 2-4 endpoints). Write one manifest, run one batch — single round-trip, single atomic commit, mutual refs resolve in any order within the bundle. See [`propose.md`](propose.md) for the manifest shape.
+**Use `brackish propose --manifest` for the initial drop, not N separate `propose` calls.** A starter set is almost always 3+ artifacts (convention + 2-4 schemas + 2-4 endpoints). Write one manifest, run one command — single round-trip, single atomic commit (all-or-nothing: a validation failure writes nothing), mutual refs resolve in any order within the set. See [`propose.md`](propose.md) for the manifest shape.
 
 What to include in the initial bundle:
 
@@ -71,17 +71,17 @@ What to include in the initial bundle:
 After the peer connects (`/brackish connect` runs on their side), you'll see their acceptances/rejections appear in your inbox. Workflow on a turn:
 
 1. **Start with `brackish status <doc>`** — bucketed view of awaiting-peer / awaiting-me / accepted / needs-attention. This is your "what changed?" view.
-2. For things awaiting your review (peer counter-proposed or proposed something new), use `brackish endpoint show <doc> ...` — the output tags accepted and proposed inline, with a `delta vs accepted` annotation on the proposed when both exist.
-3. **When the peer revises after a rejection** — `brackish <kind> diff <doc> <selector> --from N --to M` shows the RFC 6902 patch between two versions (defaults: previous and latest). Cheapest possible context for "what actually changed in v2"; skip re-reading both bodies. `--format rendered` gives side-by-side YAML if you want to see the change in context, `--format yaml` / `--format json` gives the new body wrapped in an envelope.
-4. Accept (`brackish <kind> accept`), reject with a reason (`brackish <kind> reject <doc> <selector> "<reason>"`), or counter-propose (reject first, then propose your alternative with `--expected-new`). Both accept and reject take `--rationale "<text>"` so your reasoning rides on the event itself — no separate `brackish send` needed.
+2. For things awaiting your review (peer counter-proposed or proposed something new), use `brackish show endpoint <METHOD> <PATH>` (or `show schema <Name>` / `show convention`) — the output tags accepted and proposed inline, with a `delta vs accepted` annotation on the proposed when both exist.
+3. **When the peer revises after a rejection** — `brackish diff <noun> <selector> --from N --to M` shows the RFC 6902 patch between two versions (defaults: previous and latest). Cheapest possible context for "what actually changed in v2"; skip re-reading both bodies. `--format rendered` gives side-by-side YAML if you want to see the change in context, `--format yaml` / `--format json` gives the new body wrapped in an envelope.
+4. Accept (`brackish accept <noun> <selector>`), reject with a reason (`brackish reject <noun> <selector> --rationale "<reason>"`), or **counter** (`brackish counter <noun> <selector> --file <f> --rationale "<why>"` — one atomic move that rejects the current proposal and proposes your replacement). Accept/reject/counter all take `--rationale "<text>"` so your reasoning rides on the event itself — no separate `brackish send` needed.
 5. When you've responded to everything, `brackish nap [--seconds 60]` blocks for a minute then snapshots the inbox. If `nap` returns empty twice, `brackish send <doc> "<status>"` to ping the peer instead of napping a third time.
 
-See [`propose.md`](propose.md) for the propose flag reference and race-protection (`--expected-version`, `--force`).
+See [`propose.md`](propose.md) for the propose flag reference and race-protection (`--expected-rev`, `--force`).
 
 ## Common race recovery
 
-- **`version_in_flight`** (409): the peer proposed a new version while you were also proposing. Read `brackish <kind> show <doc> <selector>`, decide accept / reject / counter, then re-propose with `--expected-version <N>` where N is the latest you've seen.
-- **`version_mismatch`** (409): you passed `--expected-version 3` but the latest is `4`. Re-read with `brackish read <doc>` and reconcile.
+- **`version_in_flight`** (409): the peer proposed a new version while you were also proposing. Read `brackish show <noun> <selector>`, decide accept / reject / counter, then re-propose with `--expected-rev <N>` where N is the latest you've seen.
+- **`version_mismatch`** (409): you passed `--expected-rev 3` but the latest is `4`. Re-read with `brackish read <doc>` and reconcile.
 - **`cannot_accept_own`** (403): you tried to accept something you proposed. Wrong side; the peer accepts your proposals, you accept theirs.
 - **Rejected convention blocks dependents.** If `status` shows the convention in "needs attention" (rejected/withdrawn), endpoints and schemas inherit doc-level defaults from it — proposing them on top of a stalled convention means re-proposing once it settles. Clear the convention first.
 
@@ -93,7 +93,7 @@ When the current milestone's contract is accepted and you don't want the peer to
 brackish send <doc> "<doc> is settled at <whatever you're calling this milestone — info.version, 'MVP', 'first cut', etc.>: <list the accepted endpoints/schemas>. <X, Y, Z> are out of scope here — please hold them for the next round."
 ```
 
-Then **reject any proposal that crosses the line**, citing scope: `brackish endpoint reject <doc> <METHOD> <PATH> "out of scope for the current milestone per the boundary message; hold for next round"`. The reject reason is attached to the artifact and renders in the rationale, so the peer Claude has the boundary in writing.
+Then **reject any proposal that crosses the line**, citing scope: `brackish reject endpoint <METHOD> <PATH> --rationale "out of scope for the current milestone per the boundary message; hold for next round"`. The reject reason is attached to the artifact and renders in the rationale, so the peer Claude has the boundary in writing.
 
 `brackish status <doc>` will also nudge you toward this once everything's accepted + nothing's awaiting either side — read its `→ next:` line.
 

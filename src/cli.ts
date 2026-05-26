@@ -9,20 +9,16 @@
 
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import pkg from '../package.json' with { type: 'json' };
-import { register as registerBatch } from './cli/batch.js';
 import { register as registerBootstrap } from './cli/bootstrap.js';
-import { errExit } from './cli/common.js';
-import { register as registerConvention } from './cli/convention.js';
+import { ExitError } from './cli/common.js';
 import { register as registerDaemon } from './cli/daemon.js';
 import { register as registerDemo } from './cli/demo.js';
 import { register as registerDocuments } from './cli/documents.js';
-import { register as registerEndpoint } from './cli/endpoint.js';
 import { register as registerEvents } from './cli/events.js';
 import { register as registerInstall } from './cli/install.js';
-import { register as registerRetract } from './cli/retract.js';
-import { register as registerSchema } from './cli/schema.js';
+import { registerLifecycle } from './cli/lifecycle/index.js';
 import { register as registerStatus } from './cli/status.js';
 import { register as registerValidate } from './cli/validate.js';
 import { register as registerVisualize } from './cli/visualize.js';
@@ -44,16 +40,12 @@ export function buildProgram(): Command {
   registerBootstrap(program);
   registerDocuments(program);
   registerEvents(program);
-  registerEndpoint(program);
-  registerSchema(program);
-  registerConvention(program);
-  registerBatch(program);
   registerValidate(program);
-  registerRetract(program);
   registerStatus(program);
   registerVisualize(program);
   registerDemo(program);
   registerInstall(program);
+  registerLifecycle(program); // verb-first artifact lifecycle: propose/accept/reject/withdraw/show/diff/list/lint × nouns
 
   return program;
 }
@@ -72,9 +64,17 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
+  // The single exit point: errExit throws ExitError (empty message ⇒ silent), commander's own
+  // failures throw CommanderError (already printed). Everything else is an unexpected 500-ish.
   buildProgram()
     .parseAsync(process.argv)
     .catch((err) => {
-      errExit(2, err instanceof Error ? err.message : String(err));
+      if (err instanceof ExitError) {
+        if (err.message.length > 0) process.stderr.write(`brackish: ${err.message}\n`);
+        process.exit(err.code);
+      }
+      if (err instanceof CommanderError) process.exit(err.exitCode);
+      process.stderr.write(`brackish: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(2);
     });
 }

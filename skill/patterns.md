@@ -34,7 +34,7 @@ These are **OpenAPI Specification Extensions**, not HTTP headers — they live a
 Model the WS handshake as a `GET` operation with response code `101 Switching Protocols`. Put the frame catalog in `x-brackish.frames` as arrays of **`$ref` strings** pointing at component schemas that define each frame shape:
 
 ```yaml
-# brackish endpoint propose <doc> GET /ws --file ws-handshake.yaml
+# brackish propose endpoint GET /ws --file ws-handshake.yaml
 summary: WebSocket handshake
 responses:
   "101": { description: Switching Protocols }
