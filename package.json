@@ -1,6 +1,6 @@
 {
   "name": "brackish-cli",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Claude-to-Claude contract negotiation: OpenAPI 3.1 propose/accept lifecycle (endpoints + schemas + convention), JSON-Patch diffs, browser UI via Swagger UI. For two Claude Code instances co-developing paired components.",
   "type": "module",
   "bin": {
@@ -26,6 +26,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "format": "biome format --write",
+    "check-format": "biome format",
     "dev": "tsx src/cli.ts"
   },
   "author": "John Fink <johnfink8@gmail.com>",

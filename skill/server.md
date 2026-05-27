@@ -8,9 +8,12 @@ You're the source of truth for what the API actually emits. Your job is to drop 
 
 **Cross-machine** (peer is on a different host):
 ```
-brackish up --bind 0.0.0.0
+brackish tls gen                                              # self-signed cert+key in ~/.brackish/ (wraps openssl)
+brackish up --bind 0.0.0.0 --tls-cert ~/.brackish/cert.pem --tls-key ~/.brackish/key.pem
 ```
-Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind 0.0.0.0`. Bare `--bind` (no address) resolves to `127.0.0.1` — loopback-only, the peer on another host can't reach it, so for cross-machine you want `0.0.0.0` explicitly. The daemon prints a security warning banner on non-loopback binds — surface that to the human along with the connect URL.
+Idempotent. If the daemon was already up without TCP, run `brackish down && brackish up --bind 0.0.0.0 …`. Bare `--bind` (no address) resolves to `127.0.0.1` — loopback-only, the peer on another host can't reach it, so for cross-machine you want `0.0.0.0` explicitly.
+
+**Use TLS for cross-machine.** `--tls-cert/--tls-key` encrypt the channel and let the peer pin your cert by fingerprint — no CA, no public signing, self-signed is the intended case. The pin rides in the connect line automatically (Step 3); the peer verifies it before sending their token. If `brackish tls gen` reports openssl is missing, tell the human — they install openssl, or hand you any cert+key to point the flags at. Plain TCP (no TLS) still works but the daemon prints a clear-text warning; only use it if the human says the network is trusted.
 
 **Same-machine** (peer Claude is on the same host):
 ```

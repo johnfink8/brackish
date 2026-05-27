@@ -67,6 +67,22 @@ export function errExit(code: number, message: string): never {
   throw new ExitError(code, message);
 }
 
+/** The most specific message from an error's `.cause` chain. undici's `fetch` rejects with a
+ *  generic "fetch failed" and nests the actionable detail (TLS pin mismatch, ECONNREFUSED, …) in
+ *  `.cause`; walk to the deepest non-empty cause so the user sees that, not "fetch failed". */
+export function rootCauseMessage(err: unknown): string {
+  let current: unknown = err;
+  let message = current instanceof Error ? current.message : String(current);
+  const seen = new Set<unknown>();
+  while (current instanceof Error && current.cause !== undefined && !seen.has(current.cause)) {
+    seen.add(current.cause);
+    current = current.cause;
+    const m = current instanceof Error ? current.message : String(current);
+    if (m) message = m;
+  }
+  return message;
+}
+
 // --- repeatable commander option accumulator ---
 
 export function collect(value: string, prev: string[]): string[] {
@@ -210,8 +226,7 @@ export async function withClient(
       const lines = [head, issuesBlock, hint ? `  → ${hint}` : ''].filter((s) => s.length > 0);
       errExit(code, lines.join('\n'));
     }
-    if (err instanceof Error) errExit(2, err.message);
-    errExit(2, String(err));
+    errExit(2, rootCauseMessage(err));
   } finally {
     if (client) await client.close();
   }

@@ -1,9 +1,8 @@
 // Validate the brackish skill's /brackish invite + /brackish connect flows with real Claudes,
 // using the **shipping install path** — no inlined CLAUDE.md, no role briefing. Each side gets
-// `brackish install --local --yes --permission` run in its working dir; Claude Code discovers the
-// project-scope skill and the Bash(brackish *) allow-rule from `./.claude/`. (The UserPromptSubmit
-// inbox hook is currently stubbed off — see HOOK_ENABLED in src/cli/install.ts.) Sub-Claudes are
-// spawned with a single slash-command prompt; the skill must do the rest unaided.
+// `brackish install --local --yes` run in its working dir; Claude Code discovers the project-scope
+// skill from `./.claude/`. Sub-Claudes are spawned with a single slash-command prompt; the skill
+// must do the rest unaided.
 //
 // Run: `npx tsx harness/validate-skill.ts`
 
@@ -211,11 +210,10 @@ function extractSlashConnect(result: string): string | null {
   return fallback ? `/${fallback[0]}` : null;
 }
 
-/** Run `brackish install --local --yes --permission` in `cwd`. Writes `<cwd>/.claude/skills/brackish/`
- *  + the Bash(brackish *) allow-rule into project settings.json (the inbox hook is stubbed off for
- *  now — see HOOK_ENABLED in src/cli/install.ts). Mirrors the path a real user takes. */
+/** Run `brackish install --local --yes` in `cwd`. Writes `<cwd>/.claude/skills/brackish/`.
+ *  Mirrors the path a real user takes. */
 function installLocalSkill(brackishBin: string, cwd: string, env: NodeJS.ProcessEnv): void {
-  const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--permission', '--force'], {
+  const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--force'], {
     cwd,
     env,
     encoding: 'utf8',
@@ -251,7 +249,7 @@ async function main(): Promise<void> {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
   };
 
-  console.error(`harness: server-side \`brackish install --local --yes --permission\``);
+  console.error(`harness: server-side \`brackish install --local --yes\``);
   installLocalSkill(brackishBin, serverDir, serverEnv);
 
   // Inline the scope-Q answers in the prompt — `claude -p` has no interactive AskUserQuestion
@@ -300,7 +298,7 @@ async function main(): Promise<void> {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
   };
 
-  console.error(`harness: client-side \`brackish install --local --yes --permission\``);
+  console.error(`harness: client-side \`brackish install --local --yes\``);
   installLocalSkill(brackishBin, clientDir, clientEnv);
 
   console.error(`harness: round 2 — client Claude (${slashConnect})`);

@@ -2227,11 +2227,10 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }
 
-// Inbox previews flow into the UserPromptSubmit hook, which wraps them in a
-// <system-reminder> block in Claude's context. Peer-controlled text containing
-// </system-reminder> would break out of the wrapper and turn into a forged
-// reminder. Replace angle brackets with visually-similar non-tag codepoints
-// (U+2039, U+203A) and strip C0 control characters.
+// Inbox previews are peer-controlled text that ends up in Claude's context (via `brackish inbox`).
+// Neutralize tag-shaped sequences so a peer can't forge a structural marker (e.g. a fake
+// <system-reminder> block) or smuggle control chars: replace angle brackets with visually-similar
+// non-tag codepoints (U+2039, U+203A) and strip C0 control characters.
 function neutralizeForReminder(s: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping C0 controls is the point
   return s.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/[<>]/g, (c) => (c === '<' ? '‹' : '›'));

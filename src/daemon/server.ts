@@ -2,8 +2,9 @@
 // X-Brackish-Identity header); TCP is bound additionally when ServerConfig.bind is set
 // (bearer-token auth via Authorization: Bearer).
 
-import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { createServer, type Server as HttpServer } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -44,6 +45,7 @@ import {
 } from '../lib/models.js';
 import { EventNotifier } from '../lib/notifier.js';
 import type { assembleDocument } from '../lib/openapi.js';
+import { certFingerprint } from '../lib/tls.js';
 import { validateDocument } from '../lib/validate.js';
 import { type RationaleMap, renderHtml } from '../render/render.js';
 import { type AppBindings, type AppVariables, makeAuthMiddleware } from './auth.js';
@@ -1502,6 +1504,10 @@ export type RunningServer = {
   notifier: EventNotifier;
   socketPath: string;
   tcpAddress: { host: string; port: number } | null;
+  // 'https' when the TCP bind serves TLS (cert+key configured), else 'http'. Meaningful only
+  // when tcpAddress is non-null. tlsFingerprint is the cert's pin, for the invite/connect line.
+  tcpScheme: 'http' | 'https';
+  tlsFingerprint: string | null;
   close(): Promise<void>;
 };
 
@@ -1512,6 +1518,23 @@ export async function startServer(opts: { config: ServerConfig }): Promise<Runni
   const app = buildApp({ store, notifier });
   const listener = getRequestListener(app.fetch);
 
+  // BYO TLS for the TCP bind only — both cert+key required, and only meaningful with a bind.
+  // The Unix socket always stays plain HTTP (filesystem-gated; TLS there is pointless).
+  const { tlsCert, tlsKey } = opts.config;
+  if ((tlsCert === undefined) !== (tlsKey === undefined)) {
+    throw new Error('TLS requires both tlsCert and tlsKey (got only one)');
+  }
+  let tlsOptions: { cert: string; key: string } | undefined;
+  let tlsFingerprint: string | null = null;
+  if (tlsCert !== undefined && tlsKey !== undefined) {
+    if (opts.config.bind === undefined) {
+      throw new Error('TLS (tlsCert/tlsKey) requires a TCP bind');
+    }
+    const cert = readFileSync(tlsCert, 'utf8');
+    tlsOptions = { cert, key: readFileSync(tlsKey, 'utf8') };
+    tlsFingerprint = certFingerprint(cert);
+  }
+
   if (existsSync(opts.config.socketPath)) {
     unlinkSync(opts.config.socketPath);
   }
@@ -1520,11 +1543,11 @@ export async function startServer(opts: { config: ServerConfig }): Promise<Runni
   await listenAsync(socketServer, { path: opts.config.socketPath });
   chmodSync(opts.config.socketPath, 0o600);
 
-  let tcpServer: HttpServer | undefined;
+  let tcpServer: HttpServer | HttpsServer | undefined;
   let tcpAddress: { host: string; port: number } | null = null;
   if (opts.config.bind !== undefined) {
     const { host, port } = parseBindAddress(opts.config.bind);
-    tcpServer = createServer(listener);
+    tcpServer = tlsOptions ? createHttpsServer(tlsOptions, listener) : createServer(listener);
     await listenAsync(tcpServer, { host, port });
     const addr = tcpServer.address();
     if (addr && typeof addr === 'object' && 'port' in addr) {
@@ -1539,6 +1562,8 @@ export async function startServer(opts: { config: ServerConfig }): Promise<Runni
     notifier,
     socketPath: opts.config.socketPath,
     tcpAddress,
+    tcpScheme: tlsOptions ? 'https' : 'http',
+    tlsFingerprint,
     async close() {
       await closeServer(socketServer);
       if (tcpServer) await closeServer(tcpServer);
@@ -1552,7 +1577,7 @@ export async function startServer(opts: { config: ServerConfig }): Promise<Runni
 
 type ListenOptions = { path: string } | { host: string; port: number };
 
-function listenAsync(server: HttpServer, opts: ListenOptions): Promise<void> {
+function listenAsync(server: HttpServer | HttpsServer, opts: ListenOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (e: Error): void => {
       server.off('listening', onListening);
@@ -1572,6 +1597,6 @@ function listenAsync(server: HttpServer, opts: ListenOptions): Promise<void> {
   });
 }
 
-function closeServer(server: HttpServer): Promise<void> {
+function closeServer(server: HttpServer | HttpsServer): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }

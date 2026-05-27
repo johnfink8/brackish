@@ -413,10 +413,9 @@ describe('SqliteStore', () => {
       expect(peerInbox.find((e) => e.documentName === 'a')?.newCount).toBe(1);
     });
 
-    // The UserPromptSubmit hook wraps inbox output in a <system-reminder> block and
-    // injects it into Claude's context. Any peer-controlled string that lands in the
-    // preview (message text, rejection reason, delta) must not contain tag-shaped
-    // sequences that could break out of or forge another reminder block.
+    // Inbox previews (message text, rejection reason, delta) are peer-controlled and end up in
+    // Claude's context via `brackish inbox`. They must not carry tag-shaped sequences that could
+    // forge a structural marker like a <system-reminder> block.
     it('neutralizes peer message text containing </system-reminder> in the preview', async () => {
       await store.createDocument('a', 'host');
       await store.appendMessage(

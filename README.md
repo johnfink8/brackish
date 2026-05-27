@@ -16,7 +16,7 @@ Two [Claude Code](https://claude.ai/code) instances co-developing a contract —
 brackish is a small message bus + propose/accept artifact lifecycle. You don't type its commands by hand — install it, talk to Claude Code in plain English, and the bundled skill drives the CLI on your behalf, proposing/accepting/rejecting OpenAPI 3.1 artifacts and pulling the peer's moves into your Claude's context.
 
 Same machine: Unix-socket transport, peer-trust, zero ceremony.
-Cross-machine: TCP with invite/connect token bootstrap.
+Cross-machine: TCP with invite/connect token bootstrap, optionally over TLS (BYO self-signed cert, pinned by fingerprint).
 
 ## Security model
 
@@ -24,11 +24,12 @@ brackish is local-coordination tooling, **not production-hardened multi-tenant i
 
 - **Unix socket (same machine):** peer-trust. Anyone who can write to `~/.brackish/brackish.sock` is treated as a trusted local peer; the filesystem permission (`0600`) is the gate. The self-declared `X-Brackish-Identity` header is taken at face value. Use this for local Claude pairs.
 - **TCP (cross machine):** bearer-token auth via `Authorization: Bearer <token>`. Tokens are 256-bit random, hashed at rest (sha256), and minted only by redeeming a one-time invite. Per-document ACLs gate every doc-scoped endpoint — TCP peers see only docs they've been explicitly granted. Failed-bearer attempts are rate-limited (20/min per source IP), as are invite-redemption attempts (10/min per IP).
+- **TLS (optional, recommended cross-machine):** `brackish serve --tls-cert <pem> --tls-key <pem>` serves the TCP bind over HTTPS. No CA and no public signing — bring your own self-signed cert (`brackish tls gen` wraps openssl to make one). The client **pins the cert by SHA-256 fingerprint**, carried in the `brackish connect … --tls-pin sha256:…` line the invite prints; it verifies the cert before sending its token. So the channel is encrypted and MITM-resistant (the pin's integrity rides the same human-relayed channel the token already does), without provisioning a CA. The Unix socket stays plain HTTP — it's filesystem-gated.
 - **Browser UI:** `/ui/<doc>` is reachable without auth on loopback TCP only. Anyone who can connect to `127.0.0.1` already qualifies as a local user. Cross-machine browser UI is an explicit non-goal — ssh-forward to loopback, or use the CLI.
 
 What this does **not** give you:
 
-- TLS. Bearer tokens travel in plaintext on the TCP socket. Default `--bind` is loopback (`127.0.0.1:11442`) for a reason; pass `--bind 0.0.0.0` only on networks you trust, or place brackish behind an upstream TLS-terminating proxy.
+- Always-on encryption. TLS is **opt-in** (`serve --tls-cert/--tls-key` + cert pinning, above). Without it, bearer tokens travel in plaintext, so the default `--bind` is loopback (`127.0.0.1:11442`); only bind `0.0.0.0` without TLS on a network you trust. Brackish does no public-CA / hostname validation — pinning is the trust model. The Claudes are instructed to use TLS, but that is up to the user to ensure.
 - Defense against a compromised peer machine. A peer with valid tokens is trusted within the scope of their grants.
 - An audit log / SIEM hookup. Rate-limit refusals log to `serve.log`; everything else stays in the daemon's normal logs.
 
@@ -38,12 +39,12 @@ If you want a multi-tenant API contract server with real auth — brackish isn't
 
 ```sh
 npm install -g brackish-cli           # one binary: `brackish`
-brackish install                       # installs the Claude skill (+ optional --permission allow-rule)
+brackish install                      # copies the Claude skill
 ```
 
-`brackish install` puts a [skill](https://docs.claude.com/en/docs/claude-code/skills) at `~/.claude/skills/brackish/` (or `./.claude/skills/brackish/` with `--local`) so Claude reaches for brackish at the right moments — when you're about to type a TS `interface`, a pydantic model, an OpenAPI fragment, or anything else a paired component owns the other side of. The `--permission` flag adds a `Bash(brackish *)` allow-rule so Claude can run brackish commands without per-command prompts.
+`brackish install` puts a [skill](https://docs.claude.com/en/docs/claude-code/skills) at `~/.claude/skills/brackish/` (or `./.claude/skills/brackish/` with `--local`). The skill teaches Claude *when* to reach for brackish: when it's paired with another Claude building the other half of an HTTP API and is about to pin down a request/response shape or an endpoint the other side will consume — so the two converge on one shared, validated **OpenAPI 3.1 document** instead of each guessing.
 
-You stay in sync through the foreground loop — `brackish status` at the top of a turn, `brackish nap` when there's nothing to do but wait for the peer. (No background hook is installed.)
+You stay in sync through the foreground loop — `brackish status` at the top of a turn, `brackish nap` when there's nothing to do but wait for the peer. 
 
 Requires Node 22 or newer.
 
@@ -69,13 +70,13 @@ brackish visualize users-api --format openapi --out users-api.yaml
 
 > /brackish invite my-laptop
 
-The skill mints a one-time token and prints a single line for you to copy:
+The skill generates a self-signed cert, brings the daemon up over TLS, mints a one-time token, and prints a single line for you to copy:
 
 ```
-/brackish connect http://192.168.1.23:11442 --token <tok> --identity my-laptop
+/brackish connect https://192.168.1.23:11442 --token <tok> --identity my-laptop --tls-pin sha256:<fingerprint>
 ```
 
-Paste it into the peer Claude on the other machine. Its skill recognizes the `/brackish connect …` form, redeems the invite, and starts pulling inbox events — same negotiation flow as same-machine, just over TCP.
+Paste it into the peer Claude on the other machine. Its skill recognizes the `/brackish connect …` form, redeems the invite (verifying the pinned cert first), and starts pulling inbox events — same negotiation flow as same-machine, just over TCP. (Without a cert it's an `http://` line with no pin — still works, but unencrypted.)
 
 ## What the skill teaches Claude
 
@@ -120,7 +121,7 @@ npm install -g brackish-cli
 brackish demo                                # open the URL it prints
 ```
 
-Starts an ephemeral daemon, replays a real chat-app trial extracted from the harness (two Claude sub-agents — `backend` and `frontend` — negotiating a chat API end-to-end), mints a browser-friendly token, prints a ready-to-open URL, stays in the foreground until you Ctrl-C (then wipes the sandbox). Doesn't touch your existing brackish state.
+Starts an ephemeral daemon, replays a real chat-app trial extracted from the harness (two Claude sub-agents — `backend` and `frontend` — negotiating a chat API end-to-end), and prints a ready-to-open URL — `http://127.0.0.1:<port>/ui/chat-api` (loopback, no auth needed). Stays in the foreground until you Ctrl-C (then wipes the sandbox). Doesn't touch your existing brackish state.
 
 What you'll see in the doc:
 
@@ -185,12 +186,14 @@ brackish visualize <doc> --format openapi --out spec.yaml
 brackish visualize <doc> --format markdown           # human-readable doc with rationale interleaved
 brackish visualize <doc> --format html               # Swagger UI + brackish rationale sidebar
 
-# Cross-machine bootstrap
-brackish invite <peer-identity> --grant <doc> --ttl 86400   # --grant is required; the doc must exist before you mint the invite
-brackish connect <url> --token <tok> --identity <name>
+# Cross-machine bootstrap (optionally over TLS — bring your own self-signed cert)
+brackish tls gen                                            # self-signed cert+key in ~/.brackish (wraps openssl)
+brackish serve --bind 0.0.0.0 --tls-cert cert.pem --tls-key key.pem  # serve HTTPS on the bind (or `up` to background it)
+brackish invite <peer-identity> --grant <doc> --ttl 86400   # --grant required; doc must exist first. With TLS the printed connect line carries --tls-pin
+brackish connect <url> --token <tok> --identity <name> [--tls-pin sha256:…]  # --tls-pin is required (and verified) for an https:// url
 
-# Skill management
-brackish install [--local|--global] [--permission]
+# Skill management (copies/removes the skill dir)
+brackish install [--local|--global]
 brackish uninstall
 ```
 
@@ -198,8 +201,8 @@ brackish uninstall
 
 - **CLI + daemon = one Node binary.** `brackish serve` is just a subcommand.
 - **Storage:** append-only events table; documents + artifact state are projections. SQLite via `better-sqlite3`.
-- **Transport detection:** the server is dual-bound (Unix socket + optional TCP) and picks auth by inspecting the underlying connection — `X-Brackish-Identity` for socket peers, `Authorization: Bearer <token>` for TCP.
+- **Transport detection:** the server is dual-bound (Unix socket + optional TCP) and picks auth by inspecting the underlying connection — `X-Brackish-Identity` for socket peers, `Authorization: Bearer <token>` for TCP. HTTPS is optional, but recommended, and the Claudes are instructed to use it.
 - **Validation:** every propose builds the projected wide doc (accepted + currently-proposed + this propose) and runs it through `@seriousme/openapi-schema-validator` against the official 3.1 meta-schema. Every accept projects the accepted-only doc with this accept applied and validates that. The doc that `brackish visualize` renders and the doc the validator runs against are produced by the same code path — no drift.
 - **Stack:** Node 22+, Hono, better-sqlite3, zod, commander, undici, smol-toml, @seriousme/openapi-schema-validator.
 - **Source layout:** `src/cli/` (per-command modules + `lifecycle/` — the verb×noun capability tables), `src/daemon/` (server + auth + store + projection), `src/client/` (HTTP client + batch + manifest), `src/lib/` (pure: models + diff + lint + validate + openapi + specfile + notifier), `src/io/` (config + install), `src/render/` (markdown/html/text renderers + terminal formatters).
-- **Tests:** vitest, 303 unit + integration + e2e across store, server, client, lint, validate, batch, counter, manifest, install.
+- **Tests:** vitest, unit + integration + e2e across store, server, client, lint, validate, batch, counter, manifest, tls, install.

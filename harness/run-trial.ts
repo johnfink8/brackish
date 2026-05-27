@@ -11,7 +11,14 @@
 // The harness rebuilds dist if missing.
 
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -101,6 +108,31 @@ exit $EC
   writeFileSync(wrapper, script, { mode: 0o755 });
   chmodSync(wrapper, 0o755);
   return wrapper;
+}
+
+/** Scrape the `brackish connect https://… --tls-pin sha256:…` line the SERVER Claude minted (via
+ *  `brackish invite`) out of the tee'd call log — the harness playing human courier. We do NOT
+ *  mint it ourselves: the server Claude doing `tls gen` + bringing up TLS + `invite` per
+ *  skill/server.md is exactly what the trial validates. Rewrites the host to loopback because
+ *  both Claudes are on this one machine (the pin is host-independent; the daemon bound 0.0.0.0). */
+function extractConnectLine(callLogPath: string): string {
+  const log = readFileSync(callLogPath, 'utf8');
+  const matches = log.match(/brackish connect https:\/\/\S+[^\n]*--tls-pin sha256:[0-9a-f]{64}/g);
+  if (!matches || matches.length === 0) {
+    throw new Error(
+      "harness: no `brackish connect … --tls-pin …` line in the server Claude's calls (it never minted a TLS invite?) — inspect brackish-calls.log / transcripts",
+    );
+  }
+  const raw = matches[matches.length - 1] ?? '';
+  const url = raw.match(/https:\/\/\S+/)?.[0];
+  const token = raw.match(/--token\s+(\S+)/)?.[1];
+  const identity = raw.match(/--identity\s+(\S+)/)?.[1];
+  const pin = raw.match(/--tls-pin\s+(sha256:[0-9a-f]{64})/)?.[1];
+  if (!url || !token || !identity || !pin) {
+    throw new Error(`harness: server Claude's connect line was malformed: ${raw}`);
+  }
+  const port = new URL(url).port || '11442';
+  return `brackish connect https://127.0.0.1:${port} --token ${token} --identity ${identity} --tls-pin ${pin}`;
 }
 
 async function waitForSocket(socketPath: string, timeoutMs: number): Promise<void> {
@@ -258,14 +290,22 @@ async function runOneTurn(args: {
   transcriptPath: string;
   /** Hard wall-clock cap; if the sub-claude doesn't exit by then it's SIGTERMed. */
   timeoutMs: number;
+  /** TLS cross-machine peer: drive transport purely from this home's config.toml (server+token
+   *  +tlsPin written by `brackish connect`). No socket env, or it'd force socket transport. */
+  socketless?: boolean;
 }): Promise<TurnResult> {
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     BRACKISH_HOME: args.brackishHome,
-    BRACKISH_SOCKET: join(args.brackishHome, 'brackish.sock'),
-    BRACKISH_IDENTITY: args.side,
     PATH: `${args.pathBinDir}:${process.env.PATH ?? ''}`,
   };
+  if (args.socketless) {
+    delete env.BRACKISH_SOCKET;
+    delete env.BRACKISH_IDENTITY;
+  } else {
+    env.BRACKISH_SOCKET = join(args.brackishHome, 'brackish.sock');
+    env.BRACKISH_IDENTITY = args.side;
+  }
 
   // `claude -p` defaults: bypass permissions, allowed tools = Bash (run brackish) + Read/Glob/Grep
   // (open SKILL.md and subfiles). Without Read, the model only sees the skill's description blurb
@@ -509,6 +549,7 @@ function parseArgs(): {
   budgetOverride?: number;
   demoDataPath?: string;
   seedOnly: boolean;
+  tls: boolean;
 } {
   const args = process.argv.slice(2);
   let scenarioName = 'chat-app';
@@ -516,6 +557,7 @@ function parseArgs(): {
   let budgetOverride: number | undefined;
   let demoDataPath: string | undefined;
   let seedOnly = false;
+  let tls = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--max-rounds') {
@@ -532,6 +574,8 @@ function parseArgs(): {
       demoDataPath = next;
     } else if (a === '--seed-only') {
       seedOnly = true;
+    } else if (a === '--tls') {
+      tls = true;
     } else if (a && !a.startsWith('--')) {
       scenarioName = a;
     } else {
@@ -544,7 +588,8 @@ function parseArgs(): {
     budgetOverride?: number;
     demoDataPath?: string;
     seedOnly: boolean;
-  } = { scenarioName, seedOnly };
+    tls: boolean;
+  } = { scenarioName, seedOnly, tls };
   if (maxRoundsOverride !== undefined) result.maxRoundsOverride = maxRoundsOverride;
   if (budgetOverride !== undefined) result.budgetOverride = budgetOverride;
   if (demoDataPath !== undefined) result.demoDataPath = demoDataPath;
@@ -552,7 +597,8 @@ function parseArgs(): {
 }
 
 async function main(): Promise<void> {
-  const { scenarioName, maxRoundsOverride, budgetOverride, demoDataPath, seedOnly } = parseArgs();
+  const { scenarioName, maxRoundsOverride, budgetOverride, demoDataPath, seedOnly, tls } =
+    parseArgs();
   const baseScenario = SCENARIOS[scenarioName];
   if (!baseScenario) {
     console.error(`unknown scenario: ${scenarioName}. known: ${Object.keys(SCENARIOS).join(', ')}`);
@@ -564,20 +610,47 @@ async function main(): Promise<void> {
     ...(budgetOverride !== undefined ? { perTurnBudgetUsd: budgetOverride } : {}),
   };
 
+  // TLS cross-machine mode: the firstMover is the host (Unix socket, peer-trust); the other side
+  // is the remote peer that must `brackish connect … --tls-pin` over TCP+TLS, in its own home with
+  // no socket. Exercises the BYO-TLS path + the skill's connect instructions, and (across rounds)
+  // that subsequent TLS connections keep working.
+  const tlsMode = tls;
+  const hostSide: Side = scenario.firstMover;
+  const peerSide: Side = scenario.firstMover === 'frontend' ? 'backend' : 'frontend';
+
+  if (tlsMode && scenario.seedingMoves && scenario.seedingMoves.length > 0) {
+    console.error(
+      'harness: --tls is greenfield-only (the server Claude creates the doc); incompatible with seedingMoves',
+    );
+    process.exit(2);
+  }
+  if (tlsMode && seedOnly) {
+    console.error(
+      'harness: --tls --seed-only is unsupported (the daemon is brought up by the server Claude in round 1)',
+    );
+    process.exit(2);
+  }
+
   const brackishEntry = ensureBrackishBuilt();
   const trialId = isoStamp();
   const trialDir = join(REPO_ROOT, 'trials', `${scenario.name}-${trialId}`);
   const brackishHome = join(trialDir, 'brackish-home');
+  const peerHome = join(trialDir, 'peer-home'); // TLS peer's client config (server+token+tlsPin)
   const transcriptDir = join(trialDir, 'transcripts');
   const finalDir = join(trialDir, 'final');
   const binDir = join(trialDir, 'bin');
   const frontendDir = join(trialDir, 'frontend');
   const backendDir = join(trialDir, 'backend');
 
+  const sideDir = (side: Side): string => (side === 'frontend' ? frontendDir : backendDir);
+  // The home a side's Claude turns run against: the TLS peer uses its own socketless home.
+  const homeFor = (side: Side): string => (tlsMode && side === peerSide ? peerHome : brackishHome);
+
   const critiqueDir = join(trialDir, 'critiques');
   for (const d of [
     trialDir,
     brackishHome,
+    peerHome,
     transcriptDir,
     finalDir,
     binDir,
@@ -591,11 +664,9 @@ async function main(): Promise<void> {
   // Side scaffolding: CLAUDE.md is the role brief ONLY — no brackish-specific text. In
   // production a Claude doesn't have an inlined plugin teaching in CLAUDE.md; it has the skill
   // installed via `brackish install`. The trial matches that path: we run `brackish install
-  // --local --yes --permission --force` in each side's dir below, which drops the project-scope
-  // skill into `.claude/skills/brackish/` and the `Bash(brackish *)` allow-rule into
-  // `.claude/settings.json`. (The UserPromptSubmit inbox hook is currently stubbed off — see
-  // HOOK_ENABLED in src/cli/install.ts — so trials run the foreground status/nap loop.) The
-  // sub-Claude discovers the skill the same way a real user's Claude does.
+  // --local --yes --force` in each side's dir below, which drops the project-scope skill into
+  // `.claude/skills/brackish/`. The sub-Claude discovers the skill the same way a real user's
+  // Claude does.
   writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend);
   writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend);
   writeFileSync(
@@ -625,8 +696,8 @@ async function main(): Promise<void> {
     ['frontend', frontendDir],
     ['backend', backendDir],
   ] as const) {
-    console.error(`harness: ${side}-side \`brackish install --local --yes --permission\``);
-    const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--permission', '--force'], {
+    console.error(`harness: ${side}-side \`brackish install --local --yes --force\``);
+    const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--force'], {
       cwd: dir,
       env: installEnv(brackishHome),
       encoding: 'utf8',
@@ -647,6 +718,7 @@ async function main(): Promise<void> {
         maxRounds: scenario.maxRounds,
         perTurnBudgetUsd: scenario.perTurnBudgetUsd,
         successCriterion: scenario.successCriterion,
+        transport: tlsMode ? `tls (peer=${peerSide} over https)` : 'socket',
         startedAt: new Date().toISOString(),
         brackishEntry,
       },
@@ -655,18 +727,29 @@ async function main(): Promise<void> {
     )}\n`,
   );
 
-  // Start brackish daemon.
+  // Start the brackish daemon.
+  //   socket mode: the harness spawns + owns `brackish serve` (as before).
+  //   TLS mode:    the harness does NOT — the *server Claude* runs `tls gen` + `up --bind … --tls-*`
+  //                + `invite` itself in round 1, per skill/server.md. Pre-baking the cert/daemon/
+  //                invite here would test none of that. The harness picks up the daemon (socket) and
+  //                the minted connect line after that turn, then plays courier to the peer.
   const serverLog = join(trialDir, 'server.log');
-  const server: ChildProcess = spawn(brackishBin, ['serve'], {
-    env: { ...process.env, BRACKISH_HOME: brackishHome },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const serverLogFd = serverLog;
-  server.stdout?.on('data', (d) => appendFileSync(serverLogFd, d));
-  server.stderr?.on('data', (d) => appendFileSync(serverLogFd, d));
   const socketPath = join(brackishHome, 'brackish.sock');
-  await waitForSocket(socketPath, 5000);
-  console.error(`harness: brackish daemon ready at ${socketPath}`);
+  let server: ChildProcess | null = null;
+  if (tlsMode) {
+    console.error(
+      `harness: TLS mode — ${hostSide} Claude brings up the TLS daemon + mints the invite (skill-driven); peer=${peerSide} will connect over https`,
+    );
+  } else {
+    server = spawn(brackishBin, ['serve'], {
+      env: { ...process.env, BRACKISH_HOME: brackishHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    server.stdout?.on('data', (d) => appendFileSync(serverLog, d));
+    server.stderr?.on('data', (d) => appendFileSync(serverLog, d));
+    await waitForSocket(socketPath, 5000);
+    console.error(`harness: brackish daemon ready at ${socketPath}`);
+  }
 
   // Seed a pre-existing settled contract (renegotiation scenarios). Greenfield scenarios omit
   // seedingMoves and the doc is created by the first Claude's turn.
@@ -711,7 +794,7 @@ async function main(): Promise<void> {
     console.error(`  rejections:         ${baseline.rejectionCount}`);
     console.error(`  rendered doc:       ${join(finalDir, 'openapi.yaml')}`);
     console.error(`  success criterion already met (should be false): ${alreadyMet}`);
-    server.kill('SIGTERM');
+    server?.kill('SIGTERM');
     await sleep(200);
     process.exit(alreadyMet ? 1 : 0);
   }
@@ -733,12 +816,47 @@ async function main(): Promise<void> {
   }> = [];
   const summaryHistory: DocumentSummary[] = [];
   let terminationReason = 'maxRounds';
+  // TLS mode: captured from the server Claude's first turn (the `invite` line it minted), then
+  // relayed into the peer's first turn. Null until the host has set up TLS + invited.
+  let tlsConnectLine: string | null = null;
 
   try {
     while (round <= scenario.maxRounds) {
       const isStarter = !usedStarter.has(nextSide);
       usedStarter.add(nextSide);
-      const prompt = isStarter ? scenario.starterPrompts[nextSide] : scenario.wakePrompt;
+      let prompt = isStarter ? scenario.starterPrompts[nextSide] : scenario.wakePrompt;
+
+      // TLS host's first turn: instruct the cross-machine setup, then let the skill drive it
+      // (tls gen → up --bind … --tls-* → create doc → drop artifacts → invite the peer + --grant).
+      // The harness does NOT do any of this — capturing whether the server Claude gets it right
+      // is the point. The ~/.brackish nudge orients it to the sandbox's BRACKISH_HOME override.
+      if (tlsMode && nextSide === hostSide && isStarter) {
+        prompt =
+          `Let's negotiate the ${scenario.documentName} API with the ${peerSide} team. Call the OpenAPI ` +
+          `document \`${scenario.documentName}\`. The ${peerSide} Claude is on a DIFFERENT machine, so set ` +
+          'brackish up for cross-machine access over TLS and mint an invite for them — follow your ' +
+          'brackish skill: generate a self-signed cert, bring the daemon up with TLS, create the doc, ' +
+          `drop your initial v1 artifact set, then invite \`${peerSide}\` and grant them the doc. Use the ` +
+          'cert/key file paths that `brackish tls gen` prints (not literal ~/.brackish paths).';
+      }
+
+      // TLS peer's first turn: hand over the exact connect line the host Claude minted (captured
+      // after its turn), as a human courier would. The peer must `connect … --tls-pin` before it
+      // can touch the doc over TCP+TLS.
+      if (tlsMode && nextSide === peerSide && isStarter) {
+        if (!tlsConnectLine) {
+          throw new Error(
+            'harness: peer is up but no TLS connect line was captured from the host — see brackish-calls.log',
+          );
+        }
+        prompt =
+          `Let's negotiate the ${scenario.documentName} API with the ${hostSide} team. The document ` +
+          `\`${scenario.documentName}\` already exists (they created it). They are on a DIFFERENT machine, ` +
+          'so connect over TLS FIRST by running this exact line — it carries the cert pin; do not alter ' +
+          `or drop any flag:\n\n${tlsConnectLine}\n\nThen pick up the negotiation per your brief: check ` +
+          'your inbox, accept what fits, reject or counter what does not, and propose your additions.';
+      }
+
       const transcriptPath = join(
         transcriptDir,
         `round-${String(round).padStart(3, '0')}-${nextSide}.ndjson`,
@@ -749,8 +867,9 @@ async function main(): Promise<void> {
       const turn = await runOneTurn({
         side: nextSide,
         prompt,
-        cwd: nextSide === 'frontend' ? frontendDir : backendDir,
-        brackishHome,
+        cwd: sideDir(nextSide),
+        brackishHome: homeFor(nextSide),
+        socketless: tlsMode && nextSide === peerSide,
         budgetUsd: scenario.perTurnBudgetUsd,
         timeoutMs: scenario.perTurnTimeoutMs,
         pathBinDir: binDir,
@@ -760,6 +879,21 @@ async function main(): Promise<void> {
       console.error(
         `harness:   done in ${(wallMs / 1000).toFixed(1)}s ($${turn.costUsd.toFixed(3)}, ${turn.numTurns} model-turns, stand_down=${turn.saidStandDown})`,
       );
+
+      // TLS: after the host's first turn it should have brought up the daemon (`up`) and minted the
+      // invite. Confirm the socket exists, then courier the connect line over to the peer. Do this
+      // BEFORE the post-turn deliver/observer below, which talk to that socket.
+      if (tlsMode && nextSide === hostSide && tlsConnectLine === null) {
+        try {
+          await waitForSocket(socketPath, 15000);
+        } catch {
+          throw new Error(
+            `harness: ${hostSide} Claude did not bring up the brackish daemon (no socket at ${socketPath}) — its skill-driven TLS setup failed; see ${transcriptPath}`,
+          );
+        }
+        tlsConnectLine = extractConnectLine(callLogPath);
+        console.error(`harness: captured connect line from ${hostSide}: ${tlsConnectLine}`);
+      }
 
       // The process exiting is this side's turn boundary — deliver its held events so the peer's
       // inbox (which drives handoff) sees them. A deliver-driven harness: agents that learn to
@@ -832,8 +966,9 @@ async function main(): Promise<void> {
         runOneTurn({
           side,
           prompt: buildCritiquePrompt(side, terminationReason, lastSummaryForCritique),
-          cwd: side === 'frontend' ? frontendDir : backendDir,
-          brackishHome,
+          cwd: sideDir(side),
+          brackishHome: homeFor(side),
+          socketless: tlsMode && side === peerSide,
           budgetUsd: CRITIQUE_BUDGET_USD,
           timeoutMs: scenario.perTurnTimeoutMs,
           pathBinDir: binDir,
@@ -868,8 +1003,13 @@ async function main(): Promise<void> {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`harness: render failed: ${msg}`);
     }
-    // Kill daemon.
-    server.kill('SIGTERM');
+    // Stop the daemon. Socket mode: kill the handle we own. TLS mode: it was spawned detached by
+    // the server Claude's `brackish up`, so stop it via the PID file with `brackish down`.
+    if (server) {
+      server.kill('SIGTERM');
+    } else if (tlsMode) {
+      brackishCall(brackishBin, brackishHome, 'observer', ['down']);
+    }
     // Give it a moment to die cleanly so the socket is released.
     await sleep(200);
   }
