@@ -1,7 +1,5 @@
-// `brackish install` / `uninstall` machinery: copy (or remove) the bundled skill directory.
-// That is the WHOLE job — brackish never edits the user's settings.json (no hooks, no permission
-// rules). Sync is the foreground status/nap loop; the user opts into a `Bash(brackish *)` allow-rule
-// themselves if they want fewer approval prompts.
+// `brackish install` / `uninstall` machinery: copy (or remove) the bundled skill directory. That's
+// the whole job.
 //
 // The only file we read for "bundled skill" is one we ship in the npm tarball, located at the
 // package root via import.meta.url; works the same in dev and in installed packages.

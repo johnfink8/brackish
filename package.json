@@ -26,6 +26,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "format": "biome format --write",
+    "check-format": "biome format",
     "dev": "tsx src/cli.ts"
   },
   "author": "John Fink <johnfink8@gmail.com>",

@@ -1,9 +1,8 @@
 // Validate the brackish skill's /brackish invite + /brackish connect flows with real Claudes,
 // using the **shipping install path** — no inlined CLAUDE.md, no role briefing. Each side gets
 // `brackish install --local --yes` run in its working dir; Claude Code discovers the project-scope
-// skill from `./.claude/`. (install touches nothing else — no hook, no settings.json edit; sub-
-// Claudes run with --permission-mode bypassPermissions.) Sub-Claudes are
-// spawned with a single slash-command prompt; the skill must do the rest unaided.
+// skill from `./.claude/`. Sub-Claudes are spawned with a single slash-command prompt; the skill
+// must do the rest unaided.
 //
 // Run: `npx tsx harness/validate-skill.ts`
 
@@ -211,8 +210,8 @@ function extractSlashConnect(result: string): string | null {
   return fallback ? `/${fallback[0]}` : null;
 }
 
-/** Run `brackish install --local --yes` in `cwd`. Writes `<cwd>/.claude/skills/brackish/` and
- *  nothing else (no settings.json edit). Mirrors the path a real user takes. */
+/** Run `brackish install --local --yes` in `cwd`. Writes `<cwd>/.claude/skills/brackish/`.
+ *  Mirrors the path a real user takes. */
 function installLocalSkill(brackishBin: string, cwd: string, env: NodeJS.ProcessEnv): void {
   const r = spawnSync(brackishBin, ['install', '--local', '--yes', '--force'], {
     cwd,

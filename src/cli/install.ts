@@ -1,7 +1,5 @@
-// `brackish install` / `uninstall` — copy (or remove) the Claude Code skill. That's all it does:
-// brackish never edits your settings.json (no hooks, no permission rules). Sync is the foreground
-// status/nap loop. To skip Claude's per-command approval prompts, add a `Bash(brackish *)` allow-rule
-// to settings.json yourself.
+// `brackish install` / `uninstall` — copy (or remove) the bundled Claude Code skill directory.
+// That's the whole job. Sync is the foreground status/nap loop.
 
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -18,13 +16,10 @@ import {
 } from '../io/install.js';
 import { errExit, sanitizeIdentity } from './common.js';
 
-const PERMISSION_HINT =
-  'brackish never edits settings.json. To skip Claude\'s per-command approval, add "Bash(brackish *)" to your settings.json allow-list.';
-
 export function register(program: Command): void {
   program
     .command('install')
-    .description('install the brackish skill (copies the skill dir; never edits settings.json)')
+    .description('install the brackish skill')
     .option(
       '--scope <user|project>',
       'user → ~/.claude (global); project → ./.claude (commit-able). Interactive if omitted.',
@@ -77,7 +72,6 @@ export function register(program: Command): void {
             "  let's negotiate the X API                — same-machine; the skill picks it up",
             '',
             `Your identity will default to "${yourHostname}". Override via \`brackish init --identity\` or by setting BRACKISH_IDENTITY.`,
-            `\n${PERMISSION_HINT}`,
             '',
           ].join('\n'),
         );

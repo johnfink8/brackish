@@ -665,9 +665,8 @@ async function main(): Promise<void> {
   // production a Claude doesn't have an inlined plugin teaching in CLAUDE.md; it has the skill
   // installed via `brackish install`. The trial matches that path: we run `brackish install
   // --local --yes --force` in each side's dir below, which drops the project-scope skill into
-  // `.claude/skills/brackish/`. (install touches nothing else — no hook, no settings.json edit;
-  // sub-Claudes run with --permission-mode bypassPermissions, so no allow-rule is needed.) The
-  // sub-Claude discovers the skill the same way a real user's Claude does.
+  // `.claude/skills/brackish/`. The sub-Claude discovers the skill the same way a real user's
+  // Claude does.
   writeFileSync(join(frontendDir, 'CLAUDE.md'), scenario.briefs.frontend);
   writeFileSync(join(backendDir, 'CLAUDE.md'), scenario.briefs.backend);
   writeFileSync(

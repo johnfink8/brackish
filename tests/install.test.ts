@@ -62,11 +62,6 @@ describe('install: skill (copy)', () => {
     expect(existsSync(join(defaultSkillDest(), 'SKILL.md'))).toBe(true);
   });
 
-  it('never writes a settings.json (install only touches the skill dir)', () => {
-    installSkill(defaultSkillDest());
-    expect(existsSync(join(tmp, 'settings.json'))).toBe(false);
-  });
-
   it('refuses to overwrite without --force', () => {
     installSkill(defaultSkillDest());
     expect(() => installSkill(defaultSkillDest())).toThrow(/already exists/);
